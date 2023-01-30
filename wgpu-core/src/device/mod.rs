@@ -725,7 +725,7 @@ impl<A: HalApi> Device<A> {
             },
             usage: desc.usage,
             size: desc.size,
-            initialization_status: BufferInitTracker::new(desc.size),
+            initialization_status: BufferInitTracker::new(0),
             sync_mapped_writes: None,
             map_state: resource::BufferMapState::Idle,
             life_guard: LifeGuard::new(desc.label.borrow_or_default()),
@@ -4005,7 +4005,8 @@ impl<G: GlobalIdentityHandlerFactory> Global<G> {
 
             let mut buffer = device.create_buffer_from_hal(hal_buffer, device_id, desc);
 
-            buffer.initialization_status = BufferInitTracker::new(desc.size);
+            // Assume external buffers are initialized
+            buffer.initialization_status = BufferInitTracker::new(0);
 
             let ref_count = buffer.life_guard.add_ref();
 
