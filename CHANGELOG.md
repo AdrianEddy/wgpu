@@ -121,6 +121,10 @@ This allows using precompiled shaders without manually checking which backend's 
 
 - Fixed a bug where access to matrices with 2 rows would not work in some cases. By @andyleiserson in [#7438](https://github.com/gfx-rs/wgpu/pull/7438).
 
+#### Naga
+
+- [wgsl-in] Allow a trailing comma in `@blend_src(…)` attributes. By @ErichDonGubler in [#8137](https://github.com/gfx-rs/wgpu/pull/8137).
+
 ## v26.0.4 (2025-08-07)
 
 ### Bug Fixes
