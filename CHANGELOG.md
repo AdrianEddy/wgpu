@@ -133,6 +133,10 @@ By @cwfitzgerald in [#8162](https://github.com/gfx-rs/wgpu/pull/8162).
 
 - Fixed a bug where access to matrices with 2 rows would not work in some cases. By @andyleiserson in [#7438](https://github.com/gfx-rs/wgpu/pull/7438).
 
+##### EGL
+
+- Fixed unwrap failed in context creation for some Android devices. By @uael in [#8024](https://github.com/gfx-rs/wgpu/pull/8024).
+
 #### naga
 
 - [wgsl-in] Allow a trailing comma in `@blend_src(…)` attributes. By @ErichDonGubler in [#8137](https://github.com/gfx-rs/wgpu/pull/8137).
