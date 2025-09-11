@@ -64,6 +64,27 @@ Available on `CommandEncoder`, `CommandBuffer`, `RenderPass`, and `ComputePass`.
 
 By @cwfitzgerald in [#8125](https://github.com/gfx-rs/wgpu/pull/8125).
 
+#### Builtin Support for DXGI swapchains on top of of DirectComposition Visuals in DX12
+
+By enabling DirectComposition support, the dx12 backend can now support transparent windows.
+
+This creates a single `IDCompositionVisual` over the entire window that is used by the mf`Surface`. If a user wants to manage the composition tree themselves, they should create their own device and composition, and pass the relevant visual down into `wgpu` via `SurfaceTargetUnsafe::CompositionVisual`.
+
+```rust
+let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+    backend_options: wgpu::BackendOptions {
+        dx12: wgpu::Dx12BackendOptions {
+            presentation_system: wgpu::Dx12SwapchainKind::DxgiFromVisual,
+            ..
+        },
+        ..
+    },
+    ..
+});
+```
+
+By @n1ght-hunter in [#7550](https://github.com/gfx-rs/wgpu/pull/7550).
+
 #### `EXPERIMENTAL_RAY_TRACING_ACCELERATION_STRUCTURE` has been merged into `EXPERIMENTAL_RAY_QUERY`
 
 We have merged the acceleration structure feature into the `RayQuery` feature. This is to help work around an AMD driver bug and reduce the feature complexity of ray tracing. In the future when ray tracing pipelines are implemented, if either feature is enabled, acceleration structures will be available.
