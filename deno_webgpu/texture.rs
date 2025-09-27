@@ -154,6 +154,7 @@ impl GPUTexture {
     self.usage
   }
   #[fast]
+  #[undefined]
   fn destroy(&self) {
     self.instance.texture_destroy(self.id);
   }

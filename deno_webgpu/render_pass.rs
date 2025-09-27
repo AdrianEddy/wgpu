@@ -60,6 +60,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(6)]
+  #[undefined]
   fn set_viewport(
     &self,
     #[webidl] x: f32,
@@ -85,6 +86,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(4)]
+  #[undefined]
   fn set_scissor_rect(
     &self,
     #[webidl(options(enforce_range = true))] x: u32,
@@ -106,6 +108,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn set_blend_constant(&self, #[webidl] color: GPUColor) {
     let err = self
       .instance
@@ -118,6 +121,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn set_stencil_reference(
     &self,
     #[webidl(options(enforce_range = true))] reference: u32,
@@ -133,6 +137,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn begin_occlusion_query(
     &self,
     #[webidl(options(enforce_range = true))] query_index: u32,
@@ -148,6 +153,7 @@ impl GPURenderPassEncoder {
   }
 
   #[fast]
+  #[undefined]
   fn end_occlusion_query(&self) {
     let err = self
       .instance
@@ -157,6 +163,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn execute_bundles(&self, #[webidl] bundles: Vec<Ptr<GPURenderBundle>>) {
     let err = self
       .instance
@@ -172,6 +179,7 @@ impl GPURenderPassEncoder {
   }
 
   #[fast]
+  #[undefined]
   fn end(&self) {
     let err = self
       .instance
@@ -180,6 +188,7 @@ impl GPURenderPassEncoder {
     self.error_handler.push_error(err);
   }
 
+  #[undefined]
   fn push_debug_group(&self, #[webidl] group_label: String) {
     let err = self
       .instance
@@ -193,6 +202,7 @@ impl GPURenderPassEncoder {
   }
 
   #[fast]
+  #[undefined]
   fn pop_debug_group(&self) {
     let err = self
       .instance
@@ -201,6 +211,7 @@ impl GPURenderPassEncoder {
     self.error_handler.push_error(err);
   }
 
+  #[undefined]
   fn insert_debug_marker(&self, #[webidl] marker_label: String) {
     let err = self
       .instance
@@ -213,6 +224,7 @@ impl GPURenderPassEncoder {
     self.error_handler.push_error(err);
   }
 
+  #[undefined]
   fn set_bind_group<'a>(
     &self,
     scope: &mut v8::HandleScope<'a>,
@@ -296,6 +308,7 @@ impl GPURenderPassEncoder {
     Ok(())
   }
 
+  #[undefined]
   fn set_pipeline(
     &self,
     #[webidl] pipeline: Ptr<crate::render_pipeline::GPURenderPipeline>,
@@ -308,6 +321,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(2)]
+  #[undefined]
   fn set_index_buffer(
     &self,
     #[webidl] buffer: Ptr<GPUBuffer>,
@@ -329,6 +343,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(2)]
+  #[undefined]
   fn set_vertex_buffer(
     &self,
     #[webidl(options(enforce_range = true))] slot: u32,
@@ -350,6 +365,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn draw(
     &self,
     #[webidl(options(enforce_range = true))] vertex_count: u32,
@@ -371,6 +387,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(1)]
+  #[undefined]
   fn draw_indexed(
     &self,
     #[webidl(options(enforce_range = true))] index_count: u32,
@@ -394,6 +411,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(2)]
+  #[undefined]
   fn draw_indirect(
     &self,
     #[webidl] indirect_buffer: Ptr<GPUBuffer>,
@@ -411,6 +429,7 @@ impl GPURenderPassEncoder {
   }
 
   #[required(2)]
+  #[undefined]
   fn draw_indexed_indirect(
     &self,
     #[webidl] indirect_buffer: Ptr<GPUBuffer>,
