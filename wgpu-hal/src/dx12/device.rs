@@ -195,10 +195,7 @@ impl super::Device {
         Ok(super::Device {
             raw: raw.clone(),
             present_queue,
-            idler: super::Idler {
-                fence: idle_fence,
-                event: Event::create(false, false)?,
-            },
+            idler: super::Idler { fence: idle_fence },
             features,
             shared: Arc::new(shared),
             rtv_pool: Arc::new(Mutex::new(rtv_pool)),
@@ -256,16 +253,14 @@ impl super::Device {
             return Err(crate::DeviceError::Lost);
         }
 
+        let event = Event::create(false, false)?;
+
         let value = cur_value + 1;
         unsafe { self.present_queue.Signal(&self.idler.fence, value) }
             .into_device_result("Signal")?;
-        let hr = unsafe {
-            self.idler
-                .fence
-                .SetEventOnCompletion(value, self.idler.event.0)
-        };
+        let hr = unsafe { self.idler.fence.SetEventOnCompletion(value, event.0) };
         hr.into_device_result("Set event")?;
-        unsafe { Threading::WaitForSingleObject(self.idler.event.0, Threading::INFINITE) };
+        unsafe { Threading::WaitForSingleObject(event.0, Threading::INFINITE) };
         Ok(())
     }
 
@@ -2252,7 +2247,9 @@ impl crate::Device for super::Device {
             return Ok(true);
         }
 
-        unsafe { fence.raw.SetEventOnCompletion(value, self.idler.event.0) }
+        let event = Event::create(false, false)?;
+
+        unsafe { fence.raw.SetEventOnCompletion(value, event.0) }
             .into_device_result("Set event")?;
 
         let start_time = Instant::now();
@@ -2288,7 +2285,7 @@ impl crate::Device for super::Device {
 
             match unsafe {
                 Threading::WaitForSingleObject(
-                    self.idler.event.0,
+                    event.0,
                     remaining_wait_duration.as_millis().try_into().unwrap(),
                 )
             } {
