@@ -1274,6 +1274,22 @@ impl Device {
             }
         }
 
+        if desc.usage.contains(wgt::TextureUsages::TRANSIENT) {
+            if !desc.usage.contains(wgt::TextureUsages::RENDER_ATTACHMENT) {
+                return Err(CreateTextureError::InvalidUsage(
+                    wgt::TextureUsages::TRANSIENT,
+                ));
+            }
+            let extra_usage =
+                desc.usage - wgt::TextureUsages::TRANSIENT - wgt::TextureUsages::RENDER_ATTACHMENT;
+            if !extra_usage.is_empty() {
+                return Err(CreateTextureError::IncompatibleUsage(
+                    wgt::TextureUsages::TRANSIENT,
+                    extra_usage,
+                ));
+            }
+        }
+
         let format_features = self
             .describe_format_features(desc.format)
             .map_err(|error| CreateTextureError::MissingFeatures(desc.format, error))?;
