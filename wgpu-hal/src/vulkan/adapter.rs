@@ -130,6 +130,11 @@ pub struct PhysicalDeviceFeatures {
 
     /// Features provided by `VK_KHR_fragment_shader_barycentric`
     shader_barycentrics: Option<vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR<'static>>,
+
+    /// Features provided by `VK_KHR_portability_subset`.
+    ///
+    /// Strictly speaking this tells us what features we *don't* have compared to core.
+    portability_subset: Option<vk::PhysicalDevicePortabilitySubsetFeaturesKHR<'static>>,
 }
 
 impl PhysicalDeviceFeatures {
@@ -204,6 +209,9 @@ impl PhysicalDeviceFeatures {
             info = info.push_next(feature);
         }
         if let Some(ref mut feature) = self.shader_barycentrics {
+            info = info.push_next(feature);
+        }
+        if let Some(ref mut feature) = self.portability_subset {
             info = info.push_next(feature);
         }
         info
@@ -547,6 +555,17 @@ impl PhysicalDeviceFeatures {
                 Some(
                     vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR::default()
                         .fragment_shader_barycentric(needed),
+                )
+            } else {
+                None
+            },
+            portability_subset: if enabled_extensions.contains(&khr::portability_subset::NAME) {
+                let multisample_array_needed =
+                    requested_features.intersects(wgt::Features::MULTISAMPLE_ARRAY);
+
+                Some(
+                    vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default()
+                        .multisample_array_image(multisample_array_needed),
                 )
             } else {
                 None
@@ -927,6 +946,15 @@ impl PhysicalDeviceFeatures {
                 mesh_shader.multiview_mesh_shader != 0,
             );
         }
+
+        // Not supported by default by `VK_KHR_portability_subset`, which we use on apple platforms.
+        features.set(
+            F::MULTISAMPLE_ARRAY,
+            self.portability_subset
+                .map(|p| p.multisample_array_image == vk::TRUE)
+                .unwrap_or(true),
+        );
+
         (features, dl_flags)
     }
 }
@@ -1687,6 +1715,13 @@ impl super::InstanceShared {
                 let next = features
                     .shader_barycentrics
                     .insert(vk::PhysicalDeviceFragmentShaderBarycentricFeaturesKHR::default());
+                features2 = features2.push_next(next);
+            }
+
+            if capabilities.supports_extension(khr::portability_subset::NAME) {
+                let next = features
+                    .portability_subset
+                    .insert(vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default());
                 features2 = features2.push_next(next);
             }
 
