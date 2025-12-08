@@ -2241,6 +2241,18 @@ pub(super) fn encode_render_pass(
                     .map_pass_err(pass_scope),
             )?;
         }
+        if state.active_occlusion_query.is_some() {
+            Err(RenderPassErrorInner::QueryUse(QueryUseError::MissingEnd {
+                query_type: super::SimplifiedQueryType::Occlusion,
+            })
+            .map_pass_err(pass_scope))?;
+        }
+        if state.active_pipeline_statistics_query.is_some() {
+            Err(RenderPassErrorInner::QueryUse(QueryUseError::MissingEnd {
+                query_type: super::SimplifiedQueryType::PipelineStatistics,
+            })
+            .map_pass_err(pass_scope))?;
+        }
 
         state
             .info
