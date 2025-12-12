@@ -250,6 +250,9 @@ By @cwfitzgerald in [#8609](https://github.com/gfx-rs/wgpu/pull/8609).
 
 - Fixed a validation error regarding atomic memory semantics. By @atlv24 in [#8391](https://github.com/gfx-rs/wgpu/pull/8391).
 
+#### Metal
+- Fixed a variety of feature detection related bugs. By @inner-daemons in [#8439](https://github.com/gfx-rs/wgpu/pull/8439).
+
 #### WebGPU
 
 - Fixed a bug where the texture aspect was not passed through when calling `copy_texture_to_buffer` in WebGPU, causing the copy to fail for depth/stencil textures. By @Tim-Evans-Seequent in [#8445](https://github.com/gfx-rs/wgpu/pull/8445).

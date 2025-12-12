@@ -205,7 +205,6 @@ bitflags!(
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
 struct PrivateCapabilities {
-    family_check: bool,
     msl_version: MTLLanguageVersion,
     fragment_rw_storage: bool,
     read_write_texture_tier: MTLReadWriteTextureTier,
@@ -213,8 +212,7 @@ struct PrivateCapabilities {
     msaa_apple3: bool,
     msaa_apple7: bool,
     resource_heaps: bool,
-    argument_buffers: MTLArgumentBuffersTier,
-    shared_textures: bool,
+    argument_buffers: Option<MTLArgumentBuffersTier>,
     mutable_comparison_samplers: bool,
     sampler_clamp_to_border: bool,
     indirect_draw_dispatch: bool,
@@ -267,6 +265,7 @@ struct PrivateCapabilities {
     format_rgba32float_color_write: bool,
     format_rgba32float_all: bool,
     format_depth16unorm: bool,
+    format_depth16unorm_filter: bool,
     format_depth32float_filter: bool,
     format_depth32float_none: bool,
     format_bgr10a2_all: bool,
@@ -305,6 +304,7 @@ struct PrivateCapabilities {
     timestamp_query_support: TimestampQuerySupport,
     supports_simd_scoped_operations: bool,
     int64: bool,
+    int64_atomics_min_max: bool,
     int64_atomics: bool,
     float_atomics: bool,
     supports_shared_event: bool,
@@ -1054,3 +1054,11 @@ impl crate::DynPipelineCache for PipelineCache {}
 pub struct AccelerationStructure;
 
 impl crate::DynAccelerationStructure for AccelerationStructure {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsType {
+    Macos,
+    Ios,
+    Tvos,
+    VisionOs,
+}
