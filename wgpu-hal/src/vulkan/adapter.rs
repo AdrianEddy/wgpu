@@ -1264,19 +1264,40 @@ impl PhysicalDeviceProperties {
             .min(limits.max_compute_work_group_count[1])
             .min(limits.max_compute_work_group_count[2]);
         let (
-            max_task_workgroup_total_count,
-            max_task_workgroups_per_dimension,
-            max_mesh_multiview_view_count,
-            max_mesh_output_layers,
-        ) = match self.mesh_shader {
-            Some(m) => (
-                m.max_task_work_group_total_count,
-                m.max_task_work_group_count.into_iter().min().unwrap(),
-                m.max_mesh_multiview_view_count,
-                m.max_mesh_output_layers,
-            ),
-            None => (0, 0, 0, 0),
-        };
+            mut max_task_mesh_workgroup_total_count,
+            mut max_task_mesh_workgroups_per_dimension,
+            mut max_task_invocations_per_workgroup,
+            mut max_task_invocations_per_dimension,
+            mut max_mesh_invocations_per_workgroup,
+            mut max_mesh_invocations_per_dimension,
+            mut max_task_payload_size,
+            mut max_mesh_output_vertices,
+            mut max_mesh_output_primitives,
+            mut max_mesh_output_layers,
+            mut max_mesh_multiview_view_count,
+        ) = Default::default();
+        if let Some(m) = self.mesh_shader {
+            max_task_mesh_workgroup_total_count = m
+                .max_task_work_group_total_count
+                .min(m.max_mesh_work_group_total_count);
+            max_task_mesh_workgroups_per_dimension = m
+                .max_task_work_group_count
+                .into_iter()
+                .chain(m.max_mesh_work_group_count)
+                .min()
+                .unwrap();
+            max_task_invocations_per_workgroup = m.max_task_work_group_invocations;
+            max_task_invocations_per_dimension =
+                m.max_task_work_group_size.into_iter().min().unwrap();
+            max_mesh_invocations_per_workgroup = m.max_mesh_work_group_invocations;
+            max_mesh_invocations_per_dimension =
+                m.max_mesh_work_group_size.into_iter().min().unwrap();
+            max_task_payload_size = m.max_task_payload_size;
+            max_mesh_output_vertices = m.max_mesh_output_vertices;
+            max_mesh_output_primitives = m.max_mesh_output_primitives;
+            max_mesh_output_layers = m.max_mesh_output_layers;
+            max_mesh_multiview_view_count = m.max_mesh_multiview_view_count;
+        }
 
         // Prevent very large buffers on mesa and most android devices, and in all cases
         // don't risk confusing JS by exceeding the range of a double.
@@ -1377,10 +1398,19 @@ impl PhysicalDeviceProperties {
             max_buffer_size,
             max_non_sampler_bindings: u32::MAX,
 
-            max_task_workgroup_total_count,
-            max_task_workgroups_per_dimension,
-            max_mesh_multiview_view_count,
+            max_task_mesh_workgroup_total_count,
+            max_task_mesh_workgroups_per_dimension,
+            max_task_invocations_per_workgroup,
+            max_task_invocations_per_dimension,
+
+            max_mesh_invocations_per_workgroup,
+            max_mesh_invocations_per_dimension,
+
+            max_task_payload_size,
+            max_mesh_output_vertices,
+            max_mesh_output_primitives,
             max_mesh_output_layers,
+            max_mesh_multiview_view_count,
 
             max_blas_primitive_count,
             max_blas_geometry_count,
