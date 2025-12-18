@@ -644,8 +644,8 @@ impl Limits {
             max_task_mesh_workgroup_total_count: 1024,
             // This is a DirectX limitation
             max_task_mesh_workgroups_per_dimension: 256,
-            // Copied from compute limits, this is low enough that it should be sensible.
-            max_task_invocations_per_workgroup: 256,
+            // Nvidia limit on vulkan
+            max_task_invocations_per_workgroup: 128,
             max_task_invocations_per_dimension: 64,
 
             // DX12 limitation, revisit for vulkan
