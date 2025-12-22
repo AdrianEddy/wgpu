@@ -41,6 +41,10 @@ Bottom level categories:
 
 ## Unreleased
 
+### New Features
+
+- Added support for cooperative load/store operations in shaders. Currently only WGSL on the input and SPIR-V, METAL, and WGSL on the output are supported. By @kvark in [#8251](https://github.com/gfx-rs/wgpu/issues/8251).
+
 ## v28.0.0 (2025-12-17)
 
 ### Major Changes
