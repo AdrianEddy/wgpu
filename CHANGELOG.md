@@ -57,6 +57,10 @@ Bottom level categories:
 - `DisplayHandle` should now be passed to `InstanceDescriptor` for correct EGL initialization on Wayland. By @MarijnS95 in [#8012](https://github.com/gfx-rs/wgpu/pull/8012)
   Note that the existing workaround to create surfaces before the adapter is no longer valid.
 
+#### naga
+
+- Reject zero-value construction of a runtime-sized array with a validation error. Previously it would crash in the HLSL backend. By @mooori in [#8741](https://github.com/gfx-rs/wgpu/pull/8741).
+
 ### Documentation
 
 #### General
