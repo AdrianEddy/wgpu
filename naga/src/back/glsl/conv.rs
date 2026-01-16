@@ -160,6 +160,7 @@ pub(in crate::back::glsl) const fn glsl_interpolation(
         I::Perspective => "smooth",
         I::Linear => "noperspective",
         I::Flat => "flat",
+        I::PerVertex => unreachable!(),
     }
 }
 

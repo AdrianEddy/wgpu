@@ -211,6 +211,7 @@ impl ToWgsl for crate::Interpolation {
             crate::Interpolation::Perspective => "perspective",
             crate::Interpolation::Linear => "linear",
             crate::Interpolation::Flat => "flat",
+            crate::Interpolation::PerVertex => "per_vertex",
         }
     }
 }

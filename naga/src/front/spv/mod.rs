@@ -96,6 +96,7 @@ pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "SPV_EXT_descriptor_indexing",
     "SPV_EXT_shader_atomic_float_add",
     "SPV_KHR_16bit_storage",
+    "SPV_KHR_fragment_shader_barycentric",
 ];
 pub const SUPPORTED_EXT_SETS: &[&str] = &["GLSL.std.450"];
 
@@ -777,6 +778,9 @@ impl<I: Iterator<Item = u32>> Frontend<I> {
             }
             spirv::Decoration::Flat => {
                 dec.interpolation = Some(crate::Interpolation::Flat);
+            }
+            spirv::Decoration::PerVertexKHR => {
+                dec.interpolation = Some(crate::Interpolation::PerVertex);
             }
             spirv::Decoration::Centroid => {
                 dec.sampling = Some(crate::Sampling::Centroid);
