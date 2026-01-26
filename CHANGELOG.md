@@ -94,6 +94,10 @@ Bottom level categories:
 
 - Prevent UB from incorrectly using ray queries on HLSL. By @Vecvec in [#8763](https://github.com/gfx-rs/wgpu/pull/8763).
 
+### General
+
+- Tracing now uses the `.metal` extension for metal source files, instead of `.msl`. By @inner-daemons in #8880.
+
 ### deno\_webgpu
 
 - Expose the `GPU.wgslLanguageFeatures` property. By @andyleiserson in [#8884](https://github.com/gfx-rs/wgpu/pull/8884).
