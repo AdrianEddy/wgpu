@@ -202,6 +202,8 @@ pub fn run_cts(
             cmd = cmd.args([
                 "-c",
                 "remote.origin.fetch=+refs/heads/gh-pages:refs/remotes/origin/gh-pages",
+                "-c",
+                "advice.detachedHead=false",
             ]);
         } else {
             log::info!("Cloning full checkout of CTS with revision {cts_revision}");
