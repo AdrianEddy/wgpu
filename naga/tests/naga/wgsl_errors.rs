@@ -3934,7 +3934,7 @@ fn subgroup_capability() {
             &format!("
                 {stage_attr}
                 fn main() {{
-                    subgroupBallot();
+                    _ = subgroupBallot();
                 }}
             "),
             Err(naga::valid::ValidationError::EntryPoint {
@@ -3959,7 +3959,7 @@ fn subgroup_capability() {
                 "
                 {stage_attr}
                 fn main() {{
-                    subgroupBallot();
+                    _ = subgroupBallot();
                 }}
             "
             ),
@@ -3976,7 +3976,7 @@ fn subgroup_capability() {
             "
                 @vertex
                 fn main() -> @builtin(position) vec4<f32> {{
-                    subgroupBallot();
+                    _ = subgroupBallot();
                     return vec4();
                 }}
             ":
@@ -3988,7 +3988,7 @@ fn subgroup_capability() {
         "
             @vertex
             fn main() -> @builtin(position) vec4<f32> {{
-                subgroupBallot();
+                _ = subgroupBallot();
                 return vec4();
             }}
         ",
@@ -4085,7 +4085,7 @@ fn subgroup_invalid_broadcast() {
     check_validation! {
         r#"
             fn main(id: u32) {
-                subgroupBroadcast(123, id);
+                _ = subgroupBroadcast(123, id);
             }
         "#:
         Err(naga::valid::ValidationError::Function {
@@ -4099,7 +4099,7 @@ fn subgroup_invalid_broadcast() {
     check_validation! {
         r#"
             fn main(id: u32) {
-                quadBroadcast(123, id);
+                _ = quadBroadcast(123, id);
             }
         "#:
         Err(naga::valid::ValidationError::Function {
