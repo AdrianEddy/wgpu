@@ -62,6 +62,7 @@ Bottom level categories:
 
 #### naga
 
+- Initial wgsl-in ray tracing pipelines. By @Vecvec in [#8570](https://github.com/gfx-rs/wgpu/pull/8570).
 - Allow parsing shaders which make use of `SPV_KHR_non_semantic_info` for debug info. Also removes `naga::front::spv::SUPPORTED_EXT_SETS`. By @inner-daemons in #8827.
 
 ### Changes

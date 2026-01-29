@@ -1273,6 +1273,7 @@ fn unexpected_task_payload() {
         function: ir::Function::default(),
         mesh_info: None,
         task_payload: Some(payload_handle), // invalid for compute stage
+        incoming_ray_payload: None,
     };
     module.entry_points.push(entry_point);
 

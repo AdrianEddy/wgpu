@@ -13,6 +13,7 @@ pub(crate) struct EnableExtensions {
     wgpu_mesh_shader: bool,
     wgpu_ray_query: bool,
     wgpu_ray_query_vertex_return: bool,
+    wgpu_ray_tracing_pipelines: bool,
     dual_source_blending: bool,
     /// Whether `enable f16;` was written earlier in the shader module.
     f16: bool,
@@ -26,6 +27,7 @@ impl EnableExtensions {
             wgpu_mesh_shader: false,
             wgpu_ray_query: false,
             wgpu_ray_query_vertex_return: false,
+            wgpu_ray_tracing_pipelines: false,
             f16: false,
             dual_source_blending: false,
             clip_distances: false,
@@ -40,6 +42,9 @@ impl EnableExtensions {
             ImplementedEnableExtension::WgpuRayQuery => &mut self.wgpu_ray_query,
             ImplementedEnableExtension::WgpuRayQueryVertexReturn => {
                 &mut self.wgpu_ray_query_vertex_return
+            }
+            ImplementedEnableExtension::WgpuRayTracingPipeline => {
+                &mut self.wgpu_ray_tracing_pipelines
             }
             ImplementedEnableExtension::DualSourceBlending => &mut self.dual_source_blending,
             ImplementedEnableExtension::F16 => &mut self.f16,
@@ -57,6 +62,7 @@ impl EnableExtensions {
             ImplementedEnableExtension::WgpuRayQueryVertexReturn => {
                 self.wgpu_ray_query_vertex_return
             }
+            ImplementedEnableExtension::WgpuRayTracingPipeline => self.wgpu_ray_tracing_pipelines,
             ImplementedEnableExtension::DualSourceBlending => self.dual_source_blending,
             ImplementedEnableExtension::F16 => self.f16,
             ImplementedEnableExtension::ClipDistances => self.clip_distances,
@@ -93,6 +99,7 @@ impl EnableExtension {
     const MESH_SHADER: &'static str = "wgpu_mesh_shader";
     const RAY_QUERY: &'static str = "wgpu_ray_query";
     const RAY_QUERY_VERTEX_RETURN: &'static str = "wgpu_ray_query_vertex_return";
+    const RAY_TRACING_PIPELINE: &'static str = "wgpu_ray_tracing_pipeline";
     const COOPERATIVE_MATRIX: &'static str = "wgpu_cooperative_matrix";
     const SUBGROUPS: &'static str = "subgroups";
     const PRIMITIVE_INDEX: &'static str = "primitive_index";
@@ -109,6 +116,9 @@ impl EnableExtension {
             Self::RAY_QUERY => Self::Implemented(ImplementedEnableExtension::WgpuRayQuery),
             Self::RAY_QUERY_VERTEX_RETURN => {
                 Self::Implemented(ImplementedEnableExtension::WgpuRayQueryVertexReturn)
+            }
+            Self::RAY_TRACING_PIPELINE => {
+                Self::Implemented(ImplementedEnableExtension::WgpuRayTracingPipeline)
             }
             Self::COOPERATIVE_MATRIX => {
                 Self::Implemented(ImplementedEnableExtension::WgpuCooperativeMatrix)
@@ -134,6 +144,7 @@ impl EnableExtension {
                 ImplementedEnableExtension::DualSourceBlending => Self::DUAL_SOURCE_BLENDING,
                 ImplementedEnableExtension::F16 => Self::F16,
                 ImplementedEnableExtension::ClipDistances => Self::CLIP_DISTANCES,
+                ImplementedEnableExtension::WgpuRayTracingPipeline => Self::RAY_TRACING_PIPELINE,
             },
             Self::Unimplemented(kind) => match kind {
                 UnimplementedEnableExtension::Subgroups => Self::SUBGROUPS,
@@ -170,6 +181,8 @@ pub enum ImplementedEnableExtension {
     WgpuRayQuery,
     /// Enables the `wgpu_ray_query_vertex_return` extension, native only.
     WgpuRayQueryVertexReturn,
+    /// Enables the `wgpu_ray_tracing_pipeline` extension, native only.
+    WgpuRayTracingPipeline,
     /// Enables the `wgpu_cooperative_matrix` extension, native only.
     WgpuCooperativeMatrix,
 }

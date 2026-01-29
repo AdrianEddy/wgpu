@@ -434,6 +434,7 @@ pub(crate) enum Error<'a> {
         description: &'static str,
     },
     UnexpectedExprForTypeExpression(Span),
+    MissingIncomingPayload(Span),
 }
 
 impl From<ConflictingDiagnosticRuleError> for Error<'_> {
@@ -1473,7 +1474,15 @@ impl<'a> Error<'a> {
                 message: "unexpected expression".to_string(),
                 labels: vec![(expr_span, "needs to be an identifier resolving to a type declaration (alias or struct) or predeclared type(-generator)".into())],
                 notes: vec![],
-            }
+            },
+            Error::MissingIncomingPayload(span) => ParseError {
+                message: "incoming payload is missing on a `closest_hit`, `any_hit` or `miss` shader entry point".to_string(),
+                labels: vec![(
+                    span,
+                    "must be paired with a `@incoming_payload` attribute".into(),
+                )],
+                notes: vec![],
+            },
         }
     }
 }

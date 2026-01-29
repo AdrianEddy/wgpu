@@ -1454,6 +1454,12 @@ impl Interface {
                                 naga::ShaderStage::Compute
                                 | naga::ShaderStage::Task
                                 | naga::ShaderStage::Mesh => (false, false),
+                                naga::ShaderStage::RayGeneration
+                                | naga::ShaderStage::AnyHit
+                                | naga::ShaderStage::ClosestHit
+                                | naga::ShaderStage::Miss => {
+                                    unreachable!()
+                                }
                             };
                             if !compatible {
                                 return Err(InputError::WrongType(provided.ty));

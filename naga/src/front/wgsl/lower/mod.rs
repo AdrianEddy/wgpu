@@ -1701,6 +1701,21 @@ impl<'source, 'temp> Lowerer<'source, 'temp> {
                 None
             };
 
+            let incoming_ray_payload =
+                if let Some((var_name, var_span)) = entry.ray_incoming_payload {
+                    Some(match ctx.globals.get(var_name) {
+                        Some(&LoweredGlobalDecl::Var(handle)) => handle,
+                        Some(_) => {
+                            return Err(Box::new(Error::ExpectedGlobalVariable {
+                                name_span: var_span,
+                            }))
+                        }
+                        None => return Err(Box::new(Error::UnknownIdent(var_span, var_name))),
+                    })
+                } else {
+                    None
+                };
+
             ctx.module.entry_points.push(ir::EntryPoint {
                 name: f.name.name.to_string(),
                 stage: entry.stage,
@@ -1710,6 +1725,7 @@ impl<'source, 'temp> Lowerer<'source, 'temp> {
                 function,
                 mesh_info,
                 task_payload,
+                incoming_ray_payload,
             });
             Ok(LoweredGlobalDecl::EntryPoint(
                 ctx.module.entry_points.len() - 1,
@@ -3686,6 +3702,28 @@ impl<'source, 'temp> Lowerer<'source, 'temp> {
                     args.finish()?;
 
                     ir::Expression::CooperativeMultiplyAdd { a, b, c }
+                }
+                "traceRay" => {
+                    let mut args = ctx.prepare_args(arguments, 3, function_span);
+                    let acceleration_structure = self.expression(args.next()?, ctx)?;
+                    let descriptor = self.expression(args.next()?, ctx)?;
+                    let payload = self.expression(args.next()?, ctx)?;
+                    args.finish()?;
+
+                    let _ = ctx.module.generate_ray_desc_type();
+                    let fun = ir::RayPipelineFunction::TraceRay {
+                        acceleration_structure,
+                        descriptor,
+                        payload,
+                    };
+
+                    let rctx = ctx.runtime_expression_ctx(function_span)?;
+                    rctx.block
+                        .extend(rctx.emitter.finish(&rctx.function.expressions));
+                    rctx.emitter.start(&rctx.function.expressions);
+                    rctx.block
+                        .push(ir::Statement::RayPipelineFunction(fun), function_span);
+                    return Ok(None);
                 }
                 _ => return Err(Box::new(Error::UnknownIdent(function_span, function_name))),
             }
