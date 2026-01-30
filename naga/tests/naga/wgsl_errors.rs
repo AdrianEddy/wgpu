@@ -13,6 +13,7 @@
 
 use naga::{
     compact::KeepUnused,
+    front::wgsl::{EnableExtension, ImplementedEnableExtension},
     valid::{self, Capabilities},
 };
 
@@ -4897,7 +4898,7 @@ fn check_ray_tracing_pipeline_payload_disallowed() {
                 "enable wgpu_ray_tracing_pipeline;
             @group(0) @binding(0) var acc_struct: acceleration_structure;
             var<ray_payload> payload: u32;
-            
+
             {stage} fn main() {output} {{_ = payload; {stmt}}}"
             ),
             Err(naga::valid::ValidationError::EntryPoint {
@@ -4905,6 +4906,48 @@ fn check_ray_tracing_pipeline_payload_disallowed() {
                 ..
             },),
             Capabilities::RAY_TRACING_PIPELINE
+        );
+    }
+}
+
+#[track_caller]
+fn check_with_capabilities(input: &str, snapshot: &str, capabilities: Capabilities) {
+    let mut options = naga::front::wgsl::Options::new();
+    options.capabilities = capabilities;
+    let mut frontend = naga::front::wgsl::Frontend::new_with_options(options);
+    let output = match frontend.parse(input) {
+        Ok(_) => panic!("expected parser error, but parsing succeeded!"),
+        Err(err) => err.emit_to_string(input),
+    };
+    if output != snapshot {
+        for diff in diff::lines(snapshot, &output) {
+            match diff {
+                diff::Result::Left(l) => println!("-{l}"),
+                diff::Result::Both(l, _) => println!(" {l}"),
+                diff::Result::Right(r) => println!("+{r}"),
+            }
+        }
+        panic!("Error snapshot failed");
+    }
+}
+
+#[test]
+fn enable_without_capability() {
+    for extension in ImplementedEnableExtension::all() {
+        let ident = EnableExtension::from(*extension).to_ident();
+        let carets = "^".repeat(ident.len());
+        check_with_capabilities(
+            &format!("enable {ident};"),
+            &format!(
+                "error: the `{ident}` extension is not supported in the current environment
+  ┌─ wgsl:1:8
+  │
+1 │ enable {ident};
+  │        {carets} unsupported enable-extension
+
+"
+            ),
+            !extension.capability(),
         );
     }
 }
