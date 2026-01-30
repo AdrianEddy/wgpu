@@ -60,6 +60,7 @@ Bottom level categories:
         - `front::wgsl::Frontend::set_options`
         - `ir::Block::is_empty`
         - `ir::Block::len`
+- Changed passthrough shaders to not require an entry point parameter, so that the same shader module may be used in multiple entry points. Also added support for metallib passthrough. By @inner-daemons in #8886.
 
 #### naga
 
