@@ -170,6 +170,7 @@ depth_stencil: Some(wgpu::DepthStencilState::stencil(
 - BREAKING: End offsets in trace and `player` commands are now represented using `offset` + `size` instead. By @ErichDonGubler in [9073](https://github.com/gfx-rs/wgpu/pull/9073).
 - Validate some uncaught cases where buffer transfer operations could overflow when computing an end offset. By @ErichDonGubler in [9073](https://github.com/gfx-rs/wgpu/pull/9073).
 - Added internal labels to validation GPU objects and timestamp normalization code to improve clarity in graphics debuggers. By @szostid in [9094](https://github.com/gfx-rs/wgpu/pull/9094)
+- Fix multi-planar texture copying. By @noituri [#9069](https://github.com/gfx-rs/wgpu/pull/9069)
 
 #### naga
 
