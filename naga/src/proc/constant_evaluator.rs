@@ -2570,6 +2570,12 @@ impl<'a> ConstantEvaluator<'a> {
 
         let expr = match (&self.expressions[left], &self.expressions[right]) {
             (&Expression::Literal(left_value), &Expression::Literal(right_value)) => {
+                if !matches!(op, BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight)
+                    && core::mem::discriminant(&left_value) != core::mem::discriminant(&right_value)
+                {
+                    return Err(ConstantEvaluatorError::InvalidBinaryOpArgs);
+                }
+
                 let literal = match op {
                     BinaryOperator::Equal => Literal::Bool(left_value == right_value),
                     BinaryOperator::NotEqual => Literal::Bool(left_value != right_value),
@@ -2726,36 +2732,32 @@ impl<'a> ConstantEvaluator<'a> {
                     ty,
                 },
                 &Expression::Literal(_),
-            ) => match op {
-                BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
+            ) => {
+                if !is_allowed_compose_literal_op(&self.types[ty].inner, op) {
                     return Err(ConstantEvaluatorError::InvalidBinaryOpArgs);
                 }
-                _ => {
-                    let mut components = src_components.clone();
-                    for component in &mut components {
-                        *component = self.binary_op(op, *component, right, span)?;
-                    }
-                    Expression::Compose { ty, components }
+                let mut components = src_components.clone();
+                for component in &mut components {
+                    *component = self.binary_op(op, *component, right, span)?;
                 }
-            },
+                Expression::Compose { ty, components }
+            }
             (
                 &Expression::Literal(_),
                 &Expression::Compose {
                     components: ref src_components,
                     ty,
                 },
-            ) => match op {
-                BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
+            ) => {
+                if !is_allowed_compose_literal_op(&self.types[ty].inner, op) {
                     return Err(ConstantEvaluatorError::InvalidBinaryOpArgs);
                 }
-                _ => {
-                    let mut components = src_components.clone();
-                    for component in &mut components {
-                        *component = self.binary_op(op, left, *component, span)?;
-                    }
-                    Expression::Compose { ty, components }
+                let mut components = src_components.clone();
+                for component in &mut components {
+                    *component = self.binary_op(op, left, *component, span)?;
                 }
-            },
+                Expression::Compose { ty, components }
+            }
             (
                 &Expression::Compose {
                     components: ref left_components,
@@ -2804,7 +2806,25 @@ impl<'a> ConstantEvaluator<'a> {
             _ => return Err(ConstantEvaluatorError::InvalidBinaryOpArgs),
         };
 
-        self.register_evaluated_expr(expr, span)
+        return self.register_evaluated_expr(expr, span);
+
+        fn is_allowed_compose_literal_op(compose_ty: &TypeInner, op: BinaryOperator) -> bool {
+            let is_numeric_vec = matches!(
+                compose_ty, TypeInner::Vector { scalar, .. }
+                if scalar.kind != ScalarKind::Bool
+            );
+            let is_allowed_vec_scalar_op = matches!(
+                op,
+                BinaryOperator::Add
+                    | BinaryOperator::Subtract
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide
+                    | BinaryOperator::Modulo
+            );
+            let is_mat = matches!(compose_ty, TypeInner::Matrix { .. });
+            let is_allowed_mat_scalar_op = matches!(op, BinaryOperator::Multiply);
+            is_numeric_vec && is_allowed_vec_scalar_op || is_mat && is_allowed_mat_scalar_op
+        }
     }
 
     fn binary_op_vector(
