@@ -1091,6 +1091,10 @@ impl super::PrivateCapabilities {
             F::SHADER_FLOAT32_ATOMIC,
             self.float_atomics && self.msl_version >= MTLLanguageVersion::Version3_0,
         );
+        features.set(
+            F::MEMORY_DECORATION_COHERENT,
+            self.msl_version >= MTLLanguageVersion::Version3_2,
+        );
 
         features.set(
             F::ADDRESS_MODE_CLAMP_TO_BORDER,
