@@ -4840,6 +4840,7 @@ dependencies = [
  "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal",
+ "wgpu-naga-bridge",
  "wgpu-types",
 ]
 
@@ -4981,6 +4982,7 @@ dependencies = [
  "wasm-bindgen",
  "wayland-sys",
  "web-sys",
+ "wgpu-naga-bridge",
  "wgpu-types",
  "windows",
  "windows-core",
@@ -5009,6 +5011,14 @@ dependencies = [
  "heck",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "wgpu-naga-bridge"
+version = "28.0.0"
+dependencies = [
+ "naga",
+ "wgpu-types",
 ]
 
 [[package]]
