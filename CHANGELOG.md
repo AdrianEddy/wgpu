@@ -257,6 +257,10 @@ By @kpreid in [#9042](https://github.com/gfx-rs/wgpu/pull/9042).
   Note that the existing workaround to create surfaces before the adapter is no longer valid.
 - Changing shader constants now correctly recompiles the shader. By @DerSchmale in [#8291](https://github.com/gfx-rs/wgpu/pull/8291).
 
+#### Vulkan
+
+- Remove incorrect ordered texture uses. By @NiklasEi in [#8924](https://github.com/gfx-rs/wgpu/pull/8924).
+
 ### Documentation
 
 #### General
@@ -274,9 +278,13 @@ By @kpreid in [#9042](https://github.com/gfx-rs/wgpu/pull/9042).
 - Naga and `wgpu` now reject shaders with an `enable` directive for functionality that is not available, even if that functionality is not used by the shader. By @andyleiserson in [#8913](https://github.com/gfx-rs/wgpu/pull/8913).
 - Prevent UB from incorrectly using ray queries on HLSL. By @Vecvec in [#8763](https://github.com/gfx-rs/wgpu/pull/8763).
 
-### deno_webgpu
+#### deno_webgpu
 
 - Expose the `GPU.wgslLanguageFeatures` property. By @andyleiserson in [#8884](https://github.com/gfx-rs/wgpu/pull/8884).
+
+#### Hal
+
+- Make ordered texture and buffer uses hal specific. By @NiklasEi in [#8924](https://github.com/gfx-rs/wgpu/pull/8924).
 
 ## v28.0.1 (2025-03-01)
 
