@@ -52,6 +52,10 @@ Bottom level categories:
 
 - Unconditionally enable `Features::CLIP_DISTANCES`. By @ErichDonGubler in [#9270](https://github.com/gfx-rs/wgpu/pull/9270).
 
+#### DX12
+
+- Added support for mesh shaders in naga's HLSL writer, completing DX12 support for mesh shaders. By @inner-daemons in #8752.
+
 ### Changes
 
 #### General
