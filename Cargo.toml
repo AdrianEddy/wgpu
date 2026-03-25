@@ -136,7 +136,6 @@ hashbrown = { version = "0.16", default-features = false, features = [
     "inline-more",
 ] }
 heck = "0.5"
-hexf-parse = "0.2"
 image = { version = "0.25", default-features = false, features = ["png"] }
 indexmap = { version = "2.11.4", default-features = false }
 indicatif = "0.18"

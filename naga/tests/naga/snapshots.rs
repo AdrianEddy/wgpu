@@ -432,7 +432,10 @@ fn convert_snapshots_wgsl() {
             Ok(mut module) => check_targets(&input, &mut module, Some(&source)),
             Err(e) => panic!(
                 "{}",
-                e.emit_to_string_with_path(&source, input.input_path(DIR_IN))
+                e.emit_to_string_with_path(
+                    &source,
+                    &input.input_path(DIR_IN).display().to_string()
+                )
             ),
         }
     }
