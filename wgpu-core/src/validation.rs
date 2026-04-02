@@ -278,6 +278,7 @@ struct SpecializationConstant {
 struct EntryPointMeshInfo {
     max_vertices: u32,
     max_primitives: u32,
+    primitive_topology: wgt::PrimitiveTopology,
 }
 
 #[derive(Debug, Default)]
@@ -496,12 +497,16 @@ pub enum StageError {
     InvalidPrimitiveIndex,
     #[error("If a mesh shader writes to primitive index, it must be read by the fragment shader.")]
     MissingPrimitiveIndex,
-    #[error("DrawId cannot be used in the same pipeline as a task shader")]
+    #[error("DrawId cannot be used in a mesh shader in a pipeline with a task shader")]
     DrawIdError,
     #[error("Pipeline uses dual-source blending, but the shader does not support it")]
     InvalidDualSourceBlending,
     #[error("Fragment shader writes depth, but pipeline does not have a depth attachment")]
     MissingFragDepthAttachment,
+    #[error("Per vertex fragment inputs can only be used in triangle primitive pipelines")]
+    PerVertexNotTriangles,
+    #[error("Mesh shader pipelines must have primitive topology of TriangleList, LineList or PointList, and this must match with what the mesh shader declares.")]
+    MeshTopologyMismatch,
 }
 
 impl WebGpuError for StageError {
@@ -536,7 +541,9 @@ impl WebGpuError for StageError {
             | Self::MissingPrimitiveIndex
             | Self::DrawIdError
             | Self::InvalidDualSourceBlending
-            | Self::MissingFragDepthAttachment => ErrorType::Validation,
+            | Self::MissingFragDepthAttachment
+            | Self::PerVertexNotTriangles
+            | Self::MeshTopologyMismatch => ErrorType::Validation,
         }
     }
 }
@@ -1266,6 +1273,11 @@ impl Interface {
                 ep.mesh_info = Some(EntryPointMeshInfo {
                     max_vertices: mesh_info.max_vertices,
                     max_primitives: mesh_info.max_primitives,
+                    primitive_topology: match mesh_info.topology {
+                        naga::MeshOutputTopology::Triangles => wgt::PrimitiveTopology::TriangleList,
+                        naga::MeshOutputTopology::Lines => wgt::PrimitiveTopology::LineList,
+                        naga::MeshOutputTopology::Points => wgt::PrimitiveTopology::PointList,
+                    },
                 });
                 Self::populate(
                     &mut ep.outputs,
@@ -1321,6 +1333,7 @@ impl Interface {
         entry_point_name: &str,
         shader_stage: ShaderStageForValidation,
         inputs: StageIo,
+        primitive_topology: Option<wgt::PrimitiveTopology>,
     ) -> Result<StageIo, StageError> {
         // Since a shader module can have multiple entry points with the same name,
         // we need to look for one with the right execution model.
@@ -1500,6 +1513,7 @@ impl Interface {
 
         let mut this_stage_primitive_index = false;
         let mut has_draw_id = false;
+        let mut has_per_vertex = false;
 
         // check inputs compatibility
         for input in entry_point.inputs.iter() {
@@ -1564,6 +1578,7 @@ impl Interface {
                             error,
                         });
                     }
+                    has_per_vertex |= iv.interpolation == Some(naga::Interpolation::PerVertex);
                 }
                 Varying::BuiltIn(BuiltIn::PrimitiveIndex) => {
                     this_stage_primitive_index = true;
@@ -1776,6 +1791,9 @@ impl Interface {
                     value: mesh_info.max_primitives,
                 });
             }
+            if primitive_topology != Some(mesh_info.primitive_topology) {
+                return Err(StageError::MeshTopologyMismatch);
+            }
         }
         if let Some(task_payload_size) = entry_point.task_payload_size {
             if task_payload_size > self.limits.max_task_payload_size {
@@ -1811,6 +1829,10 @@ impl Interface {
             && has_draw_id
         {
             return Err(StageError::DrawIdError);
+        }
+
+        if primitive_topology.is_none_or(|e| !e.is_triangles()) && has_per_vertex {
+            return Err(StageError::PerVertexNotTriangles);
         }
 
         let outputs = entry_point
