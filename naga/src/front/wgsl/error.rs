@@ -362,6 +362,7 @@ pub(crate) enum Error<'a> {
     FunctionReturnsVoid(Span),
     FunctionMustUseUnused(Span),
     FunctionMustUseReturnsVoid(Span, Span),
+    FunctionMustUseOnNonFunction(Span),
     InvalidWorkGroupUniformLoad(Span),
     Internal(&'static str),
     ExpectedConstExprConcreteIntegerScalar(Span),
@@ -1075,6 +1076,13 @@ impl<'a> Error<'a> {
                 ],
                 notes: vec![
                     "declare a return type or remove the attribute".into(),
+                ],
+            },
+            Error::FunctionMustUseOnNonFunction(attr) => ParseError {
+                message: "attribute `@must_use` is only valid on function declarations".into(),
+                labels: vec![(attr, "".into())],
+                notes: vec![
+                    "place `@must_use` on a function declaration with a return type".into(),
                 ],
             },
             Error::InvalidWorkGroupUniformLoad(span) => ParseError {
