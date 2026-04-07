@@ -7092,6 +7092,16 @@ template <typename A>
             // Varyings' members get their own namespace
             let mut varyings_namer = proc::Namer::default();
 
+            let mut empty_names = FastHashMap::default(); // Create a throwaway map
+            varyings_namer.reset(
+                module,
+                &super::keywords::RESERVED_SET,
+                proc::KeywordSet::empty(),
+                proc::CaseInsensitiveKeywordSet::empty(),
+                &[CLAMPED_LOD_LOAD_PREFIX],
+                &mut empty_names,
+            );
+
             // List all the Naga `EntryPoint`'s `Function`'s arguments,
             // flattening structs into their members. In Metal, we will pass
             // each of these values to the entry point as a separate argument—
