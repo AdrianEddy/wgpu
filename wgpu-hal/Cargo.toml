@@ -76,7 +76,6 @@ metal = [
     "dep:arrayvec",
     "dep:block2",
     "dep:bytemuck",
-    "dep:hashbrown",
     "dep:libc",
     "dep:objc2",
     "dep:objc2-core-foundation",
@@ -96,7 +95,6 @@ vulkan = [
     "dep:bytemuck",
     "dep:drm",
     "dep:gpu-descriptor",
-    "dep:hashbrown",
     "dep:libc",
     "dep:libloading",
     "dep:ordered-float",
@@ -113,7 +111,6 @@ gles = [
     "dep:bytemuck",
     "dep:glow",
     "dep:glutin_wgl_sys",
-    "dep:hashbrown",
     "dep:js-sys",
     "dep:khronos-egl",
     "dep:libloading",
@@ -139,7 +136,6 @@ dx12 = [
     "dep:bit-set",
     "dep:bytemuck",
     "dep:gpu-allocator",
-    "dep:hashbrown",
     "dep:libloading",
     "dep:once_cell",
     "dep:ordered-float",
@@ -218,7 +214,7 @@ thiserror.workspace = true
 # Target agnostic dependencies used only in backends.
 arrayvec = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true, features = ["derive"] }
-hashbrown = { workspace = true, optional = true }
+hashbrown = { workspace = true }
 ordered-float = { workspace = true, optional = true }
 profiling = { workspace = true, optional = true, default-features = false }
 

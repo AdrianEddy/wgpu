@@ -1,38 +1,3 @@
-// Same as in mesh shader tests
-fn compile_wgsl(device: &wgpu::Device) -> wgpu::ShaderModule {
-    // Workgroup memory zero initialization can be expensive for mesh shaders
-    unsafe {
-        device.create_shader_module_trusted(
-            wgpu::ShaderModuleDescriptor {
-                label: None,
-                source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-            },
-            wgpu::ShaderRuntimeChecks::unchecked(),
-        )
-    }
-}
-
-struct Shaders {
-    ts: wgpu::ShaderModule,
-    ms: wgpu::ShaderModule,
-    fs: wgpu::ShaderModule,
-    ts_name: &'static str,
-    ms_name: &'static str,
-    fs_name: &'static str,
-}
-
-fn get_shaders(device: &wgpu::Device) -> Shaders {
-    let compiled = compile_wgsl(device);
-    Shaders {
-        ts: compiled.clone(),
-        ms: compiled.clone(),
-        fs: compiled.clone(),
-        ts_name: "ts_main",
-        ms_name: "ms_main",
-        fs_name: "fs_main",
-    }
-}
-
 pub struct Example {
     pipeline: wgpu::RenderPipeline,
 }
@@ -43,14 +8,7 @@ impl crate::framework::Example for Example {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
     ) -> Self {
-        let Shaders {
-            ts,
-            ms,
-            fs,
-            ts_name,
-            ms_name,
-            fs_name,
-        } = get_shaders(device);
+        let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: None,
             bind_group_layouts: &[],
@@ -60,18 +18,18 @@ impl crate::framework::Example for Example {
             label: None,
             layout: Some(&pipeline_layout),
             task: Some(wgpu::TaskState {
-                module: &ts,
-                entry_point: Some(ts_name),
+                module: &shader,
+                entry_point: Some("ts_main"),
                 compilation_options: Default::default(),
             }),
             mesh: wgpu::MeshState {
-                module: &ms,
-                entry_point: Some(ms_name),
+                module: &shader,
+                entry_point: Some("ms_main"),
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &fs,
-                entry_point: Some(fs_name),
+                module: &shader,
+                entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(config.view_formats[0].into())],
             }),

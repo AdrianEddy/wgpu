@@ -28,7 +28,11 @@ mod library_from_metallib;
 mod surface;
 mod time;
 
-use alloc::{string::ToString as _, sync::Arc, vec::Vec};
+use alloc::{
+    string::{String, ToString as _},
+    sync::Arc,
+    vec::Vec,
+};
 use core::{fmt, iter, ops, ptr::NonNull, sync::atomic};
 
 use bitflags::bitflags;
@@ -863,7 +867,7 @@ pub enum ShaderModuleSource {
 #[derive(Debug)]
 pub struct PassthroughShader {
     pub library: Retained<ProtocolObject<dyn MTLLibrary>>,
-    pub num_workgroups: (u32, u32, u32),
+    pub num_workgroups: HashMap<String, (u32, u32, u32)>,
 }
 
 unsafe impl Send for PassthroughShader {}

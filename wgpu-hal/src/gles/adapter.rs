@@ -14,6 +14,10 @@ const GL_UNMASKED_VENDOR_WEBGL: u32 = 0x9245;
 const GL_UNMASKED_RENDERER_WEBGL: u32 = 0x9246;
 
 impl super::Adapter {
+    pub fn get_glsl_version(&self) -> naga::back::glsl::Version {
+        self.shared.shading_language_version
+    }
+
     /// Note that this function is intentionally lenient in regards to parsing,
     /// and will try to recover at least the first two version numbers without
     /// resulting in an `Err`.
@@ -445,7 +449,8 @@ impl super::Adapter {
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgt::Features::CLEAR_TEXTURE
             | wgt::Features::IMMEDIATES
-            | wgt::Features::DEPTH32FLOAT_STENCIL8;
+            | wgt::Features::DEPTH32FLOAT_STENCIL8
+            | wgt::Features::PASSTHROUGH_SHADERS;
         features.set(
             wgt::Features::ADDRESS_MODE_CLAMP_TO_BORDER | wgt::Features::ADDRESS_MODE_CLAMP_TO_ZERO,
             extensions.contains("GL_EXT_texture_border_clamp")

@@ -1118,7 +1118,7 @@ impl Global {
                     id: shader.to_trace(),
                     data: file_names,
                     label: desc.label.clone(),
-                    num_workgroups: desc.num_workgroups,
+                    entry_points: desc.entry_points.clone(),
                 });
             };
 
@@ -1413,7 +1413,7 @@ impl Global {
                         Ok(module) => module,
                         Err(e) => break 'error e,
                     };
-                    if module.interface.is_none() {
+                    if module.interface.interface().is_none() {
                         passthrough_stages |= wgt::ShaderStages::VERTEX;
                     }
                     let stage = ResolvedProgrammableStageDescriptor {
@@ -1443,7 +1443,7 @@ impl Global {
                             Ok(module) => module,
                             Err(e) => break 'error e,
                         };
-                        if module.interface.is_none() {
+                        if module.interface.interface().is_none() {
                             passthrough_stages |= wgt::ShaderStages::TASK;
                         }
                         let state = ResolvedProgrammableStageDescriptor {
@@ -1470,7 +1470,7 @@ impl Global {
                         Ok(module) => module,
                         Err(e) => break 'error e,
                     };
-                    if mesh_module.interface.is_none() {
+                    if mesh_module.interface.interface().is_none() {
                         passthrough_stages |= wgt::ShaderStages::VERTEX;
                     }
                     let mesh_stage = ResolvedProgrammableStageDescriptor {
@@ -1501,7 +1501,7 @@ impl Global {
                     Ok(module) => module,
                     Err(e) => break 'error e,
                 };
-                if module.interface.is_none() {
+                if module.interface.interface().is_none() {
                     passthrough_stages |= wgt::ShaderStages::FRAGMENT;
                 }
                 let stage = ResolvedProgrammableStageDescriptor {
@@ -1668,7 +1668,7 @@ impl Global {
                 Ok(module) => module,
                 Err(e) => break 'error e.into(),
             };
-            if module.interface.is_none() && layout.is_none() {
+            if module.interface.interface().is_none() && layout.is_none() {
                 break 'error pipeline::CreateComputePipelineError::Implicit(
                     pipeline::ImplicitLayoutError::Passthrough(wgt::ShaderStages::COMPUTE),
                 );

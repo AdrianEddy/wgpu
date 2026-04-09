@@ -58,6 +58,10 @@ Bottom level categories:
 - Added full support for mesh shaders, including in WGSL shaders. By @inner-daemons in [#8739](https://github.com/gfx-rs/wgpu/pull/8739).
 - Fixed structure field names incorrectly ignoring reserved keywords in the Metal (MSL) backend. By @39ali [#9379](https://github.com/gfx-rs/wgpu/pull/9379).
 
+#### GLES
+
+- Added support for GLSL passthrough. By @inner-daemons in [#9064](https://github.com/gfx-rs/wgpu/pull/9064).
+
 #### DX12
 
 - Added support for mesh shaders in naga's HLSL writer, completing DX12 support for mesh shaders. By @inner-daemons in [#8752](https://github.com/gfx-rs/wgpu/pull/8752).
@@ -76,6 +80,7 @@ Bottom level categories:
 - Added new `InvalidWorkgroupSizeError`, which is now used by `DrawError::InvalidGroupSize` and `StageError::InvalidWorkgroupSize`. By @andyleiserson in [#9357](https://github.com/gfx-rs/wgpu/pull/9357).
 - Zero-size `Queue::write_buffer` now returns an error if the offset is invalid or the buffer lacks `COPY_DST`. By @39ali in [#9374](https://github.com/gfx-rs/wgpu/pull/9374).
 - `Buffer::get_mapped_range` and variants now return `Result<_, MapRangeError>>` instead of panicking, in line with WebGPU spec. By @atlv24 in [#9281](https://github.com/gfx-rs/wgpu/pull/9281).
+- Passthrough shaders now require a list of entry points when being created. by @inner-daemons in [#9064](https://github.com/gfx-rs/wgpu/pull/9064).
 
 #### Validation
 
