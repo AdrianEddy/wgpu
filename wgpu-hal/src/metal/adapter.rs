@@ -1107,6 +1107,14 @@ impl super::CapabilitiesQuery {
                 false
             },
             shader_per_vertex: family_check && device.supportsFamily(MTLGPUFamily::Apple10),
+
+            //https://developer.apple.com/documentation/metal/mtltexturetype/type2dmultisamplearray
+            supports_multisample_array: available!(
+                macos = 10.14,
+                ios = 14.0,
+                tvos = 16.0,
+                visionos = 1.0
+            ),
         }
     }
 
@@ -1241,6 +1249,8 @@ impl super::CapabilitiesQuery {
         }
 
         features.set(F::EXPERIMENTAL_RAY_QUERY, self.supports_raytracing);
+
+        features.set(F::MULTISAMPLE_ARRAY, self.supports_multisample_array);
 
         features
     }
