@@ -346,6 +346,7 @@ impl RenderBundleEncoder {
             texture_memory_init_actions: Vec::new(),
             next_dynamic_offset: 0,
             binder: Binder::new(),
+            immediate_slots_set: Default::default(),
         };
 
         let indices = &state.device.tracker_indices;
@@ -656,11 +657,6 @@ fn set_pipeline(
         .commands
         .push(ArcRenderCommand::SetPipeline(pipeline.clone()));
 
-    // If this pipeline uses immediates, zero out their values.
-    if let Some(cmd) = pipeline_state.zero_immediates() {
-        state.commands.push(cmd);
-    }
-
     state.pipeline = Some(pipeline_state);
 
     state
@@ -772,6 +768,7 @@ fn set_immediates(
         size_bytes,
         values_offset,
     });
+    state.immediate_slots_set |= naga::valid::ImmediateSlots::from_range(offset, size_bytes);
     Ok(())
 }
 
@@ -1367,9 +1364,6 @@ struct PipelineState {
     /// How this pipeline's vertex shader traverses each vertex buffer, indexed
     /// by vertex buffer slot number.
     steps: Vec<VertexStep>,
-
-    /// Size of the immediate data ranges this pipeline uses. Copied from the pipeline layout.
-    immediate_size: u32,
 }
 
 impl PipelineState {
@@ -1377,22 +1371,7 @@ impl PipelineState {
         Self {
             pipeline: pipeline.clone(),
             steps: pipeline.vertex_steps.to_vec(),
-            immediate_size: pipeline.layout.immediate_size,
         }
-    }
-
-    /// Return a sequence of commands to zero the immediate data ranges this
-    /// pipeline uses. If no initialization is necessary, return `None`.
-    fn zero_immediates(&self) -> Option<ArcRenderCommand> {
-        if self.immediate_size == 0 {
-            return None;
-        }
-
-        Some(ArcRenderCommand::SetImmediate {
-            offset: 0,
-            size_bytes: self.immediate_size,
-            values_offset: None,
-        })
     }
 }
 
@@ -1434,6 +1413,9 @@ struct State {
     texture_memory_init_actions: Vec<TextureInitTrackerAction>,
     next_dynamic_offset: usize,
     binder: Binder,
+    /// A bitmask, tracking which 4-byte slots have been written via `set_immediates`.
+    /// Checked against the pipeline's required slots before each draw call.
+    immediate_slots_set: naga::valid::ImmediateSlots,
 }
 
 impl State {
@@ -1510,6 +1492,18 @@ impl State {
                         buffer_format: index_format,
                     });
                 }
+            }
+
+            if !self
+                .immediate_slots_set
+                .contains(pipeline.pipeline.immediate_slots_required)
+            {
+                return Err(DrawError::MissingImmediateData {
+                    missing: pipeline
+                        .pipeline
+                        .immediate_slots_required
+                        .difference(self.immediate_slots_set),
+                });
             }
 
             Ok(())
