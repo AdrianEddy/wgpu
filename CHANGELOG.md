@@ -117,6 +117,7 @@ Bottom level categories:
 #### Vulkan
 
 - Fixed validation errors when frames take longer than the specified swapchain acquire timeout. By @atlv24 in [#9405](https://github.com/gfx-rs/wgpu/pull/9405).
+- Fixed limits on Mesa's Honeykrisp / Asahi Linux. By @im-0 in [#9393](https://github.com/gfx-rs/wgpu/pull/9393).
 
 #### dx12
 
