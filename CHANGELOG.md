@@ -93,6 +93,7 @@ By @teoxoy in [#9351](https://github.com/gfx-rs/wgpu/pull/9351).
 - Add support for RawWindowHandle::Drm on unix, conditional on the `"drm"` feature.
   - DRM support by @rectalogic in [#9182](https://github.com/gfx-rs/wgpu/pull/9182).
   - Conditional compilation by @jimblandy in [#9390](https://github.com/gfx-rs/wgpu/pull/9390)
+- Fixed alignment and MatrixStride for mat2x2 in SPIR-V uniform blocks. By @39ali [#9369](https://github.com/gfx-rs/wgpu/pull/9369).
 
 ### Changes
 
