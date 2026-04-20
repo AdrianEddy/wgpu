@@ -113,6 +113,7 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 #### Vulkan
 
 - Add `vulkan::Device::texture_from_dmabuf_fd()` for importing DMA-buf textures on Linux, with `VULKAN_EXTERNAL_MEMORY_FD` and `VULKAN_EXTERNAL_MEMORY_DMA_BUF` feature flags. By @TODO in [#TODO](https://github.com/gfx-rs/wgpu/pull/TODO).
+- Enable `VK_KHR_external_semaphore_win32` / `VK_KHR_external_semaphore_fd` on the Vulkan device when supported, and expose them through the new `VULKAN_EXTERNAL_SEMAPHORE_WIN32` / `VULKAN_EXTERNAL_SEMAPHORE_FD` feature flags. This enables importing/exporting `VkSemaphore` handles for cross-API synchronisation. By @AdrianEddy in [#9453](https://github.com/gfx-rs/wgpu/pull/9453).
 - Add support for RawWindowHandle::Drm on unix, conditional on the `"drm"` feature.
   - DRM support by @rectalogic in [#9182](https://github.com/gfx-rs/wgpu/pull/9182).
   - Conditional compilation by @jimblandy in [#9390](https://github.com/gfx-rs/wgpu/pull/9390)

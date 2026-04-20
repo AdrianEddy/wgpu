@@ -1031,6 +1031,14 @@ impl PhysicalDeviceFeatures {
                 && caps.supports_extension(ext::image_drm_format_modifier::NAME),
         );
         features.set(
+            F::VULKAN_EXTERNAL_SEMAPHORE_WIN32,
+            caps.supports_extension(khr::external_semaphore_win32::NAME),
+        );
+        features.set(
+            F::VULKAN_EXTERNAL_SEMAPHORE_FD,
+            caps.supports_extension(khr::external_semaphore_fd::NAME),
+        );
+        features.set(
             F::EXPERIMENTAL_MESH_SHADER,
             caps.supports_extension(ext::mesh_shader::NAME),
         );
@@ -1304,6 +1312,16 @@ impl PhysicalDeviceProperties {
         // Optional `VK_EXT_image_drm_format_modifier`
         if self.supports_extension(ext::image_drm_format_modifier::NAME) {
             extensions.push(ext::image_drm_format_modifier::NAME);
+        }
+
+        // Optional `VK_KHR_external_semaphore_win32`
+        if self.supports_extension(khr::external_semaphore_win32::NAME) {
+            extensions.push(khr::external_semaphore_win32::NAME);
+        }
+
+        // Optional `VK_KHR_external_semaphore_fd`
+        if self.supports_extension(khr::external_semaphore_fd::NAME) {
+            extensions.push(khr::external_semaphore_fd::NAME);
         }
 
         // Optional `VK_EXT_memory_budget`

@@ -1232,6 +1232,39 @@ bitflags_array! {
         #[name("wgpu-vulkan-external-memory-dma-buf")]
         const VULKAN_EXTERNAL_MEMORY_DMA_BUF = 1 << 63;
 
+        /// Allows using the [VK_KHR_external_semaphore_win32] Vulkan extension.
+        ///
+        /// Enables importing/exporting Vulkan semaphores as NT / KMT Win32
+        /// handles, so the caller can synchronise with other APIs.
+        /// Typically combined with `VULKAN_EXTERNAL_MEMORY_WIN32` for
+        /// zero-copy shared-texture interop.
+        ///
+        /// Supported platforms:
+        /// - Vulkan (with [VK_KHR_external_semaphore_win32])
+        ///
+        /// This is a native only feature.
+        ///
+        /// [VK_KHR_external_semaphore_win32]: https://registry.khronos.org/vulkan/specs/latest/man/html/VK_KHR_external_semaphore_win32.html
+        #[name("wgpu-vulkan-external-semaphore-win32")]
+        const VULKAN_EXTERNAL_SEMAPHORE_WIN32 = 1 << 24;
+
+        /// Allows using the [VK_KHR_external_semaphore_fd] Vulkan extension.
+        ///
+        /// Enables importing/exporting Vulkan semaphores as POSIX file
+        /// descriptors (opaque-fd or sync-fd), so the caller can synchronise
+        /// with other APIs. Typically combined with `VULKAN_EXTERNAL_MEMORY_FD`
+        /// / `VULKAN_EXTERNAL_MEMORY_DMA_BUF` for zero-copy shared-texture
+        /// interop.
+        ///
+        /// Supported platforms:
+        /// - Vulkan (with [VK_KHR_external_semaphore_fd])
+        ///
+        /// This is a native only feature.
+        ///
+        /// [VK_KHR_external_semaphore_fd]: https://registry.khronos.org/vulkan/specs/latest/man/html/VK_KHR_external_semaphore_fd.html
+        #[name("wgpu-vulkan-external-semaphore-fd")]
+        const VULKAN_EXTERNAL_SEMAPHORE_FD = 1 << 25;
+
         /// Enables R64Uint image atomic min and max.
         ///
         /// Supported platforms:
