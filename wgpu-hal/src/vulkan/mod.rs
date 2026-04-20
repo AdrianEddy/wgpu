@@ -666,6 +666,10 @@ impl BufferMemoryBacking {
 pub struct Buffer {
     raw: vk::Buffer,
     allocation: Option<Mutex<BufferMemoryBacking>>,
+
+    // The `drop_guard` field must be the last field of this struct so it is dropped last.
+    // Do not add new fields after it.
+    drop_guard: Option<crate::DropGuard>,
 }
 impl Buffer {
     /// # Safety
@@ -675,9 +679,27 @@ impl Buffer {
     pub unsafe fn from_raw(vk_buffer: vk::Buffer) -> Self {
         Self {
             raw: vk_buffer,
+            drop_guard: None,
             allocation: None,
         }
     }
+
+    /// # Safety
+    /// - `vk_buffer` must outlive the returned `Buffer`.
+    /// - wgpu-hal will NOT call `vkDestroyBuffer`; the caller remains responsible for the buffer handle's destruction.
+    ///   The `drop_callback` runs when the `Buffer` drops and may be used to release caller-side bookkeeping.
+    /// - Externally imported buffers can't be mapped by `wgpu`.
+    pub unsafe fn from_raw_externally_owned(
+        vk_buffer: vk::Buffer,
+        drop_callback: crate::DropCallback,
+    ) -> Self {
+        Self {
+            raw: vk_buffer,
+            drop_guard: crate::DropGuard::from_option(Some(drop_callback)),
+            allocation: None,
+        }
+    }
+
     /// # Safety
     /// - We will use this buffer and the buffer's backing memory range as if we have exclusive ownership over it, until the wgpu resource is dropped and the wgpu-hal object is cleaned up
     /// - Externally imported buffers can't be mapped by `wgpu`
@@ -690,6 +712,7 @@ impl Buffer {
     ) -> Self {
         Self {
             raw: vk_buffer,
+            drop_guard: None,
             allocation: Some(Mutex::new(BufferMemoryBacking::VulkanMemory {
                 memory,
                 offset,

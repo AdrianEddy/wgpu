@@ -1129,11 +1129,14 @@ impl crate::Device for super::Device {
 
         Ok(super::Buffer {
             raw,
+            drop_guard: None,
             allocation: Some(Mutex::new(super::BufferMemoryBacking::Managed(allocation))),
         })
     }
     unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
-        unsafe { self.shared.raw.destroy_buffer(buffer.raw, None) };
+        if buffer.drop_guard.is_none() {
+            unsafe { self.shared.raw.destroy_buffer(buffer.raw, None) };
+        }
         if let Some(allocation) = buffer.allocation {
             let allocation = allocation.into_inner();
             self.counters.buffer_memory.sub(allocation.size() as isize);
