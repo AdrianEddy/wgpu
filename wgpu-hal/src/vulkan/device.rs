@@ -235,7 +235,7 @@ impl super::DeviceShared {
         buffer: &'a super::Buffer,
         ranges: I,
     ) -> Option<impl 'a + Iterator<Item = vk::MappedMemoryRange<'a>>> {
-        let super::BufferOwnership::Managed(allocation) = buffer.ownership.as_ref() else {
+        let super::BufferOwnership::Managed(ref allocation) = buffer.ownership else {
             return None;
         };
         let allocation = allocation.lock();
