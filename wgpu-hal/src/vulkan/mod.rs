@@ -662,14 +662,28 @@ impl BufferMemoryBacking {
         }
     }
 }
+/// Describes who owns a [`Buffer`]'s `vk::Buffer` handle and its backing memory,
+/// and therefore what cleanup is required when the buffer is destroyed.
+#[derive(Debug)]
+enum BufferOwnership {
+    /// wgpu-hal owns the `vk::Buffer` and its backing memory. On cleanup the buffer
+    /// handle is destroyed and the memory is released.
+    Managed(Mutex<BufferMemoryBacking>),
+    /// wgpu-hal owns the `vk::Buffer` handle but the backing memory is kept alive
+    /// by the caller. On cleanup only the buffer handle is destroyed.
+    RawHandle,
+    /// Caller owns the `vk::Buffer` and its backing memory. On cleanup the
+    /// [`crate::DropGuard`] runs the caller's cleanup callback and wgpu-hal touches
+    /// neither the handle nor the memory.
+    External(crate::DropGuard),
+}
+
 #[derive(Debug)]
 pub struct Buffer {
     raw: vk::Buffer,
-    allocation: Option<Mutex<BufferMemoryBacking>>,
 
-    // The `drop_guard` field must be the last field of this struct so it is dropped last.
-    // Do not add new fields after it.
-    drop_guard: Option<crate::DropGuard>,
+    // This field must be last, because it may contain a `DropGuard` which needs to be dropped after all other fields.
+    ownership: BufferOwnership,
 }
 impl Buffer {
     /// # Safety
@@ -679,8 +693,7 @@ impl Buffer {
     pub unsafe fn from_raw(vk_buffer: vk::Buffer) -> Self {
         Self {
             raw: vk_buffer,
-            drop_guard: None,
-            allocation: None,
+            ownership: BufferOwnership::RawHandle,
         }
     }
 
@@ -695,8 +708,7 @@ impl Buffer {
     ) -> Self {
         Self {
             raw: vk_buffer,
-            drop_guard: crate::DropGuard::from_option(Some(drop_callback)),
-            allocation: None,
+            ownership: BufferOwnership::External(crate::DropGuard::new(drop_callback)),
         }
     }
 
@@ -712,8 +724,7 @@ impl Buffer {
     ) -> Self {
         Self {
             raw: vk_buffer,
-            drop_guard: None,
-            allocation: Some(Mutex::new(BufferMemoryBacking::VulkanMemory {
+            ownership: BufferOwnership::Managed(Mutex::new(BufferMemoryBacking::VulkanMemory {
                 memory,
                 offset,
                 size,
