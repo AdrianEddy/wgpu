@@ -620,6 +620,7 @@ pub struct Queue {
     family_index: u32,
     relay_semaphores: Mutex<RelaySemaphores>,
     signal_semaphores: Mutex<SemaphoreList>,
+    wait_semaphores: Mutex<SemaphoreList>,
 }
 
 impl Queue {
@@ -1291,6 +1292,11 @@ impl crate::Queue for Queue {
             signal_semaphores.append(&mut guard);
         }
 
+        let mut wait_guard = self.wait_semaphores.lock();
+        if !wait_guard.is_empty() {
+            wait_semaphores.append(&mut wait_guard);
+        }
+
         // In order for submissions to be strictly ordered, we encode a dependency between each submission
         // using a pair of semaphores. This adds a wait if it is needed, and signals the next semaphore.
         let semaphore_state = self.relay_semaphores.lock().advance(&self.device)?;
@@ -1392,6 +1398,39 @@ impl Queue {
     /// already consumed it, this is a harmless no-op that returns `false`.
     pub fn remove_signal_semaphore(&self, semaphore: vk::Semaphore) -> bool {
         self.signal_semaphores.lock().remove(semaphore)
+    }
+
+    /// Stage a semaphore wait on the next [`crate::Queue::submit`] call.
+    ///
+    /// `semaphore_value` selects the kind of payload the wait targets:
+    ///
+    /// - `Some(value)` - wait until `semaphore` (a timeline semaphore) has been signalled to at least `value`.
+    /// - `None` - wait on a binary semaphore signal.
+    ///
+    /// `stage` is the pipeline stage at which the wait blocks downstream
+    /// work (e.g. `vk::PipelineStageFlags::TOP_OF_PIPE` to gate the
+    /// entire submission, or a more specific stage when only that stage
+    /// reads the synchronised resource).
+    pub fn add_wait_semaphore(
+        &self,
+        semaphore: vk::Semaphore,
+        semaphore_value: Option<u64>,
+        stage: vk::PipelineStageFlags,
+    ) {
+        let mut guard = self.wait_semaphores.lock();
+        if let Some(value) = semaphore_value {
+            guard.push_wait(SemaphoreType::Timeline(semaphore, value), stage);
+        } else {
+            guard.push_wait(SemaphoreType::Binary(semaphore), stage);
+        }
+    }
+
+    /// Remove `semaphore` from the pending wait list if it is still present.
+    ///
+    /// Returns `true` if the semaphore was found and removed. If the submit
+    /// already consumed it, this is a no-op that returns `false`.
+    pub fn remove_wait_semaphore(&self, semaphore: vk::Semaphore) -> bool {
+        self.wait_semaphores.lock().remove(semaphore)
     }
 }
 
