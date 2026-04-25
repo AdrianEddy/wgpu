@@ -110,6 +110,7 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 #### DX12
 
 - Added support for mesh shaders in naga's HLSL writer, completing DX12 support for mesh shaders. By @inner-daemons in [#8752](https://github.com/gfx-rs/wgpu/pull/8752).
+- Added `dx12::Queue::add_wait_fence` / `add_signal_fence` (and matching `remove_*` companions). They stage `ID3D12CommandQueue::Wait` / `Signal` calls on the next `Queue::submit`. The wait calls are issued before the submit's `ExecuteCommandLists`, the signal calls after wgpu's own `Signal(signal_fence, signal_value)`. Cross-API interop crates use this to GPU-side gate / publish wgpu submits against foreign-API fences. By @AdrianEddy in [#9463](https://github.com/gfx-rs/wgpu/pull/9463).
 
 #### Vulkan
 
