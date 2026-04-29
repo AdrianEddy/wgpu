@@ -695,6 +695,12 @@ impl Buffer {
             })),
         }
     }
+
+    /// # Safety
+    /// - The buffer handle must not be manually destroyed
+    pub unsafe fn raw_handle(&self) -> vk::Buffer {
+        self.raw
+    }
 }
 
 impl crate::DynBuffer for Buffer {}
