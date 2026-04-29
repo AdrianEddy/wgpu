@@ -38,14 +38,7 @@ mod swapchain;
 pub use adapter::PhysicalDeviceFeatures;
 
 use alloc::{boxed::Box, ffi::CString, sync::Arc, vec::Vec};
-use core::{
-    borrow::Borrow,
-    ffi::CStr,
-    fmt,
-    marker::PhantomData,
-    mem::{self, ManuallyDrop},
-    num::NonZeroU32,
-};
+use core::{borrow::Borrow, ffi::CStr, fmt, marker::PhantomData, mem, num::NonZeroU32};
 
 use arrayvec::ArrayVec;
 use ash::{ext, khr, vk};
@@ -192,8 +185,8 @@ pub struct Instance {
 }
 
 pub struct Surface {
-    inner: ManuallyDrop<Box<dyn swapchain::Surface>>,
     swapchain: RwLock<Option<Box<dyn swapchain::Swapchain>>>,
+    inner: Box<dyn swapchain::Surface>,
 }
 
 impl Surface {
