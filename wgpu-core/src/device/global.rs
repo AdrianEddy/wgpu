@@ -322,11 +322,15 @@ impl Global {
     /// - `hal_texture` must be created from `device_id` corresponding raw handle.
     /// - `hal_texture` must be created respecting `desc`
     /// - `hal_texture` must be initialized
+    /// - When `initial_state` is `Some(state)`, the actual driver-side state of
+    ///   the wrapped resource at the moment of wrap MUST match what `state`
+    ///   derives to under the backend's layout/state derivation.
     pub unsafe fn create_texture_from_hal(
         &self,
         hal_texture: Box<dyn hal::DynTexture>,
         device_id: DeviceId,
         desc: &resource::TextureDescriptor,
+        initial_state: Option<wgt::TextureUses>,
         id_in: Option<id::TextureId>,
     ) -> (id::TextureId, Option<resource::CreateTextureError>) {
         profiling::scope!("Device::create_texture_from_hal");
@@ -338,7 +342,7 @@ impl Global {
         let error = 'error: {
             let device = self.hub.devices.get(device_id);
 
-            let texture = match device.create_texture_from_hal(hal_texture, desc) {
+            let texture = match device.create_texture_from_hal(hal_texture, desc, initial_state) {
                 Ok(texture) => texture,
                 Err(error) => break 'error error,
             };

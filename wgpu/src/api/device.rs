@@ -315,23 +315,40 @@ impl Device {
     #[doc = crate::macros::hal_type_dx12!("Texture")]
     #[doc = crate::macros::hal_type_gles!("Texture")]
     ///
+    /// # `initial_state`
+    ///
+    /// The [`wgt::TextureUses`] state the wrapped resource is already in;
+    /// used as the source state (`oldLayout` / `StateBefore`) of the first
+    /// barrier emitted on the texture.
+    ///
+    /// `None` defaults to [`wgt::TextureUses::UNINITIALIZED`], which is
+    /// content-discarding on Vulkan (may invalidate vendor compression metadata like AFBC/UBWC/DCC).
+    ///
     /// # Safety
     ///
     /// - `hal_texture` must be created from this device internal handle
     /// - `hal_texture` must be created respecting `desc`
     /// - `hal_texture` must be initialized
+    /// - When `initial_state` is `Some(state)`, the actual driver-side
+    ///   layout/state of the wrapped resource at the moment of wrap MUST
+    ///   match what `state` derives to under the backend's layout
+    ///   derivation.
     #[cfg(wgpu_core)]
     #[must_use]
     pub unsafe fn create_texture_from_hal<A: hal::Api>(
         &self,
         hal_texture: A::Texture,
         desc: &TextureDescriptor<'_>,
+        initial_state: Option<wgt::TextureUses>,
     ) -> Texture {
         let texture = unsafe {
             let core_device = self.inner.as_core();
-            core_device
-                .context
-                .create_texture_from_hal::<A>(hal_texture, core_device, desc)
+            core_device.context.create_texture_from_hal::<A>(
+                hal_texture,
+                core_device,
+                desc,
+                initial_state,
+            )
         };
         Texture {
             inner: texture.into(),

@@ -44,6 +44,32 @@ Bottom level categories:
 
 ### Major changes
 
+#### `Device::create_texture_from_hal` takes an explicit `initial_state`
+
+`Device::create_texture_from_hal` (and the corresponding `wgpu-core` entry points) now take an `initial_state: Option<wgt::TextureUses>` parameter declaring the state the wrapped foreign resource is already in. Previously the tracker hard-coded `TextureUses::UNINITIALIZED` for the wrapped texture, which is a content-discarding transition under the Vulkan spec, which corrupts producer-written data on images carrying vendor compression metadata (Mali AFBC, Adreno UBWC, AMD DCC). This affected zero-copy hardware-decoded video imports (DMA-BUF / VAAPI / GL→Vulkan / AHardwareBuffer paths) on the platforms where compressed modifiers are used.
+
+To migrate, pass `None` to preserve the previous behaviour:
+
+```diff
+  let texture = unsafe {
+-     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc)
++     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, None)
+  };
+```
+
+Foreign-import code that has already transitioned the wrapped resource to a known state (e.g. via a queue-family ownership-transfer acquire to `VK_IMAGE_LAYOUT_GENERAL`) should pass `Some(wgt::TextureUses::empty())` so the first wgpu-issued barrier preserves contents:
+
+```diff
+  let texture = unsafe {
+-     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc)
++     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, Some(wgpu::TextureUses::empty()))
+  };
+```
+
+The safety contract for the new parameter requires the actual driver-side layout/state of the wrapped resource at the moment of wrap to match what `initial_state` derives to under the backend's layout derivation; mismatching is undefined behaviour per the underlying API specs.
+
+By @AdrianEddy in [#9496](https://github.com/gfx-rs/wgpu/pull/9496).
+
 #### Optional vertex buffer slots
 
 This allows gaps in `VertexState`'s `buffers` and adds support for unbinding vertex buffers, bringing us in compliance with the WebGPU spec. As a result of this, `VertexState`'s `buffers` field now has type of `&[Option<VertexBufferLayout>]`. To migrate, wrap vertex buffer layouts in `Some`:
