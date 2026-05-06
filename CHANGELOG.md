@@ -123,11 +123,11 @@ By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
 - Make `wgpu_types::texture::format::TextureChannel` accessible as `wgpu::TextureChannel`. By @TornaxO7 in [#9394](https://github.com/gfx-rs/wgpu/pull/9349).
 - Add support for `per_vertex` in Metal and DX12, as well as some validation for `per_vertex`, and a new enable extension, `wgpu_per_vertex`. By @inner-daemons in [#9219](https://github.com/gfx-rs/wgpu/pull/9219).
 - Add `ComputePass` version of `CommandEncoder::transition_resources` that allows intra-pass transitions. By @wingertge in [#9371](https://github.com/gfx-rs/wgpu/pull/9371).
-- `Device::create_texture_from_hal` now takes an explicit `initial_state: wgt::TextureUses` parameter declaring the state the wrapped foreign resource is already in. Previously the tracker hard-coded `TextureUses::UNINITIALIZED` for the wrapped texture, which is a content-discarding transition under the Vulkan spec, which corrupts producer-written data on images carrying vendor compression metadata (Mali AFBC, Adreno UBWC, AMD DCC). This affected zero-copy hardware-decoded video imports (DMA-BUF / VAAPI / GL→Vulkan / AHardwareBuffer paths) on the platforms where compressed modifiers are used. To migrate, pass `wgpu_types::TextureUses::UNINITIALIZED` to preserve the previous behaviour:
+- `Device::create_texture_from_hal` now takes an explicit `initial_state: wgt::TextureUses` parameter declaring the state the wrapped foreign resource is already in. Previously the tracker hard-coded `TextureUses::UNINITIALIZED` for the wrapped texture, which is a content-discarding transition under the Vulkan spec, which corrupts producer-written data on images carrying vendor compression metadata (Mali AFBC, Adreno UBWC, AMD DCC). This affected zero-copy hardware-decoded video imports (DMA-BUF / VAAPI / GL→Vulkan / AHardwareBuffer paths) on the platforms where compressed modifiers are used. To migrate, pass `wgpu::TextureUses::UNINITIALIZED` to preserve the previous behaviour:
   ```diff
     let texture = unsafe {
   -     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc)
-  +     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, wgpu_types::TextureUses::UNINITIALIZED)
+  +     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, wgpu::TextureUses::UNINITIALIZED)
     };
   ```
   Foreign-import code that has already transitioned the wrapped resource to a known state (e.g. via a queue-family ownership-transfer acquire to `VK_IMAGE_LAYOUT_GENERAL`) should pass `wgt::TextureUses::empty()` so the first wgpu-issued barrier preserves contents:
