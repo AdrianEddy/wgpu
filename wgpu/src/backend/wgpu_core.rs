@@ -140,7 +140,7 @@ impl ContextWgpuCore {
         hal_texture: A::Texture,
         device: &CoreDevice,
         desc: &TextureDescriptor<'_>,
-        initial_state: Option<wgt::TextureUses>,
+        initial_state: wgt::TextureUses,
     ) -> CoreTexture {
         let descriptor = desc.map_label_and_view_formats(|l| l.map(Borrowed), |v| v.to_vec());
         let (id, error) = unsafe {

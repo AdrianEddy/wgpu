@@ -330,7 +330,7 @@ impl Global {
         hal_texture: Box<dyn hal::DynTexture>,
         device_id: DeviceId,
         desc: &resource::TextureDescriptor,
-        initial_state: Option<wgt::TextureUses>,
+        initial_state: wgt::TextureUses,
         id_in: Option<id::TextureId>,
     ) -> (id::TextureId, Option<resource::CreateTextureError>) {
         profiling::scope!("Device::create_texture_from_hal");
