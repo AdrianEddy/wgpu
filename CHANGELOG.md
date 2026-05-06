@@ -130,7 +130,7 @@ By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
   +     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, wgpu_types::TextureUses::UNINITIALIZED)
     };
   ```
-  Foreign-import code that has already transitioned the wrapped resource to a known state (e.g. via a queue-family ownership-transfer acquire to   `VK_IMAGE_LAYOUT_GENERAL`) should pass `wgt::TextureUses::empty()` so the first wgpu-issued barrier preserves contents:
+  Foreign-import code that has already transitioned the wrapped resource to a known state (e.g. via a queue-family ownership-transfer acquire to `VK_IMAGE_LAYOUT_GENERAL`) should pass `wgt::TextureUses::empty()` so the first wgpu-issued barrier preserves contents:
   ```diff
     let texture = unsafe {
   -     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc)

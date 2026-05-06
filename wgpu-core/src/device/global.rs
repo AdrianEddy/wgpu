@@ -322,9 +322,8 @@ impl Global {
     /// - `hal_texture` must be created from `device_id` corresponding raw handle.
     /// - `hal_texture` must be created respecting `desc`
     /// - `hal_texture` must be initialized
-    /// - When `initial_state` is `Some(state)`, the actual driver-side state of
-    ///   the wrapped resource at the moment of wrap MUST match what `state`
-    ///   derives to under the backend's layout/state derivation.
+    /// - The `initial_state` must match the actual driver-side state of
+    ///   the wrapped resource at the moment of wrap.
     pub unsafe fn create_texture_from_hal(
         &self,
         hal_texture: Box<dyn hal::DynTexture>,
