@@ -315,8 +315,7 @@ impl Device {
     #[doc = crate::macros::hal_type_dx12!("Texture")]
     #[doc = crate::macros::hal_type_gles!("Texture")]
     ///
-    /// On the `webgpu` backend, use
-    /// [`Self::create_texture_from_webgpu_handle`] instead.
+    /// On the `webgpu` backend, use `create_texture_from_webgpu_handle` instead.
     ///
     /// # Safety
     ///
@@ -616,7 +615,7 @@ impl Device {
     /// - The device is not from the backend specified by `A`.
     /// - The device is from the `webgpu` or `custom` backend.
     ///
-    /// On the `webgpu` backend, use [`Self::as_webgpu`] instead.
+    /// On the `webgpu` backend, use `as_webgpu` instead.
     ///
     /// # Safety
     ///

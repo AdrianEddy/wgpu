@@ -49,7 +49,7 @@ impl Texture {
     /// - The texture is from the `webgpu` or `custom` backend.
     /// - The texture has had [`Self::destroy()`] called on it.
     ///
-    /// On the `webgpu` backend, use [`Self::as_webgpu`] instead.
+    /// On the `webgpu` backend, use `as_webgpu` instead.
     ///
     /// # Safety
     ///
