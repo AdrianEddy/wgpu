@@ -3,7 +3,7 @@
 mod defined_non_null_js_value;
 mod ext_bindings;
 #[allow(clippy::allow_attributes)]
-mod webgpu_sys;
+pub(crate) mod webgpu_sys;
 
 use alloc::{
     boxed::Box,
@@ -1288,7 +1288,7 @@ struct WebBufferMapState {
 #[derive(Debug, Clone)]
 pub struct WebBuffer {
     /// The associated GPU buffer.
-    inner: webgpu_sys::GpuBuffer,
+    pub(crate) inner: webgpu_sys::GpuBuffer,
     /// The mapped array buffer and mapped range.
     mapping: Rc<RefCell<WebBufferMapState>>,
     /// Unique identifier for this Buffer.
@@ -1342,8 +1342,18 @@ impl WebBuffer {
 #[derive(Debug, Clone)]
 pub struct WebTexture {
     pub(crate) inner: webgpu_sys::GpuTexture,
+    /// Whether wgpu owns the underlying `GpuTexture` (so `destroy()` frees it)
+    /// or wraps an external handle (`destroy()` is a no-op, since the lifetime
+    /// is the caller's responsibility).
+    ownership: TextureOwnership,
     /// Unique identifier for this Texture.
     ident: crate::cmp::Identifier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextureOwnership {
+    Owned,
+    External,
 }
 
 #[derive(Debug, Clone)]
@@ -1793,6 +1803,28 @@ impl dispatch::AdapterInterface for WebAdapter {
 impl Drop for WebAdapter {
     fn drop(&mut self) {
         // no-op
+    }
+}
+
+impl WebDevice {
+    /// Wrap a foreign `webgpu_sys::GpuTexture` (e.g. from  canvas `getCurrentTexture()`) as a
+    /// dispatch-level `WebTexture` without calling `device.createTexture(...)`.
+    ///
+    /// The resulting texture is `External`: its `destroy()` is a no-op, since
+    /// the JS handle's lifetime is the caller's responsibility.
+    ///
+    /// The caller is responsible for asserting that `texture` was produced by
+    /// the same underlying `GpuDevice` as `self`.
+    pub(crate) fn wrap_external_texture(
+        &self,
+        texture: webgpu_sys::GpuTexture,
+    ) -> dispatch::DispatchTexture {
+        WebTexture {
+            inner: texture,
+            ownership: TextureOwnership::External,
+            ident: crate::cmp::Identifier::create(),
+        }
+        .into()
     }
 }
 
@@ -2401,6 +2433,7 @@ impl dispatch::DeviceInterface for WebDevice {
         let texture = self.inner.create_texture(&mapped_desc).unwrap();
         WebTexture {
             inner: texture,
+            ownership: TextureOwnership::Owned,
             ident: crate::cmp::Identifier::create(),
         }
         .into()
@@ -2929,7 +2962,10 @@ impl dispatch::TextureInterface for WebTexture {
     }
 
     fn destroy(&self) {
-        self.inner.destroy();
+        match self.ownership {
+            TextureOwnership::Owned => self.inner.destroy(),
+            TextureOwnership::External => {}
+        }
     }
 }
 impl Drop for WebTexture {
@@ -3998,6 +4034,7 @@ impl dispatch::SurfaceInterface for WebSurface {
 
         let web_surface_texture = WebTexture {
             inner: surface_texture,
+            ownership: TextureOwnership::Owned,
             ident: crate::cmp::Identifier::create(),
         };
 

@@ -49,6 +49,8 @@ impl Texture {
     /// - The texture is from the `webgpu` or `custom` backend.
     /// - The texture has had [`Self::destroy()`] called on it.
     ///
+    /// On the `webgpu` backend, use [`Self::as_webgpu`] instead.
+    ///
     /// # Safety
     ///
     /// - The returned resource must not be destroyed unless the guard
@@ -61,6 +63,22 @@ impl Texture {
     pub unsafe fn as_hal<A: hal::Api>(&self) -> Option<impl Deref<Target = A::Texture>> {
         let texture = self.inner.as_core_opt()?;
         unsafe { texture.context.texture_as_hal::<A>(texture) }
+    }
+
+    /// Returns the underlying [`webgpu::GpuTexture`] handle if this `Texture`
+    /// is on the WebGPU backend.
+    ///
+    /// Use this on the WebGPU backend instead of [`Self::as_hal`].
+    ///
+    /// The returned handle is the same JS object wgpu uses internally; it can
+    /// be passed to other WebGPU-aware JS APIs, used for identity comparison,
+    /// or fed back into [`Device::create_texture_from_webgpu_handle`].
+    ///
+    /// [`webgpu::GpuTexture`]: crate::webgpu::GpuTexture
+    /// [`Device::create_texture_from_webgpu_handle`]: crate::Device::create_texture_from_webgpu_handle
+    #[cfg(webgpu)]
+    pub fn as_webgpu(&self) -> Option<&webgpu::GpuTexture> {
+        self.inner.as_webgpu_opt().map(|wt| &wt.inner)
     }
 
     #[cfg(custom)]

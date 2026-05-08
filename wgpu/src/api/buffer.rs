@@ -276,6 +276,8 @@ impl Buffer {
     /// - The buffer is from the `webgpu` or `custom` backend.
     /// - The buffer has had [`Self::destroy()`] called on it.
     ///
+    /// On the `webgpu` backend, use [`Self::as_webgpu`] instead.
+    ///
     /// # Safety
     ///
     /// - The returned resource must not be destroyed unless the guard
@@ -454,6 +456,15 @@ impl Buffer {
     /// Returns custom implementation of Buffer (if custom backend and is internally T)
     pub fn as_custom<T: custom::BufferInterface>(&self) -> Option<&T> {
         self.inner.as_custom()
+    }
+
+    /// Returns the underlying [`webgpu::GpuBuffer`] handle if this `Buffer`
+    /// is on the WebGPU backend, otherwise `None`.
+    ///
+    /// [`webgpu::GpuBuffer`]: crate::webgpu::GpuBuffer
+    #[cfg(webgpu)]
+    pub fn as_webgpu(&self) -> Option<&webgpu::GpuBuffer> {
+        self.inner.as_webgpu_opt().map(|wb| &wb.inner)
     }
 }
 
