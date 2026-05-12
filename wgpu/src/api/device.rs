@@ -326,7 +326,6 @@ impl Device {
     /// may be discarded), `initial_state` may be set to
     /// `TextureUses::UNINITIALIZED`.
     ///
-
     /// # Safety
     ///
     /// - `hal_texture` must be created from this device internal handle
