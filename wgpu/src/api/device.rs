@@ -317,10 +317,16 @@ impl Device {
     ///
     /// # `initial_state`
     ///
-    /// The [`wgt::TextureUses`] state the wrapped resource is already in;
-    /// used as the source state (`oldLayout` / `StateBefore`) of the first
+    /// If the resource has already been initialized, `initial_state` should be
+    /// set to the [`wgt::TextureUses`] state of the wrapped resource.  It will
+    /// be used as the source state (`oldLayout` / `StateBefore`) of the first
     /// barrier emitted on the texture.
     ///
+    /// If the resource has not been initialized (or if the existing contents
+    /// may be discarded), `initial_state` may be set to
+    /// `TextureUses::UNINITIALIZED`.
+    ///
+
     /// # Safety
     ///
     /// - `hal_texture` must be created from this device internal handle
