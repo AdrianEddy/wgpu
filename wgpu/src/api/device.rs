@@ -332,8 +332,9 @@ impl Device {
     /// - `hal_texture` must be created from this device internal handle
     /// - `hal_texture` must be created respecting `desc`
     /// - `hal_texture` must be initialized
-    /// - The `initial_state` must match the actual driver-side
-    ///   layout/state of the wrapped resource at the moment of wrap.
+    /// - `initial_state`, if it is not `TextureUses::UNINITIALIZED`, must
+    ///   match the actual driver-side layout/state of the wrapped resource at
+    ///   the moment of wrap.
     #[cfg(wgpu_core)]
     #[must_use]
     pub unsafe fn create_texture_from_hal<A: hal::Api>(
