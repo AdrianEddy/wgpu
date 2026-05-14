@@ -471,6 +471,7 @@ pub fn backends(ctx: BenchmarkContext) -> anyhow::Result<Vec<SubBenchResult>> {
                 version: naga::back::glsl::Version::new_gles(320),
                 writer_flags: naga::back::glsl::WriterFlags::empty(),
                 binding_map: Default::default(),
+                external_texture_binding_map: Default::default(),
                 zero_initialize_workgroup_memory: true,
             };
             for input in &inputs.inner {

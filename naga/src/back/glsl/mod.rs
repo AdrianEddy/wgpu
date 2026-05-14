@@ -91,6 +91,9 @@ const CLAMPED_LOD_SUFFIX: &str = "_clamped_lod";
 
 pub(crate) const MODF_FUNCTION: &str = "naga_modf";
 pub(crate) const FREXP_FUNCTION: &str = "naga_frexp";
+pub(crate) const SAMPLE_EXTERNAL_TEXTURE_FUNCTION: &str = "nagaSampleExternalTexture";
+pub(crate) const IMAGE_LOAD_EXTERNAL_FUNCTION: &str = "nagaTextureLoadExternal";
+pub(crate) const IMAGE_SIZE_EXTERNAL_FUNCTION: &str = "nagaTextureDimensionsExternal";
 
 // Must match code in glsl_built_in
 pub const FIRST_INSTANCE_BINDING: &str = "naga_vs_first_instance";
@@ -119,6 +122,48 @@ where
 
 /// Mapping between resources and bindings.
 pub type BindingMap = alloc::collections::BTreeMap<crate::ResourceBinding, u8>;
+
+/// Binding targets for a single external texture.
+///
+/// Holds both the texture unit for the `samplerExternalOES` and the uniform
+/// buffer binding point for the `NagaExternalTextureParams` UBO.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serialize", derive(serde::Serialize))]
+#[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
+pub struct ExternalTextureBindTarget {
+    /// The texture unit to bind the `samplerExternalOES` to.
+    pub texture: u8,
+    /// The uniform buffer binding point for `NagaExternalTextureParams`.
+    pub params: u8,
+}
+
+/// Mapping between resources and external texture bind targets.
+pub type ExternalTextureBindingMap =
+    alloc::collections::BTreeMap<crate::ResourceBinding, ExternalTextureBindTarget>;
+
+#[cfg(feature = "deserialize")]
+#[derive(serde::Deserialize)]
+struct ExternalTextureBindingMapSerialization {
+    resource_binding: crate::ResourceBinding,
+    bind_target: ExternalTextureBindTarget,
+}
+
+#[cfg(feature = "deserialize")]
+fn deserialize_external_texture_binding_map<'de, D>(
+    deserializer: D,
+) -> Result<ExternalTextureBindingMap, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    let vec = Vec::<ExternalTextureBindingMapSerialization>::deserialize(deserializer)?;
+    let mut map = ExternalTextureBindingMap::default();
+    for item in vec {
+        map.insert(item.resource_binding, item.bind_target);
+    }
+    Ok(map)
+}
 
 impl crate::AtomicFunction {
     const fn to_glsl(self) -> &'static str {
@@ -336,6 +381,16 @@ pub struct Options {
         serde(deserialize_with = "deserialize_binding_map")
     )]
     pub binding_map: BindingMap,
+    /// Map of external texture resources to their bind targets.
+    ///
+    /// For each external texture, specifies the texture unit for the
+    /// `samplerExternalOES` and the uniform buffer binding point for the
+    /// `NagaExternalTextureParams` UBO used for color space conversion.
+    #[cfg_attr(
+        feature = "deserialize",
+        serde(deserialize_with = "deserialize_external_texture_binding_map")
+    )]
+    pub external_texture_binding_map: ExternalTextureBindingMap,
     /// Should workgroup variables be zero initialized (by polyfilling)?
     pub zero_initialize_workgroup_memory: bool,
 }
@@ -346,6 +401,7 @@ impl Default for Options {
             version: Version::new_gles(310),
             writer_flags: WriterFlags::ADJUST_COORDINATE_SPACE,
             binding_map: BindingMap::default(),
+            external_texture_binding_map: ExternalTextureBindingMap::default(),
             zero_initialize_workgroup_memory: true,
         }
     }
@@ -645,4 +701,5 @@ pub fn supported_capabilities() -> valid::Capabilities {
         | Caps::DRAW_INDEX
         | Caps::MEMORY_DECORATION_COHERENT
         | Caps::MEMORY_DECORATION_VOLATILE
+        | Caps::TEXTURE_EXTERNAL
 }
