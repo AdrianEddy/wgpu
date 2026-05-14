@@ -1075,7 +1075,7 @@ impl Texture {
     ///
     /// The intended use is to wrap one plane of a multi-plane DXGI
     /// resource (e.g. NV12) as a single-plane wgpu texture, typically
-    /// by calling [`Device::texture_from_raw`](super::Device::texture_from_raw)
+    /// by calling [`Device::texture_from_raw`](Device::texture_from_raw)
     /// twice with two clones of the same `ID3D12Resource` and a
     /// different `plane_slice` on each. wgpu's state tracker treats
     /// these wrappers as independent textures: per-subresource state,
