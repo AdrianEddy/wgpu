@@ -231,6 +231,11 @@ By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
 
 - Fix crash on fence creation when running in a MacOS Seatbelt sandbox. By @wumpf in [#9415](https://github.com/gfx-rs/wgpu/pull/9415)
 
+#### WebGPU
+
+- Expose the underlying JS handles of WebGPU-backed resources via new `as_webgpu` accessors on `Texture`, `TextureView`, `Buffer`, `Queue`, and `Device`, returning `Option<&wgpu::webgpu::Gpu*>`. This is the WebGPU counterpart of `as_hal` (which returns `None` on the WebGPU backend, since WebGPU is not a `wgpu_hal` API). The vendored handle types are re-exported under the new `wgpu::webgpu` module. By @AdrianEddy in [#9530](https://github.com/gfx-rs/wgpu/pull/9530)
+- Add `Device::create_texture_from_webgpu_handle(texture, desc)` for wrapping a foreign `webgpu::GpuTexture` (e.g. a canvas `getCurrentTexture()` result) as a `wgpu::Texture` without copy. The wrapped texture is _external_: `destroy()` is a no-op, and the underlying handle's lifetime is the caller's responsibility. By @AdrianEddy in [#9530](https://github.com/gfx-rs/wgpu/pull/9530)
+
 ### Dependency Updates
 
 #### WebGPU

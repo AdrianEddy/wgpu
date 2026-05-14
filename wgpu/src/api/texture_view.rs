@@ -61,6 +61,8 @@ impl TextureView {
     /// - The texture view is from the `webgpu` or `custom` backend.
     /// - The texture this view points to has had [`Texture::destroy()`] called on it.
     ///
+    /// On the `webgpu` backend, use `as_webgpu` instead.
+    ///
     /// # Safety
     ///
     /// - The returned resource must not be destroyed unless the guard
@@ -73,6 +75,15 @@ impl TextureView {
     pub unsafe fn as_hal<A: hal::Api>(&self) -> Option<impl Deref<Target = A::TextureView>> {
         let view = self.inner.as_core_opt()?;
         unsafe { view.context.texture_view_as_hal::<A>(view) }
+    }
+
+    /// Returns the underlying [`webgpu::GpuTextureView`] handle if this view
+    /// is on the WebGPU backend, otherwise `None`.
+    ///
+    /// [`webgpu::GpuTextureView`]: crate::webgpu::GpuTextureView
+    #[cfg(webgpu)]
+    pub fn as_webgpu(&self) -> Option<&webgpu::GpuTextureView> {
+        self.inner.as_webgpu_opt().map(|wv| &wv.inner)
     }
 
     #[cfg(custom)]

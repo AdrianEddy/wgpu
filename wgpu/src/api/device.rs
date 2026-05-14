@@ -315,6 +315,8 @@ impl Device {
     #[doc = crate::macros::hal_type_dx12!("Texture")]
     #[doc = crate::macros::hal_type_gles!("Texture")]
     ///
+    /// On the `webgpu` backend, use `create_texture_from_webgpu_handle` instead.
+    ///
     /// # `initial_state`
     ///
     /// If the resource has already been initialized, `initial_state` should be
@@ -359,6 +361,53 @@ impl Device {
                 ..desc.clone()
             },
         }
+    }
+
+    /// Wraps a foreign [`webgpu::GpuTexture`] (e.g. a canvas `getCurrentTexture()` result)
+    /// as a [`Texture`] without any copy.
+    ///
+    /// The wrapped texture is *external*: dropping the returned `Texture` (or
+    /// calling [`Texture::destroy`] on it) does **not** destroy the underlying
+    /// `GpuTexture` - its lifetime is the caller's responsibility.
+    ///
+    /// This is the WebGPU counterpart of [`Self::create_texture_from_hal`].
+    ///
+    /// # Safety
+    ///
+    /// The caller must guarantee:
+    ///
+    /// 1. `texture` was produced by the same underlying `GpuDevice` that this `Device` wraps.
+    /// 2. `desc.format`, `desc.size`, `desc.usage`, `desc.dimension`,
+    ///    `desc.mip_level_count`, and `desc.sample_count` match the actual
+    ///    `GPUTexture`'s reflected values.
+    /// 3. The underlying `GpuTexture` must remain alive for as long as wgpu
+    ///    may use it (e.g. until any submitted command buffer that references
+    ///    it has finished executing).
+    #[cfg(webgpu)]
+    #[must_use]
+    pub unsafe fn create_texture_from_webgpu_handle(
+        &self,
+        texture: webgpu::GpuTexture,
+        desc: &TextureDescriptor<'_>,
+    ) -> Texture {
+        let inner = self.inner.as_webgpu().wrap_external_texture(texture);
+        Texture {
+            inner,
+            descriptor: TextureDescriptor {
+                label: None,
+                view_formats: &[],
+                ..desc.clone()
+            },
+        }
+    }
+
+    /// Returns the underlying [`webgpu::GpuDevice`] handle if this `Device`
+    /// is on the WebGPU backend, otherwise `None`.
+    ///
+    /// [`webgpu::GpuDevice`]: crate::webgpu::GpuDevice
+    #[cfg(webgpu)]
+    pub fn as_webgpu(&self) -> Option<&webgpu::GpuDevice> {
+        self.inner.as_webgpu_opt().map(|wd| &wd.inner)
     }
 
     /// Creates a new [`ExternalTexture`].
@@ -583,6 +632,8 @@ impl Device {
     /// This method will return None if:
     /// - The device is not from the backend specified by `A`.
     /// - The device is from the `webgpu` or `custom` backend.
+    ///
+    /// On the `webgpu` backend, use `as_webgpu` instead.
     ///
     /// # Safety
     ///
