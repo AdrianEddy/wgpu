@@ -176,6 +176,70 @@ impl super::Device {
         }
     }
 
+    /// # Safety
+    ///
+    /// - `name` must be a non-zero GL buffer name created respecting `desc`.
+    /// - The buffer's storage size must be at least `desc.size`.
+    /// - If `desc.usage` includes [`BufferUses::MAP_READ`](wgt::BufferUses::MAP_READ) or
+    ///   [`BufferUses::MAP_WRITE`](wgt::BufferUses::MAP_WRITE), the GL buffer must have
+    ///   been allocated with `glBufferStorage` (or equivalent) using flags compatible
+    ///   with persistent mapping (`GL_MAP_PERSISTENT_BIT` plus matching read/write/coherent
+    ///   bits). Buffers created with the legacy `glBufferData` family cannot be mapped
+    ///   through this path.
+    /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of the buffer and
+    ///   call `glDeleteBuffers` on it. If `drop_callback` is [`Some`], the buffer must
+    ///   remain valid until the callback is invoked.
+    #[cfg(any(native, Emscripten))]
+    pub unsafe fn buffer_from_raw(
+        &self,
+        name: NonZeroU32,
+        desc: &crate::BufferDescriptor,
+        drop_callback: Option<crate::DropCallback>,
+    ) -> super::Buffer {
+        let target = if desc.usage.contains(wgt::BufferUses::INDEX) {
+            glow::ELEMENT_ARRAY_BUFFER
+        } else {
+            glow::ARRAY_BUFFER
+        };
+
+        let is_host_visible = desc
+            .usage
+            .intersects(wgt::BufferUses::MAP_READ | wgt::BufferUses::MAP_WRITE);
+        let is_coherent = desc
+            .memory_flags
+            .contains(crate::MemoryFlags::PREFER_COHERENT);
+
+        let mut map_flags = 0;
+        if desc.usage.contains(wgt::BufferUses::MAP_READ) {
+            map_flags |= glow::MAP_READ_BIT;
+        }
+        if desc.usage.contains(wgt::BufferUses::MAP_WRITE) {
+            map_flags |= glow::MAP_WRITE_BIT;
+        }
+        if is_host_visible {
+            map_flags |= glow::MAP_PERSISTENT_BIT;
+            if is_coherent {
+                map_flags |= glow::MAP_COHERENT_BIT;
+            }
+        }
+        if !is_coherent && desc.usage.contains(wgt::BufferUses::MAP_WRITE) {
+            map_flags |= glow::MAP_FLUSH_EXPLICIT_BIT;
+        }
+
+        self.counters.buffers.add(1);
+
+        super::Buffer {
+            raw: Some(glow::NativeBuffer(name)),
+            target,
+            size: desc.size,
+            map_flags,
+            mapped: false.into(),
+            data: None,
+            offset_of_current_mapping: Arc::new(MaybeMutex::new(0)),
+            drop_guard: crate::DropGuard::from_option(drop_callback).map(Arc::new),
+        }
+    }
+
     unsafe fn compile_shader(
         gl: &glow::Context,
         shader: &str,
@@ -582,6 +646,7 @@ impl crate::Device for super::Device {
                 mapped: false.into(),
                 data: Some(Arc::new(MaybeMutex::new(vec![0; desc.size as usize]))),
                 offset_of_current_mapping: Arc::new(MaybeMutex::new(0)),
+                drop_guard: None,
             });
         }
 
@@ -683,14 +748,21 @@ impl crate::Device for super::Device {
             map_flags,
             data,
             offset_of_current_mapping: Arc::new(MaybeMutex::new(0)),
+            drop_guard: None,
         })
     }
 
     unsafe fn destroy_buffer(&self, buffer: super::Buffer) {
-        if let Some(raw) = buffer.raw {
-            let gl = &self.shared.context.lock();
-            unsafe { gl.delete_buffer(raw) };
+        if buffer.drop_guard.is_none() {
+            if let Some(raw) = buffer.raw {
+                let gl = &self.shared.context.lock();
+                unsafe { gl.delete_buffer(raw) };
+            }
         }
+
+        // For clarity, we explicitly drop the drop guard. Although this has no real semantic effect as the
+        // end of the scope will drop the drop guard since this function takes ownership of the buffer.
+        drop(buffer.drop_guard);
 
         self.counters.buffers.sub(1);
     }
