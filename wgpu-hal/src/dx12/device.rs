@@ -477,6 +477,7 @@ impl super::Device {
                 suballocation::AllocationType::Texture,
                 format.theoretical_memory_footprint(size),
             ),
+            plane_slice_override: None,
         }
     }
 
@@ -598,6 +599,7 @@ impl crate::Device for super::Device {
             mip_level_count: desc.mip_level_count,
             sample_count: desc.sample_count,
             allocation,
+            plane_slice_override: None,
         })
     }
 
@@ -629,7 +631,7 @@ impl crate::Device for super::Device {
             subresource_index: texture.calc_subresource(
                 desc.range.base_mip_level,
                 desc.range.base_array_layer,
-                0,
+                view_desc.plane_slice(),
             ),
             mip_slice: desc.range.base_mip_level,
             handle_srv: if desc.usage.intersects(wgt::TextureUses::RESOURCE) {

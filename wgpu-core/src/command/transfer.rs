@@ -1373,9 +1373,22 @@ pub(super) fn copy_texture_to_texture(
     dst_texture.same_device(state.device)?;
 
     // src and dst texture format must be copy-compatible
-    // https://gpuweb.github.io/gpuweb/#copy-compatible
-    if src_texture.desc.format.remove_srgb_suffix() != dst_texture.desc.format.remove_srgb_suffix()
-    {
+    // (https://gpuweb.github.io/gpuweb/#copy-compatible), with an
+    // extension allowing one plane of a planar source to be copied
+    // into a single-plane destination of the matching format
+    // (e.g. NV12 Plane0 -> R8Unorm, NV12 Plane1 -> Rg8Unorm).
+    //
+    // When taking this path, `copy_size` is in *plane* texels, not
+    // luma texels: copying NV12 Plane1 into an Rg8Unorm of size
+    // (W/2, H/2) requires `copy_size = (W/2, H/2)`. Source-side
+    // validation uses the full luma extent and so will not catch a
+    // caller passing luma-sized copies; the destination's smaller
+    // extent will, but with an opaque overrun error.
+    let src_fmt_no_srgb = src_texture.desc.format.remove_srgb_suffix();
+    let dst_fmt_no_srgb = dst_texture.desc.format.remove_srgb_suffix();
+    let planar_split_ok = src_fmt_no_srgb.is_multi_planar_format()
+        && src_fmt_no_srgb.aspect_specific_format(source.aspect) == Some(dst_fmt_no_srgb);
+    if src_fmt_no_srgb != dst_fmt_no_srgb && !planar_split_ok {
         return Err(TransferError::TextureFormatsNotCopyCompatible {
             src_format: src_texture.desc.format,
             dst_format: dst_texture.desc.format,
@@ -1405,7 +1418,8 @@ pub(super) fn copy_texture_to_texture(
     let (dst_range, dst_tex_base) = extract_texture_selector(destination, copy_size, dst_texture)?;
     let src_texture_aspects = hal::FormatAspects::from(src_texture.desc.format);
     let dst_texture_aspects = hal::FormatAspects::from(dst_texture.desc.format);
-    if src_tex_base.aspect != src_texture_aspects {
+    // `planar_split_ok` already constrains `source.aspect` to a single plane.
+    if src_tex_base.aspect != src_texture_aspects && !planar_split_ok {
         return Err(TransferError::CopySrcMissingAspects.into());
     }
     if dst_tex_base.aspect != dst_texture_aspects {
