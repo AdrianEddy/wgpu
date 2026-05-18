@@ -472,8 +472,6 @@ impl Queue {
         }
     }
 
-    /// Returns the underlying `MTLCommandQueue` for direct interop with
-    /// other Metal-aware libraries.
     pub fn as_raw(&self) -> &ProtocolObject<dyn MTLCommandQueue> {
         &self.shared.raw
     }

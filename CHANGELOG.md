@@ -85,10 +85,38 @@ GLSL:
 
 By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 
+#### Empty buffer slices are now permitted
+
+Creating a `BufferSlice` with a length of 0 no longer causes a panic.
+
+Empty buffer slices can be:
+
+- Instantiated
+- Mapped (the result is an empty slice of bytes)
+
+Empty buffer slices cannot be:
+
+- Used in buffer bindings
+- Passed to `set_index_buffer` or `set_vertex_buffer`
+
+#3170 tracks making it possible to pass a zero-size `BufferSlice` to `set_vertex_buffer` and `set_index_buffer` in the future.
+
+Zero-size buffer bindings are still not permitted. `BufferBinding` now implements `TryFrom<BufferSlice>` instead of `From<BufferSlice>`. The `TryFrom` conversion will fail if the slice is zero-size.
+
+```diff
+-let slice = buffer.slice(0..0); // panic!
+-let mapping = BufferBinding::from(slice); // infallible
++let slice = buffer.slice(0..0); // okay
++let mapping = BufferBinding::try_from(slice).unwrap(); // panic
+```
+
+By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
+
 ### Added/New Features
 
 #### General
 
+- Add `StagingBelt::finish_and_recall_on_submit`, a convenience that combines `finish` and `recall` by deferring the buffer re-map via `CommandEncoder::map_buffer_on_submit`, so no explicit `recall()` call is needed after submission. By @ruihe774.
 - Implement `i16`/`u16` 16-bit integer support in WGSL shaders, gated behind `Features::SHADER_I16` and `enable wgpu_int16;`. Supported on Vulkan, Metal, and DX12 (SM 6.2+). By @JMS55 in [#9412](https://github.com/gfx-rs/wgpu/pull/9412).
 - BLAS support for procedural AABB geometry (`BlasGeometrySizeDescriptors::AABBs`, `BlasAabbGeometry`, and related descriptors). By @dylanblokhuis in [#9290](https://github.com/gfx-rs/wgpu/pull/9290)
 - Added "limit bucketing" functionality which can adjust adapter limits and features to match one of several pre-defined buckets. This is controlled by the new `apply_limit_buckets` member in `RequestAdapterOptions`, which is `false` by default. By @andyleiserson in [#9119](https://github.com/gfx-rs/wgpu/pull/9119).
@@ -96,6 +124,14 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 - Make `wgpu_types::texture::format::TextureChannel` accessible as `wgpu::TextureChannel`. By @TornaxO7 in [#9394](https://github.com/gfx-rs/wgpu/pull/9349).
 - Add support for `per_vertex` in Metal and DX12, as well as some validation for `per_vertex`, and a new enable extension, `wgpu_per_vertex`. By @inner-daemons in [#9219](https://github.com/gfx-rs/wgpu/pull/9219).
 - Add `ComputePass` version of `CommandEncoder::transition_resources` that allows intra-pass transitions. By @wingertge in [#9371](https://github.com/gfx-rs/wgpu/pull/9371).
+- `Device::create_texture_from_hal` now takes an explicit `initial_state: wgt::TextureUses` parameter declaring the state the wrapped foreign resource is already in. Previously the tracker hard-coded `TextureUses::UNINITIALIZED` for the wrapped texture, which is a content-discarding transition under the Vulkan spec. This affected zero-copy hardware-decoded video imports on the platforms where compressed modifiers are used. To migrate, pass `wgpu::TextureUses::UNINITIALIZED` to preserve the previous behaviour:
+  ```diff
+    let texture = unsafe {
+  -     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc)
+  +     device.create_texture_from_hal::<Vulkan>(hal_texture, &desc, wgpu::TextureUses::UNINITIALIZED)
+    };
+  ```
+  By @AdrianEddy in [#9496](https://github.com/gfx-rs/wgpu/pull/9496).
 
 #### Metal
 
@@ -103,6 +139,7 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 - Unconditionally enable `Features::CLIP_DISTANCES`. By @ErichDonGubler in [#9270](https://github.com/gfx-rs/wgpu/pull/9270).
 - Added full support for mesh shaders, including in WGSL shaders. By @inner-daemons in [#8739](https://github.com/gfx-rs/wgpu/pull/8739).
 - Fixed structure field names incorrectly ignoring reserved keywords in the Metal (MSL) backend. By @39ali [#9379](https://github.com/gfx-rs/wgpu/pull/9379).
+- Restore the `Queue::as_raw` method, which was removed without good reason in v29. It now returns `&ProtocolObject<dyn MTLCommandQueue>`. By @andyleiserson in [#9560](https://github.com/gfx-rs/wgpu/pull/9560).
 
 #### GLES
 
@@ -177,6 +214,7 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 - Enforce that `@must_use` appear only on function declarations. By @dnsn021 in [#9367](https://github.com/gfx-rs/wgpu/pull/9367).
 - Fix typo in `naga::back::msl::Error::UnsupportedWritable*` variant names. By @ErichDonGubler in [#9376](https://github.com/gfx-rs/wgpu/pull/9376).
 - Added support for `enable wgpu_binding_array;`. By @39ali in [#9298](https://github.com/gfx-rs/wgpu/pull/9298).
+- [hlsl] more `matCx2` fixes. By @teoxoy in [#9507](https://github.com/gfx-rs/wgpu/pull/9507).
 
 #### Vulkan
 
@@ -188,6 +226,8 @@ By @andyleiserson in [#9321](https://github.com/gfx-rs/wgpu/pull/9321).
 
 - Fixed use of a texture view without `TextureUsage::TEXTURE_BINDING` as a read-only depth attachment. By @andyleiserson in [#9346](https://github.com/gfx-rs/wgpu/pull/9346).
 - Fixed a `debug_assert` during stride validation for indirect multi draw. By @kristoff3r in [#9332](https://github.com/gfx-rs/wgpu/pull/9332)
+- Fixed stencil values read with `textureLoad` appearing in G instead of R. By @andyleiserson in [#9520](https://github.com/gfx-rs/wgpu/pull/9520).
+- Fixed some cases where the `textureNum{Layers,Levels,Samples}` functions returned incorrect results. By @andyleiserson in [#9542](https://github.com/gfx-rs/wgpu/pull/9542).
 
 #### Metal
 
