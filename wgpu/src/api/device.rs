@@ -367,10 +367,19 @@ impl Device {
     /// as a [`Texture`] without any copy.
     ///
     /// The wrapped texture is *external*: dropping the returned `Texture` (or
-    /// calling [`Texture::destroy`] on it) does **not** destroy the underlying
-    /// `GpuTexture` - its lifetime is the caller's responsibility.
+    /// calling [`Texture::destroy`] on it) does **not** call `GpuTexture.destroy()`
+    /// on the underlying handle - its lifetime is the caller's responsibility.
     ///
-    /// This is the WebGPU counterpart of [`Self::create_texture_from_hal`].
+    /// If `drop_callback` is `Some`, it fires when wgpu releases its last
+    /// reference to the wrapped handle. The callback can be used to call
+    /// `GpuTexture.destroy()` if the caller wants prompt
+    /// release of the GPU memory, to free a pool slot, or to notify
+    /// dependent code that wgpu is done with the handle. Pass `None` if the
+    /// caller manages the handle's lifetime entirely on their own.
+    ///
+    /// This is the WebGPU counterpart of [`Self::create_texture_from_hal`];
+    /// `drop_callback` plays the same role as `wgpu_hal::DropCallback` does
+    /// on the Vulkan backend.
     ///
     /// # Safety
     ///
@@ -382,15 +391,20 @@ impl Device {
     ///    `GPUTexture`'s reflected values.
     /// 3. The underlying `GpuTexture` must remain alive for as long as wgpu
     ///    may use it (e.g. until any submitted command buffer that references
-    ///    it has finished executing).
+    ///    it has finished executing). If `drop_callback` is `Some`, it is
+    ///    sufficient to keep the handle alive until the callback fires.
     #[cfg(webgpu)]
     #[must_use]
     pub unsafe fn create_texture_from_webgpu_handle(
         &self,
         texture: webgpu::GpuTexture,
         desc: &TextureDescriptor<'_>,
+        drop_callback: Option<webgpu::DropCallback>,
     ) -> Texture {
-        let inner = self.inner.as_webgpu().wrap_external_texture(texture);
+        let inner = self
+            .inner
+            .as_webgpu()
+            .wrap_external_texture(texture, drop_callback);
         Texture {
             inner,
             descriptor: TextureDescriptor {

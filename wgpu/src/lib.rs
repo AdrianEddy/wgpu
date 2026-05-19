@@ -202,6 +202,7 @@ pub mod webgpu {
     pub use crate::backend::webgpu::webgpu_sys::{
         GpuBuffer, GpuDevice, GpuQueue, GpuTexture, GpuTextureView,
     };
+    pub use crate::backend::webgpu::DropCallback;
 }
 
 #[doc(hidden)]

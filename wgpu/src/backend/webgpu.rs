@@ -86,6 +86,37 @@ impl crate::Error {
     }
 }
 
+/// A callback invoked when wgpu releases its reference to an externally
+/// owned WebGPU resource (e.g. a `GpuTexture` passed to
+/// [`crate::Device::create_texture_from_webgpu_handle`]).
+///
+/// This is the WebGPU counterpart of [`wgpu_hal::DropCallback`].
+pub type DropCallback = Box<dyn FnOnce() + 'static>;
+
+pub(crate) struct DropGuard {
+    callback: Option<DropCallback>,
+}
+
+impl DropGuard {
+    fn new(callback: Option<DropCallback>) -> Self {
+        Self { callback }
+    }
+}
+
+impl Drop for DropGuard {
+    fn drop(&mut self) {
+        if let Some(cb) = self.callback.take() {
+            cb();
+        }
+    }
+}
+
+impl fmt::Debug for DropGuard {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DropGuard").finish()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WebShaderModule {
     module: webgpu_sys::GpuShaderModule,
@@ -1342,18 +1373,19 @@ impl WebBuffer {
 #[derive(Debug, Clone)]
 pub struct WebTexture {
     pub(crate) inner: webgpu_sys::GpuTexture,
-    /// Whether wgpu owns the underlying `GpuTexture` (so `destroy()` frees it)
-    /// or wraps an external handle (`destroy()` is a no-op, since the lifetime
-    /// is the caller's responsibility).
-    ownership: TextureOwnership,
+    /// Lifetime management for the underlying `GpuTexture`.
+    ///
+    /// - `None` means wgpu owns the handle: [`Self::destroy`] forwards to
+    ///   `GpuTexture.destroy()`. (This is the case for textures created via
+    ///   `device.createTexture` or `surface.getCurrentTexture`.)
+    /// - `Some(_)` means the handle is externally owned (wrapped via
+    ///   [`WebDevice::wrap_external_texture`]). `destroy()` is a no-op, and
+    ///   the wrapped [`DropCallback`] fires when the last clone of
+    ///   this `WebTexture` is dropped, signalling that wgpu is done with the
+    ///   handle.
+    drop_guard: Option<Rc<DropGuard>>,
     /// Unique identifier for this Texture.
     ident: crate::cmp::Identifier,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TextureOwnership {
-    Owned,
-    External,
 }
 
 #[derive(Debug, Clone)]
@@ -1807,21 +1839,27 @@ impl Drop for WebAdapter {
 }
 
 impl WebDevice {
-    /// Wrap a foreign `webgpu_sys::GpuTexture` (e.g. from  canvas `getCurrentTexture()`) as a
+    /// Wrap a foreign `webgpu_sys::GpuTexture` (e.g. from a canvas `getCurrentTexture()`) as a
     /// dispatch-level `WebTexture` without calling `device.createTexture(...)`.
     ///
-    /// The resulting texture is `External`: its `destroy()` is a no-op, since
+    /// The resulting texture is *external*: its `destroy()` is a no-op, since
     /// the JS handle's lifetime is the caller's responsibility.
+    ///
+    /// If `drop_callback` is `Some`, it fires when the last clone of the
+    /// returned `WebTexture` is dropped, signalling that wgpu is done with
+    /// the handle (e.g. so the caller can call `GpuTexture.destroy()`
+    /// themselves, release a pool slot, etc.).
     ///
     /// The caller is responsible for asserting that `texture` was produced by
     /// the same underlying `GpuDevice` as `self`.
     pub(crate) fn wrap_external_texture(
         &self,
         texture: webgpu_sys::GpuTexture,
+        drop_callback: Option<DropCallback>,
     ) -> dispatch::DispatchTexture {
         WebTexture {
             inner: texture,
-            ownership: TextureOwnership::External,
+            drop_guard: Some(Rc::new(DropGuard::new(drop_callback))),
             ident: crate::cmp::Identifier::create(),
         }
         .into()
@@ -2433,7 +2471,7 @@ impl dispatch::DeviceInterface for WebDevice {
         let texture = self.inner.create_texture(&mapped_desc).unwrap();
         WebTexture {
             inner: texture,
-            ownership: TextureOwnership::Owned,
+            drop_guard: None,
             ident: crate::cmp::Identifier::create(),
         }
         .into()
@@ -2962,15 +3000,15 @@ impl dispatch::TextureInterface for WebTexture {
     }
 
     fn destroy(&self) {
-        match self.ownership {
-            TextureOwnership::Owned => self.inner.destroy(),
-            TextureOwnership::External => {}
+        if self.drop_guard.is_none() {
+            self.inner.destroy();
         }
     }
 }
 impl Drop for WebTexture {
     fn drop(&mut self) {
-        // no-op
+        // The drop-callback for external textures is fired by `DropGuard`'s
+        // own `Drop` impl when the last `Rc<DropGuard>` clone is released.
     }
 }
 
@@ -4034,7 +4072,7 @@ impl dispatch::SurfaceInterface for WebSurface {
 
         let web_surface_texture = WebTexture {
             inner: surface_texture,
-            ownership: TextureOwnership::Owned,
+            drop_guard: None,
             ident: crate::cmp::Identifier::create(),
         };
 
