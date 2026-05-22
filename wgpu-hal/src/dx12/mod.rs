@@ -1094,8 +1094,8 @@ impl Texture {
     pub fn with_plane_slice(mut self, plane_slice: u32) -> Self {
         debug_assert!(
             !self.format.is_multi_planar_format(),
-            "with_plane_slice expects a single-plane format wrapping a \
-             multi-plane DXGI resource; got planar format {:?}",
+            "`with_plane_slice` expects a single-plane format wrapping a \
+             multi-plane DXGI resource; got planar format `{:?}`",
             self.format,
         );
         self.plane_slice_override = Some(plane_slice);
