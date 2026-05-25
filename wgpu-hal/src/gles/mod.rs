@@ -348,6 +348,12 @@ pub struct Buffer {
     ///
     /// If locked concurrently with the GL context, the GL context should be locked first.
     map_state: Arc<MaybeMutex<BufferMapState>>,
+    /// Set when the buffer wraps an externally-owned GL name created via
+    /// [`Device::buffer_from_raw`](crate::gles::Device::buffer_from_raw).
+    ///
+    /// `Buffer` is `Clone`, so the guard is shared via `Arc`
+    /// and only fires its callback once every clone is dropped.
+    drop_guard: Option<Arc<crate::DropGuard>>,
 }
 
 #[derive(Clone, Debug)]
@@ -357,12 +363,6 @@ struct BufferMapState {
     mapped: bool,
     data: Option<Vec<u8>>,
     offset_of_current_mapping: wgt::BufferAddress,
-    /// Set when the buffer wraps an externally-owned GL name created via
-    /// [`Device::buffer_from_raw`](crate::gles::Device::buffer_from_raw).
-    ///
-    /// `Buffer` is `Clone`, so the guard is shared via `Arc`
-    /// and only fires its callback once every clone is dropped.
-    drop_guard: Option<Arc<crate::DropGuard>>,
 }
 
 #[cfg(send_sync)]

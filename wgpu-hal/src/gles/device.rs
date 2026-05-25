@@ -233,9 +233,11 @@ impl super::Device {
             target,
             size: desc.size,
             map_flags,
-            mapped: false.into(),
-            data: None,
-            offset_of_current_mapping: Arc::new(MaybeMutex::new(0)),
+            map_state: Arc::new(MaybeMutex::new(super::BufferMapState {
+                mapped: false,
+                data: None,
+                offset_of_current_mapping: 0,
+            })),
             drop_guard: crate::DropGuard::from_option(drop_callback).map(Arc::new),
         }
     }
