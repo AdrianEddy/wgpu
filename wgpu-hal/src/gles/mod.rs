@@ -242,6 +242,11 @@ bitflags::bitflags! {
         /// `GL_EXT_render_snorm` (in addition to `GL_EXT_texture_norm16`
         /// on GLES) ÔÇö desktop GL alone only "optionally" renders SNORM 16.
         const TEXTURE_FORMAT_SNORM16_RENDERABLE = 1 << 19;
+        /// Supports norm16 sized internal formats as image-load/store targets.
+        /// Desktop GL >= 4.2 (core image-format list) or pre-4.2 with
+        /// `GL_ARB_shader_image_load_store`; GLES needs `GL_NV_image_formats`
+        /// (which itself depends on `GL_EXT_texture_norm16`).
+        const TEXTURE_FORMAT_NORM16_STORAGE = 1 << 20;
     }
 }
 
