@@ -456,7 +456,7 @@ impl super::Adapter {
         // SNORM color-rendering is not spec-guaranteed on either path
         // (GLES Table 8.13 marks it not-renderable; desktop GL exposes
         // it as only "optionally renderable"), so gate it on
-        // `EXT_render_snorm` for both ÔÇö matching how `COLOR_BUFFER_FLOAT`
+        // `EXT_render_snorm` for both - matching how `COLOR_BUFFER_FLOAT`
         // is probed above.
         let supports_16bit_snorm_renderable = supports_16bit_norm
             && (extensions.contains("GL_EXT_render_snorm")
