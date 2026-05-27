@@ -144,6 +144,7 @@ By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
 
 - Added support for GLSL passthrough. By @inner-daemons in [#9064](https://github.com/gfx-rs/wgpu/pull/9064).
 - Implement `Adapter::new_external()` for WebGL2 (just like EGL/WGL) to import an external WebGL2 rendering context, and expose the imported context back through `Adapter::adapter_context()` / `Device::context()`. By @pepperoni505 in [#9438](https://github.com/gfx-rs/wgpu/pull/9438).
+- Advertise `Features::TEXTURE_FORMAT_16BIT_NORM` on OpenGL. Desktop GL 3.3+ enables the UNORM variants unconditionally (core sized-internalformats since GL 3.0/3.1); GLES and WebGL2 require `GL_EXT_texture_norm16` for sampling + UNORM color-attachment usage. SNORM color-attachment usage additionally requires `GL_EXT_render_snorm` on both paths. By @AdrianEddy in [#9601](https://github.com/gfx-rs/wgpu/pull/9601).
 
 #### DX12
 

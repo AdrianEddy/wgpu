@@ -234,6 +234,14 @@ bitflags::bitflags! {
         const FULLY_FEATURED_INSTANCING = 1 << 16;
         /// Supports direct multisampled rendering to a texture without needing a resolve texture.
         const MULTISAMPLED_RENDER_TO_TEXTURE = 1 << 17;
+        /// Supports norm16 sized internal formats as filterable sampled
+        /// textures, with UNORM variants also color-renderable. SNORM
+        /// renderability is gated on `TEXTURE_FORMAT_SNORM16_RENDERABLE`.
+        const TEXTURE_FORMAT_NORM16 = 1 << 18;
+        /// Supports SNORM 16-bit formats as color attachments. Requires
+        /// `GL_EXT_render_snorm` (in addition to `GL_EXT_texture_norm16`
+        /// on GLES) ÔÇö desktop GL alone only "optionally" renders SNORM 16.
+        const TEXTURE_FORMAT_SNORM16_RENDERABLE = 1 << 19;
     }
 }
 

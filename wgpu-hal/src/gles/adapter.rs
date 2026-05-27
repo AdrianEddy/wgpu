@@ -445,12 +445,33 @@ impl super::Adapter {
             downlevel_flags.set(wgt::DownlevelFlags::NONBLOCKING_QUERY_RESOLVE, true);
         }
 
+        // Desktop GL: norm16 is core since GL 3.0/3.1; we minimum-version
+        // to GL 3.3, so always on. GLES/WebGL2: needs `EXT_texture_norm16`.
+        let supports_16bit_norm = if es_ver.is_some() {
+            extensions.contains("GL_EXT_texture_norm16")
+                || extensions.contains("EXT_texture_norm16")
+        } else {
+            true
+        };
+        // SNORM color-rendering is not spec-guaranteed on either path
+        // (GLES Table 8.13 marks it not-renderable; desktop GL exposes
+        // it as only "optionally renderable"), so gate it on
+        // `EXT_render_snorm` for both ÔÇö matching how `COLOR_BUFFER_FLOAT`
+        // is probed above.
+        let supports_16bit_snorm_renderable = supports_16bit_norm
+            && (extensions.contains("GL_EXT_render_snorm")
+                || extensions.contains("EXT_render_snorm"));
+
         let mut features = wgt::Features::empty()
             | wgt::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
             | wgt::Features::CLEAR_TEXTURE
             | wgt::Features::IMMEDIATES
             | wgt::Features::DEPTH32FLOAT_STENCIL8
             | wgt::Features::PASSTHROUGH_SHADERS;
+        features.set(
+            wgt::Features::TEXTURE_FORMAT_16BIT_NORM,
+            supports_16bit_norm,
+        );
         features.set(
             wgt::Features::ADDRESS_MODE_CLAMP_TO_BORDER | wgt::Features::ADDRESS_MODE_CLAMP_TO_ZERO,
             extensions.contains("GL_EXT_texture_border_clamp")
@@ -665,6 +686,14 @@ impl super::Adapter {
         private_caps.set(
             super::PrivateCapabilities::MULTISAMPLED_RENDER_TO_TEXTURE,
             extensions.contains("GL_EXT_multisampled_render_to_texture"),
+        );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+            supports_16bit_norm,
+        );
+        private_caps.set(
+            super::PrivateCapabilities::TEXTURE_FORMAT_SNORM16_RENDERABLE,
+            supports_16bit_snorm_renderable,
         );
 
         // GLSL ES 3.10+ / GLSL 4.30+ natively support coherent/volatile qualifiers
@@ -1151,6 +1180,27 @@ impl crate::Adapter for super::Adapter {
         let image_atomic = feature_fn(wgt::Features::TEXTURE_ATOMIC, Tfc::STORAGE_ATOMIC);
         let image_64_atomic = feature_fn(wgt::Features::TEXTURE_INT64_ATOMIC, Tfc::STORAGE_ATOMIC);
 
+        // UNORM gets full filterable+renderable; SNORM splits because
+        // `EXT_texture_norm16` marks only UNORM as color-renderable.
+        // Storage is not advertised ÔÇö would need a GL >= 4.2 / GLES
+        // `NV_image_formats` probe wired up separately.
+        let norm16_unorm = private_caps_fn(
+            super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+            filterable_renderable,
+        );
+        let norm16_snorm = if self
+            .shared
+            .private_caps
+            .contains(super::PrivateCapabilities::TEXTURE_FORMAT_SNORM16_RENDERABLE)
+        {
+            norm16_unorm
+        } else {
+            private_caps_fn(
+                super::PrivateCapabilities::TEXTURE_FORMAT_NORM16,
+                filterable,
+            )
+        };
+
         match format {
             Tf::R8Unorm => filterable_renderable,
             Tf::R8Snorm => filterable,
@@ -1158,8 +1208,8 @@ impl crate::Adapter for super::Adapter {
             Tf::R8Sint => renderable,
             Tf::R16Uint => renderable,
             Tf::R16Sint => renderable,
-            Tf::R16Unorm => empty,
-            Tf::R16Snorm => empty,
+            Tf::R16Unorm => norm16_unorm,
+            Tf::R16Snorm => norm16_snorm,
             Tf::R16Float => filterable | half_float_renderable,
             Tf::Rg8Unorm => filterable_renderable,
             Tf::Rg8Snorm => filterable,
@@ -1170,8 +1220,8 @@ impl crate::Adapter for super::Adapter {
             Tf::R32Float => unfilterable | storage | float_renderable | texture_float_linear,
             Tf::Rg16Uint => renderable,
             Tf::Rg16Sint => renderable,
-            Tf::Rg16Unorm => empty,
-            Tf::Rg16Snorm => empty,
+            Tf::Rg16Unorm => norm16_unorm,
+            Tf::Rg16Snorm => norm16_snorm,
             Tf::Rg16Float => filterable | half_float_renderable,
             Tf::Rgba8Unorm => filterable_renderable | storage,
             Tf::Rgba8UnormSrgb => filterable_renderable,
@@ -1188,8 +1238,8 @@ impl crate::Adapter for super::Adapter {
             Tf::Rg32Float => unfilterable | float_renderable | texture_float_linear,
             Tf::Rgba16Uint => renderable | storage,
             Tf::Rgba16Sint => renderable | storage,
-            Tf::Rgba16Unorm => empty,
-            Tf::Rgba16Snorm => empty,
+            Tf::Rgba16Unorm => norm16_unorm,
+            Tf::Rgba16Snorm => norm16_snorm,
             Tf::Rgba16Float => filterable | storage | half_float_renderable,
             Tf::Rgba32Uint => renderable | storage,
             Tf::Rgba32Sint => renderable | storage,
