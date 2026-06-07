@@ -144,6 +144,7 @@ By @beholdnec in [#8505](https://github.com/gfx-rs/wgpu/pull/8505).
 - Added support for GLSL passthrough. By @inner-daemons in [#9064](https://github.com/gfx-rs/wgpu/pull/9064).
 - Implement `Adapter::new_external()` for WebGL2 (just like EGL/WGL) to import an external WebGL2 rendering context, and expose the imported context back through `Adapter::adapter_context()` / `Device::context()`. By @pepperoni505 in [#9438](https://github.com/gfx-rs/wgpu/pull/9438).
 - Add `gles::Device::buffer_from_raw` for wrapping an externally-owned GL buffer as a `wgpu_hal::gles::Buffer`. By @AdrianEddy in [#9550](https://github.com/gfx-rs/wgpu/pull/9550).
+- Advertise `Features::TEXTURE_FORMAT_16BIT_NORM` on OpenGL, including storage-texture usage where the driver supports it. By @AdrianEddy in [#9601](https://github.com/gfx-rs/wgpu/pull/9601).
 
 #### DX12
 
