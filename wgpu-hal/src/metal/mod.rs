@@ -700,7 +700,7 @@ impl crate::Queue for Queue {
                         .shared
                         .raw
                         .commandBufferWithUnretainedReferences()
-                        .unwrap();
+                        .ok_or(crate::DeviceError::Lost)?;
                     wait_cb.setLabel(Some(ns_string!("(wgpu internal) Wait")));
                     for (event, value) in waits.drain(..) {
                         wait_cb.encodeWaitForEvent_value(event.as_ref(), value);
@@ -729,7 +729,7 @@ impl crate::Queue for Queue {
                         self.shared
                             .raw
                             .commandBufferWithUnretainedReferences()
-                            .unwrap()
+                            .ok_or(crate::DeviceError::Lost)?
                     }
                 };
                 raw.setLabel(Some(ns_string!("(wgpu internal) Signal")));
@@ -775,8 +775,8 @@ impl crate::Queue for Queue {
             if let Some(raw) = extra_command_buffer {
                 raw.commit();
             }
-        });
-        Ok(())
+            Ok(())
+        })
     }
     unsafe fn present(
         &self,
