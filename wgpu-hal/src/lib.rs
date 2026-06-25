@@ -2518,6 +2518,23 @@ pub enum ShaderInput<'a> {
     },
 }
 
+impl fmt::Debug for ShaderInput<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // Don't include the entire shader source, especially for binary formats, because it
+            // would be spammy.
+            Self::Naga { .. } => f.debug_tuple("Naga").finish_non_exhaustive(),
+            Self::MetalLib { .. } => f.debug_tuple("MetalLib").finish_non_exhaustive(),
+            Self::Msl { .. } => f.debug_tuple("Msl").finish_non_exhaustive(),
+            Self::SpirV { .. } => f.debug_tuple("SpirV").finish_non_exhaustive(),
+            Self::Dxil { .. } => f.debug_tuple("Dxil").finish_non_exhaustive(),
+            Self::Hlsl { .. } => f.debug_tuple("Hlsl").finish_non_exhaustive(),
+            Self::Glsl { .. } => f.debug_tuple("Glsl").finish_non_exhaustive(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct ShaderModuleDescriptor<'a> {
     pub label: Label<'a>,
 
@@ -2580,6 +2597,7 @@ pub struct ComputePipelineDescriptor<
     pub cache: Option<&'a Pc>,
 }
 
+#[derive(Debug)]
 pub struct PipelineCacheDescriptor<'a> {
     pub label: Label<'a>,
     pub data: Option<&'a [u8]>,
@@ -2938,6 +2956,7 @@ pub struct AccelerationStructureAABBs<'a, B: DynBuffer + ?Sized> {
     pub flags: AccelerationStructureGeometryFlags,
 }
 
+#[derive(Clone, Debug)]
 pub struct AccelerationStructureCopy {
     pub copy_flags: wgt::AccelerationStructureCopy,
     pub type_flags: wgt::AccelerationStructureType,
@@ -3005,6 +3024,7 @@ pub struct TlasInstance {
 }
 
 #[cfg(dx12)]
+#[derive(Debug)]
 pub enum D3D12ExposeAdapterResult {
     CreateDeviceError(dx12::CreateDeviceError),
     UnknownFeatureLevel(i32),
