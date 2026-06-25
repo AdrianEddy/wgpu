@@ -86,6 +86,7 @@ impl crate::Api for Api {
     type ShaderModule = ShaderModule;
     type RenderPipeline = RenderPipeline;
     type ComputePipeline = ComputePipeline;
+    type RayTracingPipeline = RayTracingPipeline;
 }
 
 crate::impl_dyn_resource!(
@@ -105,6 +106,7 @@ crate::impl_dyn_resource!(
     QuerySet,
     Queue,
     RenderPipeline,
+    RayTracingPipeline,
     Sampler,
     ShaderModule,
     Surface,
@@ -292,6 +294,7 @@ struct DeviceExtensionFunctions {
     draw_indirect_count: Option<khr::draw_indirect_count::Device>,
     timeline_semaphore: Option<ExtensionFn<khr::timeline_semaphore::Device>>,
     ray_tracing: Option<RayTracingDeviceExtensionFunctions>,
+    ray_tracing_pipelines: Option<khr::ray_tracing_pipeline::Device>,
     mesh_shading: Option<ext::mesh_shader::Device>,
     #[cfg_attr(not(unix), allow(dead_code))]
     external_memory_fd: Option<khr::external_memory_fd::Device>,
@@ -390,6 +393,11 @@ struct PrivateCapabilities {
     /// these usages do not have as high of an alignment requirement using the buffer as
     ///  a scratch buffer when building acceleration structures.
     scratch_buffer_alignment: u32,
+
+    /// `get_raytracing_pipeline_group_data` requires both a group count and a data size.
+    /// The data size parameter is just this * the group count, so we store this to not
+    /// require an unnecessary parameter.
+    ray_tracing_pipeline_group_data_size: u32,
 }
 
 bitflags::bitflags!(
@@ -1108,6 +1116,13 @@ pub struct ComputePipeline {
 }
 
 impl crate::DynComputePipeline for ComputePipeline {}
+
+#[derive(Debug)]
+pub struct RayTracingPipeline {
+    raw: vk::Pipeline,
+}
+
+impl crate::DynRayTracingPipeline for RayTracingPipeline {}
 
 #[derive(Debug)]
 pub struct PipelineCache {
