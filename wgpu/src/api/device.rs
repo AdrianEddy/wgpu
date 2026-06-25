@@ -371,15 +371,18 @@ impl Device {
     /// on the underlying handle - its lifetime is the caller's responsibility.
     ///
     /// If `drop_callback` is `Some`, it fires when wgpu releases its last
-    /// reference to the wrapped handle. The callback can be used to call
-    /// `GpuTexture.destroy()` if the caller wants prompt
-    /// release of the GPU memory, to free a pool slot, or to notify
-    /// dependent code that wgpu is done with the handle. Pass `None` if the
-    /// caller manages the handle's lifetime entirely on their own.
+    /// reference to the wrapped handle. wgpu never calls `GpuTexture.destroy()`
+    /// itself on a wrapped texture; to hand the handle's lifetime to wgpu,
+    /// supply a callback that calls `GpuTexture.destroy()`. The callback can
+    /// also be used to free a pool slot or notify dependent code that wgpu is
+    /// done with the handle. Pass `None` if the caller manages the handle's
+    /// lifetime entirely on their own.
     ///
-    /// This is the WebGPU counterpart of [`Self::create_texture_from_hal`];
-    /// `drop_callback` plays the same role as `wgpu_hal::DropCallback` does
-    /// on the Vulkan backend.
+    /// This is the WebGPU counterpart of [`Self::create_texture_from_hal`].
+    /// A `Some` `drop_callback` plays the same role as `wgpu_hal::DropCallback`
+    /// does on the Vulkan backend. The `None` case differs: here the texture is
+    /// always external and wgpu never destroys it, whereas on Vulkan a `None`
+    /// callback means wgpu takes ownership of the image and destroys it.
     ///
     /// # Safety
     ///

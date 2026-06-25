@@ -1374,7 +1374,7 @@ pub struct WebTexture {
     ///   `device.createTexture` or `surface.getCurrentTexture`.)
     /// - `Some(_)` means the handle is externally owned (wrapped via
     ///   [`WebDevice::wrap_external_texture`]). `destroy()` is a no-op, and
-    ///   the wrapped [`DropCallback`] fires when the last clone of
+    ///   the wrapped [`DropCallback`], if any, fires when the last clone of
     ///   this `WebTexture` is dropped, signalling that wgpu is done with the
     ///   handle.
     drop_guard: Option<Rc<DropGuard>>,
