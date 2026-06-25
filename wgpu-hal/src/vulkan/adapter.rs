@@ -2187,7 +2187,7 @@ impl super::Instance {
                 .subgroup_size_control
                 .map(|subgroup_size| subgroup_size.max_subgroup_size)
                 .unwrap_or(wgt::MAXIMUM_SUBGROUP_MAX_SIZE),
-            transient_saves_memory: supports_lazily_allocated,
+            transient_saves_memory: Some(supports_lazily_allocated),
             ..wgt::AdapterInfo::new(device_type, wgt::Backend::Vulkan)
         };
         let mut workarounds = super::Workarounds::empty();
@@ -2269,6 +2269,15 @@ impl super::Instance {
                 available_features.contains(wgt::Features::SHADER_F16),
             );
         }
+
+        downlevel_flags.set(
+            wgt::DownlevelFlags::TEXTURE_COMPRESSION,
+            available_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC)
+                || available_features.contains(
+                    wgt::Features::TEXTURE_COMPRESSION_ETC2
+                        | wgt::Features::TEXTURE_COMPRESSION_ASTC,
+                ),
+        );
 
         let has_robust_buffer_access2 = phd_features
             .robustness2
@@ -2746,6 +2755,7 @@ impl super::Adapter {
                 }),
                 mesh_shader_primitive_indices_clamp: true,
                 trace_ray_argument_validation: true,
+                emit_int_div_checks: true,
             }
         };
 
@@ -3084,10 +3094,7 @@ impl crate::Adapter for super::Adapter {
         // on mac, so this is fine.
         #[cfg(unix)]
         {
-            let mut timespec = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
+            let mut timespec = libc::timespec::default();
             unsafe {
                 libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut timespec);
             }

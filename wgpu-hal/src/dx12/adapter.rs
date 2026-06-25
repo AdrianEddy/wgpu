@@ -207,7 +207,7 @@ impl super::Adapter {
             driver_info: String::new(),
             subgroup_min_size: features1.WaveLaneCountMin,
             subgroup_max_size: features1.WaveLaneCountMax,
-            transient_saves_memory: false,
+            transient_saves_memory: Some(false),
             limit_bucket: None,
         };
 
@@ -918,7 +918,7 @@ impl super::Adapter {
                     // 65536
                     max_uniform_buffer_binding_size:
                         Direct3D12::D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT as u64 * 16,
-                    // 254
+                    // 256
                     min_uniform_buffer_offset_alignment:
                         Direct3D12::D3D12_CONSTANT_BUFFER_DATA_PLACEMENT_ALIGNMENT,
                     // 16

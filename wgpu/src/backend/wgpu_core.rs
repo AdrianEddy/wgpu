@@ -21,7 +21,7 @@ use hashbrown::HashMap;
 use arrayvec::ArrayVec;
 use smallvec::SmallVec;
 use wgc::{
-    command::bundle_ffi::*, error::ContextErrorSource, pipeline::CreateShaderModuleError,
+    error::ContextErrorSource, pipeline::CreateShaderModuleError,
     resource::BlasPrepareCompactResult,
 };
 use wgt::{
@@ -2388,7 +2388,11 @@ impl Drop for CoreTlas {
     }
 }
 
-impl dispatch::QuerySetInterface for CoreQuerySet {}
+impl dispatch::QuerySetInterface for CoreQuerySet {
+    fn destroy(&self) {
+        self.context.0.query_set_destroy(self.id);
+    }
+}
 
 impl Drop for CoreQuerySet {
     fn drop(&mut self) {
@@ -2637,9 +2641,9 @@ impl dispatch::CommandEncoderInterface for CoreCommandEncoder {
             self.id,
             &wgc::command::RenderPassDescriptor {
                 label: desc.label.map(Borrowed),
-                timestamp_writes: timestamp_writes.as_ref(),
+                timestamp_writes,
                 color_attachments: Borrowed(&colors),
-                depth_stencil_attachment: depth_stencil.as_ref(),
+                depth_stencil_attachment: depth_stencil,
                 occlusion_query_set: desc.occlusion_query_set.map(|qs| qs.inner.as_core().id),
                 multiview_mask: desc.multiview_mask,
             },
@@ -3791,7 +3795,9 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     fn set_pipeline(&mut self, pipeline: &dispatch::DispatchRenderPipeline) {
         let pipeline = pipeline.as_core();
 
-        wgpu_render_bundle_set_pipeline(&mut self.encoder, pipeline.id)
+        self.context
+            .0
+            .render_bundle_encoder_set_pipeline(&mut self.encoder, pipeline.id);
     }
 
     fn set_bind_group(
@@ -3802,15 +3808,9 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let bg = bind_group.map(|bg| bg.as_core().id);
 
-        unsafe {
-            wgpu_render_bundle_set_bind_group(
-                &mut self.encoder,
-                index,
-                bg,
-                offsets.as_ptr(),
-                offsets.len(),
-            )
-        }
+        self.context
+            .0
+            .render_bundle_encoder_set_bind_group(&mut self.encoder, index, bg, offsets)
     }
 
     fn set_index_buffer(
@@ -3822,8 +3822,13 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let buffer = buffer.as_core();
 
-        self.encoder
-            .set_index_buffer(buffer.id, index_format, offset, size)
+        self.context.0.render_bundle_encoder_set_index_buffer(
+            &mut self.encoder,
+            buffer.id,
+            index_format,
+            offset,
+            size,
+        );
     }
 
     fn set_vertex_buffer(
@@ -3835,39 +3840,40 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let buffer = buffer.map(|buffer| buffer.as_core().id);
 
-        wgpu_render_bundle_set_vertex_buffer(&mut self.encoder, slot, buffer, offset, size)
+        self.context.0.render_bundle_encoder_set_vertex_buffer(
+            &mut self.encoder,
+            slot,
+            buffer,
+            offset,
+            size,
+        );
     }
 
     fn set_immediates(&mut self, offset: u32, data: &[u8]) {
-        unsafe {
-            wgpu_render_bundle_set_immediates(
-                &mut self.encoder,
-                offset,
-                data.len().try_into().unwrap(),
-                data.as_ptr(),
-            )
-        }
+        self.context
+            .0
+            .render_bundle_encoder_set_immediates(&mut self.encoder, offset, data);
     }
 
     fn draw(&mut self, vertices: Range<u32>, instances: Range<u32>) {
-        wgpu_render_bundle_draw(
+        self.context.0.render_bundle_encoder_draw(
             &mut self.encoder,
             vertices.end - vertices.start,
             instances.end - instances.start,
             vertices.start,
             instances.start,
-        )
+        );
     }
 
     fn draw_indexed(&mut self, indices: Range<u32>, base_vertex: i32, instances: Range<u32>) {
-        wgpu_render_bundle_draw_indexed(
+        self.context.0.render_bundle_encoder_draw_indexed(
             &mut self.encoder,
             indices.end - indices.start,
             instances.end - instances.start,
             indices.start,
             base_vertex,
             instances.start,
-        )
+        );
     }
 
     fn draw_indirect(
@@ -3877,7 +3883,11 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let indirect_buffer = indirect_buffer.as_core();
 
-        wgpu_render_bundle_draw_indirect(&mut self.encoder, indirect_buffer.id, indirect_offset)
+        self.context.0.render_bundle_encoder_draw_indirect(
+            &mut self.encoder,
+            indirect_buffer.id,
+            indirect_offset,
+        )
     }
 
     fn draw_indexed_indirect(
@@ -3887,7 +3897,7 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
     ) {
         let indirect_buffer = indirect_buffer.as_core();
 
-        wgpu_render_bundle_draw_indexed_indirect(
+        self.context.0.render_bundle_encoder_draw_indexed_indirect(
             &mut self.encoder,
             indirect_buffer.id,
             indirect_offset,
@@ -3912,6 +3922,14 @@ impl dispatch::RenderBundleEncoderInterface for CoreRenderBundleEncoder {
             id,
         }
         .into()
+    }
+
+    #[cfg(custom)]
+    fn finish_boxed(
+        self: Box<Self>,
+        desc: &crate::RenderBundleDescriptor<'_>,
+    ) -> dispatch::DispatchRenderBundle {
+        (*self).finish(desc)
     }
 }
 

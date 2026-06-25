@@ -928,7 +928,7 @@ fn map_adapter_info(adapter_info: &webgpu_sys::GpuAdapterInfo) -> wgt::AdapterIn
         backend: wgt::Backend::BrowserWebGpu,
         subgroup_min_size: adapter_info.subgroup_min_size(),
         subgroup_max_size: adapter_info.subgroup_max_size(),
-        transient_saves_memory: false,
+        transient_saves_memory: None,
         limit_bucket: None,
     }
 }
@@ -1172,19 +1172,13 @@ impl ContextWebGpu {
             }
         };
 
-        // An error here indicated that WebGPU is disabled in the browser.
-        let context: webgpu_sys::GpuCanvasContext =
-            context
-                .dyn_into()
-                .map_err(|actual| crate::CreateSurfaceError {
-                    inner: crate::CreateSurfaceErrorKind::Web(format!(
-                        "`canvas.getContext()` returned a value that did not coerce to \
-                        `GPUCanvasContext`. \
-                        This is likely because WebGPU is disabled in this browser. \
-                        Expected: `GPUCanvasContext`, Actual: `{}`",
-                        actual.to_string()
-                    )),
-                })?;
+        /* Use unchecked_into instead of dyn_into: the instanceof check that dyn_into
+         * performs for GpuCanvasContext fails in some wasm-bindgen configurations even
+         * when the object is correct (e.g. certain browser extensions or cross-realm
+         * scenarios interfere with the JS prototype chain). getContext("webgpu") already
+         * guarantees the returned object is a GPUCanvasContext when it succeeds, so the
+         * instanceof check is redundant and only causes spurious surface creation errors. */
+        let context: webgpu_sys::GpuCanvasContext = context.unchecked_into();
 
         Ok(WebSurface {
             gpu: self.gpu.clone(),
@@ -2449,7 +2443,7 @@ impl dispatch::DeviceInterface for WebDevice {
         let mapped_desc = webgpu_sys::GpuTextureDescriptor::new_with_gpu_extent_3d_dict(
             map_texture_format(desc.format),
             &map_extent_3d(desc.size),
-            (desc.usage - crate::TextureUsages::TRANSIENT).bits(),
+            desc.usage.bits(),
         );
         if let Some(label) = desc.label {
             mapped_desc.set_label(label);
@@ -3044,7 +3038,12 @@ impl Drop for WebTlas {
     }
 }
 
-impl dispatch::QuerySetInterface for WebQuerySet {}
+impl dispatch::QuerySetInterface for WebQuerySet {
+    fn destroy(&self) {
+        self.inner.destroy();
+    }
+}
+
 impl Drop for WebQuerySet {
     fn drop(&mut self) {
         // no-op
@@ -3971,6 +3970,14 @@ impl dispatch::RenderBundleEncoderInterface for WebRenderBundleEncoder {
             ident: crate::cmp::Identifier::create(),
         }
         .into()
+    }
+
+    #[cfg(custom)]
+    fn finish_boxed(
+        self: Box<Self>,
+        desc: &crate::RenderBundleDescriptor<'_>,
+    ) -> dispatch::DispatchRenderBundle {
+        (*self).finish(desc)
     }
 }
 impl Drop for WebRenderBundleEncoder {
