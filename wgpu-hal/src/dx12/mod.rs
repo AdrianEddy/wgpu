@@ -1440,6 +1440,24 @@ impl SwapChain {
     }
 }
 
+fn map_surface_color_space(
+    color_space: wgt::SurfaceColorSpace,
+) -> Dxgi::Common::DXGI_COLOR_SPACE_TYPE {
+    use wgt::SurfaceColorSpace as Scs;
+    match color_space {
+        Scs::Srgb => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+        Scs::ExtendedSrgbLinear => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
+        Scs::Bt2100Pq => Dxgi::Common::DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+        Scs::Auto
+        | Scs::DisplayP3
+        | Scs::Bt2100Hlg
+        | Scs::ExtendedSrgb
+        | Scs::ExtendedDisplayP3 => {
+            unreachable!("`{color_space:?}` is never reported in the DX12 surface capabilities")
+        }
+    }
+}
+
 impl crate::Surface for Surface {
     type A = Api;
 
@@ -1614,6 +1632,23 @@ impl crate::Surface for Surface {
                 })?
             }
         };
+
+        // Apply the color space unconditionally (even for sRGB) so that
+        // reconfiguring away from HDR10 resets the swapchain's state.
+        //
+        // We deliberately skip `CheckColorSpaceSupport`: a color space reporting as
+        // unsupported is not a failure. Windows composites in scRGB and tone-maps
+        // the color space down to the output, so `SetColorSpace1` still presents
+        // correctly even when the check returns false (as the MS docs note). This
+        // lets an app configure e.g. BT.2100 PQ on an SDR output and let the
+        // compositor map it.
+        let color_space = map_surface_color_space(config.color_space);
+        // SAFETY: `swap_chain` is a live `IDXGISwapChain3`; `color_space` is a
+        // valid `DXGI_COLOR_SPACE_TYPE`.
+        unsafe { swap_chain.SetColorSpace1(color_space) }.map_err(|err| {
+            log::error!("SetColorSpace1 failed: {err}");
+            crate::SurfaceError::Other("IDXGISwapChain3::SetColorSpace1")
+        })?;
 
         match self.target {
             SurfaceTarget::WndHandle(wnd_handle) => {

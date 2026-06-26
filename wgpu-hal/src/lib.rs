@@ -2103,10 +2103,12 @@ pub struct ExposedAdapter<A: Api> {
 /// Fetch this with [Adapter::surface_capabilities].
 #[derive(Debug, Clone)]
 pub struct SurfaceCapabilities {
-    /// List of supported texture formats.
+    /// List of supported texture formats together with the color spaces
+    /// supported for each format.
     ///
-    /// Must be at least one.
-    pub formats: Vec<wgt::TextureFormat>,
+    /// Must be at least one. At most one entry per format, each with a
+    /// non-empty set of color spaces.
+    pub formats: Vec<wgt::SurfaceFormatCapabilities>,
 
     /// Range for the number of queued frames.
     ///
@@ -2134,6 +2136,14 @@ pub struct SurfaceCapabilities {
     ///
     /// Must be at least one.
     pub composite_alpha_modes: Vec<wgt::CompositeAlphaMode>,
+}
+
+impl SurfaceCapabilities {
+    /// Returns the supported texture formats, dropping the per-format color-space
+    /// information carried in [`Self::formats`].
+    pub fn texture_formats(&self) -> impl Iterator<Item = wgt::TextureFormat> + '_ {
+        self.formats.iter().map(|fc| fc.format)
+    }
 }
 
 #[derive(Debug)]
@@ -2698,6 +2708,12 @@ pub struct SurfaceConfiguration {
     pub composite_alpha_mode: wgt::CompositeAlphaMode,
     /// Format of the surface textures.
     pub format: wgt::TextureFormat,
+    /// Color space in which the presentation engine interprets the surface
+    /// textures. Never [`wgt::SurfaceColorSpace::Auto`]; `wgpu-core` resolves
+    /// `Auto` to a concrete color space before configuring the surface, and
+    /// the (format, color space) pair must be listed in
+    /// `SurfaceCapabilities::formats`.
+    pub color_space: wgt::SurfaceColorSpace,
     /// Requested texture extent. Must be in
     /// `SurfaceCapabilities::extents` range.
     pub extent: wgt::Extent3d,

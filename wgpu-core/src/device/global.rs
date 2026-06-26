@@ -31,7 +31,7 @@ use crate::{
 
 use wgt::{BufferAddress, TextureFormat};
 
-use super::UserClosures;
+use super::{surface_config, UserClosures};
 
 impl Global {
     pub fn adapter_is_surface_supported(
@@ -53,12 +53,26 @@ impl Global {
         self.fetch_adapter_and_surface::<_, _>(surface_id, adapter_id, |adapter, surface| {
             let mut hal_caps = surface.get_capabilities(adapter)?;
 
-            hal_caps.formats.sort_by_key(|f| !f.is_srgb());
+            hal_caps.formats.sort_by_key(|fc| !fc.format.is_srgb());
 
             let usages = conv::map_texture_usage_from_hal(hal_caps.usage);
 
+            // `SurfaceCapabilities::formats` lists only the formats a
+            // color-space-unaware application can configure via
+            // `SurfaceColorSpace::Auto`, i.e. those for which `Auto` resolves to a
+            // concrete color space. (The full `format_capabilities` still reports
+            // every color space, including HDR ones, for explicit opt-in.)
             Ok(wgt::SurfaceCapabilities {
-                formats: hal_caps.formats,
+                formats: hal_caps
+                    .formats
+                    .iter()
+                    .filter(|fc| {
+                        surface_config::resolve_auto_color_space(fc.format, fc.color_spaces)
+                            .is_some()
+                    })
+                    .map(|fc| fc.format)
+                    .collect(),
+                format_capabilities: hal_caps.formats,
                 present_modes: hal_caps.present_modes,
                 alpha_modes: hal_caps.composite_alpha_modes,
                 usages,
