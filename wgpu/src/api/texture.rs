@@ -46,10 +46,9 @@ impl Texture {
     ///
     /// This method will return None if:
     /// - The texture is not from the backend specified by `A`.
-    /// - The texture is from the `webgpu` or `custom` backend.
-    /// - The texture has had [`Self::destroy()`] called on it.
-    ///
-    /// On the `webgpu` backend, use `as_webgpu` instead.
+    /// - The texture is from [`Backend::BrowserWebGpu`].
+    ///   (Use [`Texture::as_webgpu()`] instead.)
+    /// - The texture is from a custom backend.
     ///
     /// # Safety
     ///
