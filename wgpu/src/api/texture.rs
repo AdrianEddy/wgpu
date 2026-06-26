@@ -72,9 +72,6 @@ impl Texture {
     /// The returned handle is the same JS object wgpu uses internally; it can
     /// be passed to other WebGPU-aware JS APIs, used for identity comparison,
     /// or fed back into [`Device::create_texture_from_webgpu_handle`].
-    ///
-    /// [`webgpu::GpuTexture`]: crate::webgpu::GpuTexture
-    /// [`Device::create_texture_from_webgpu_handle`]: crate::Device::create_texture_from_webgpu_handle
     #[cfg(webgpu)]
     pub fn as_webgpu(&self) -> Option<&webgpu::GpuTexture> {
         self.inner.as_webgpu_opt().map(|wt| &wt.inner)
