@@ -58,10 +58,9 @@ impl TextureView {
     ///
     /// This method will return None if:
     /// - The texture view is not from the backend specified by `A`.
-    /// - The texture view is from the `webgpu` or `custom` backend.
-    /// - The texture this view points to has had [`Texture::destroy()`] called on it.
-    ///
-    /// On the `webgpu` backend, use `as_webgpu` instead.
+    /// - The texture view is from [`Backend::BrowserWebGpu`].
+    ///   (Use [`TextureView::as_webgpu()`] instead.)
+    /// - The texture view is from a custom backend.
     ///
     /// # Safety
     ///
