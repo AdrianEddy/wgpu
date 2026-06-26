@@ -420,8 +420,6 @@ impl Device {
 
     /// Returns the underlying [`webgpu::GpuDevice`] handle if this `Device`
     /// is on the WebGPU backend, otherwise `None`.
-    ///
-    /// [`webgpu::GpuDevice`]: crate::webgpu::GpuDevice
     #[cfg(webgpu)]
     pub fn as_webgpu(&self) -> Option<&webgpu::GpuDevice> {
         self.inner.as_webgpu_opt().map(|wd| &wd.inner)
