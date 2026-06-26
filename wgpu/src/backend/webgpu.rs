@@ -3021,7 +3021,7 @@ impl dispatch::TextureInterface for WebTexture {
 }
 impl Drop for WebTexture {
     fn drop(&mut self) {
-        // The drop-callback for external textures is fired by `DropGuard`'s
+        // The drop callback for external textures is fired by `DropGuard`'s
         // own `Drop` impl when the last `Rc<DropGuard>` clone is released.
     }
 }
