@@ -198,7 +198,7 @@ pub use web_sys;
 ///
 /// A `web_sys::GpuTexture` from a consumer's own `web-sys` dependency wraps
 /// the same JS object as a `wgpu::webgpu::GpuTexture`; convert between them
-/// with `wasm_bindgen::JsCast::unchecked_into`.
+/// with [`wasm_bindgen::JsCast::unchecked_into`].
 #[cfg(webgpu)]
 pub mod webgpu {
     pub use crate::backend::webgpu::webgpu_sys::{
