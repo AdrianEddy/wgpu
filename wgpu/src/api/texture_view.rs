@@ -59,7 +59,7 @@ impl TextureView {
     /// This method will return None if:
     /// - The texture view is not from the backend specified by `A`.
     /// - The texture view is from [`Backend::BrowserWebGpu`].
-    ///   (Use [`TextureView::as_webgpu()`] instead.)
+    ///   (Use `TextureView::as_webgpu()` instead.)
     /// - The texture view is from a custom backend.
     ///
     /// # Safety

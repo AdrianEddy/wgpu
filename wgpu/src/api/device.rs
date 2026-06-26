@@ -315,7 +315,7 @@ impl Device {
     #[doc = crate::macros::hal_type_dx12!("Texture")]
     #[doc = crate::macros::hal_type_gles!("Texture")]
     ///
-    /// On [`Backend::BrowserWebGpu`], use [`Device::create_texture_from_webgpu_handle()`] instead.
+    /// On [`Backend::BrowserWebGpu`], use `Device::create_texture_from_webgpu_handle()` instead.
     ///
     /// # `initial_state`
     ///

@@ -274,7 +274,7 @@ impl Buffer {
     /// This method will return None if:
     /// - The buffer is not from the backend specified by `A`.
     /// - The buffer is from [`Backend::BrowserWebGpu`].
-    ///   (Use [`Buffer::as_webgpu()`] instead.)
+    ///   (Use `Buffer::as_webgpu()` instead.)
     /// - The buffer is from a custom backend.
     /// - The buffer has had [`Self::destroy()`] called on it.
     ///
