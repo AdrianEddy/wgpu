@@ -391,7 +391,11 @@ impl Device {
     /// 1. `texture` was produced by the same underlying `GpuDevice` that this `Device` wraps.
     /// 2. `desc.format`, `desc.size`, `desc.usage`, `desc.dimension`,
     ///    `desc.mip_level_count`, and `desc.sample_count` match the actual
-    ///    `GPUTexture`'s reflected values.
+    ///    `GPUTexture`'s reflected values. wgpu stores these verbatim and
+    ///    returns them from [`Texture::size`], [`Texture::format`], etc.
+    ///    without re-checking the handle; a mismatch yields silently incorrect
+    ///    metadata and, downstream, `GPUValidationError`s rather than memory
+    ///    unsafety (the browser bounds every access).
     /// 3. The underlying `GpuTexture` must remain alive for as long as wgpu
     ///    may use it (e.g. until any submitted command buffer that references
     ///    it has finished executing). If `drop_callback` is `Some`, it is
