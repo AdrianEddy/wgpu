@@ -460,8 +460,6 @@ impl Buffer {
 
     /// Returns the underlying [`webgpu::GpuBuffer`] handle if this `Buffer`
     /// is on the WebGPU backend, otherwise `None`.
-    ///
-    /// [`webgpu::GpuBuffer`]: crate::webgpu::GpuBuffer
     #[cfg(webgpu)]
     pub fn as_webgpu(&self) -> Option<&webgpu::GpuBuffer> {
         self.inner.as_webgpu_opt().map(|wb| &wb.inner)
