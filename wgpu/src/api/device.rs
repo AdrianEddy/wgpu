@@ -402,7 +402,7 @@ impl Device {
     ///    sufficient to keep the handle alive until the callback fires.
     #[cfg(webgpu)]
     #[must_use]
-    pub unsafe fn create_texture_from_webgpu_handle(
+    pub fn create_texture_from_webgpu_handle(
         &self,
         texture: webgpu::GpuTexture,
         desc: &TextureDescriptor<'_>,
