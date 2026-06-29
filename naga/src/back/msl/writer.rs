@@ -719,12 +719,12 @@ impl crate::Type {
 }
 
 #[derive(Clone, Copy)]
-enum FunctionOrigin {
+pub(super) enum FunctionOrigin {
     Handle(Handle<crate::Function>),
     EntryPoint(proc::EntryPointIndex),
 }
 
-trait NameKeyExt {
+pub(super) trait NameKeyExt {
     fn local(origin: FunctionOrigin, local_handle: Handle<crate::LocalVariable>) -> NameKey {
         match origin {
             FunctionOrigin::Handle(handle) => NameKey::FunctionLocal(handle, local_handle),
@@ -779,7 +779,7 @@ struct TexelAddress {
 
 pub(super) struct ExpressionContext<'a> {
     pub(super) function: &'a crate::Function,
-    origin: FunctionOrigin,
+    pub(super) origin: FunctionOrigin,
     pub(super) info: &'a valid::FunctionInfo,
     pub(super) module: &'a crate::Module,
     pub(super) mod_info: &'a valid::ModuleInfo,
@@ -795,6 +795,7 @@ pub(super) struct ExpressionContext<'a> {
     pub(super) force_loop_bounding: bool,
     /// Whether to emit safety checks for integer division/modulo.
     emit_int_div_checks: bool,
+    pub(super) ray_query_initialization_tracking: bool,
 }
 
 impl<'a> ExpressionContext<'a> {
@@ -1171,6 +1172,27 @@ impl<W: Write> Writer<W> {
                 }
             };
             writeln!(self.out, ";")?;
+
+            // If this variable is a ray query, put in an initialization tracker.
+            if context.ray_query_initialization_tracking {
+                if let crate::TypeInner::RayQuery { .. } = context.module.types[ty].inner {
+                    writeln!(
+                        self.out,
+                        "{}uint {}{} = 0u;",
+                        back::INDENT,
+                        super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
+                        self.names[&name_key]
+                    )?;
+
+                    writeln!(
+                        self.out,
+                        "{}float {}{} = 0.0;",
+                        back::INDENT,
+                        super::ray::RAY_QUERY_T_MAX_TRACKER_VARIABLE_PREFIX,
+                        self.names[&name_key]
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -3033,12 +3055,28 @@ impl<W: Write> Writer<W> {
                     return Err(Error::UnsupportedRayTracing);
                 }
 
+                // See comment in `write_ray_query_stmt` for why this is valid
+                let crate::Expression::LocalVariable(query_var) =
+                    context.function.expressions[query]
+                else {
+                    unreachable!()
+                };
+
+                let tracker_expr_name = format!(
+                    "{}{}",
+                    super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
+                    self.names[&NameKey::local(context.origin, query_var)]
+                );
+
                 write!(
                     self.out,
                     "{}_{committed}(",
                     super::ray::INTERSECTION_FUNCTION_NAME
                 )?;
                 self.put_expression(query, context, true)?;
+                if context.ray_query_initialization_tracking {
+                    write!(self.out, ", {tracker_expr_name}")?;
+                }
                 write!(self.out, ")")?;
             }
             crate::Expression::CooperativeLoad { ref data, .. } => {
@@ -4517,6 +4555,8 @@ impl<W: Write> Writer<W> {
             &[
                 CLAMPED_LOD_LOAD_PREFIX,
                 super::ray::INTERSECTION_FUNCTION_NAME,
+                super::ray::RAY_QUERY_TRACKER_VARIABLE_PREFIX,
+                super::ray::RAY_QUERY_T_MAX_TRACKER_VARIABLE_PREFIX,
             ],
             &mut self.names,
         );
@@ -6683,6 +6723,7 @@ template <typename A>
         &mut self,
         module: &crate::Module,
         func_ctx: &back::FunctionCtx,
+        options: &Options,
     ) -> BackendResult {
         for (expr_handle, expr) in func_ctx.expressions.iter() {
             match *expr {
@@ -6772,7 +6813,7 @@ template <typename A>
                     self.write_wrapped_cooperative_multiply_add(module, func_ctx, space, a, b, c)?;
                 }
                 crate::Expression::RayQueryGetIntersection { committed, .. } => {
-                    self.write_rq_get_intersection_function(module, committed)?;
+                    self.write_rq_get_intersection_function(module, committed, options)?;
                 }
                 _ => {}
             }
@@ -6908,7 +6949,7 @@ template <typename A>
             };
 
             writeln!(self.out)?;
-            self.write_wrapped_functions(module, &ctx)?;
+            self.write_wrapped_functions(module, &ctx, options)?;
 
             let fun_info = &mod_info[fun_handle];
             pass_through_globals.clear();
@@ -7006,6 +7047,7 @@ template <typename A>
                     pipeline_options,
                     force_loop_bounding: options.force_loop_bounding,
                     emit_int_div_checks: options.emit_int_div_checks,
+                    ray_query_initialization_tracking: options.ray_query_initialization_tracking,
                 },
                 result_struct: None,
             };
@@ -7049,7 +7091,7 @@ template <typename A>
                 named_expressions: &fun.named_expressions,
             };
 
-            self.write_wrapped_functions(module, &ctx)?;
+            self.write_wrapped_functions(module, &ctx, options)?;
 
             let (em_str, in_mode, out_mode, can_vertex_pull) = match ep.stage {
                 crate::ShaderStage::Vertex => (
@@ -8229,6 +8271,7 @@ template <typename A>
                     pipeline_options,
                     force_loop_bounding: options.force_loop_bounding,
                     emit_int_div_checks: options.emit_int_div_checks,
+                    ray_query_initialization_tracking: options.ray_query_initialization_tracking,
                 },
                 result_struct: if ep.stage == crate::ShaderStage::Task {
                     None

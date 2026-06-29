@@ -324,6 +324,8 @@ pub struct Options {
     /// overflow. Set to false to emit raw division for faster compute shaders
     /// where the developer guarantees non-zero divisors.
     pub emit_int_div_checks: bool,
+    /// Whether to validate ray query calls
+    pub ray_query_initialization_tracking: bool,
 }
 
 impl Default for Options {
@@ -339,6 +341,7 @@ impl Default for Options {
             force_loop_bounding: true,
             task_dispatch_limits: None,
             mesh_shader_primitive_indices_clamp: true,
+            ray_query_initialization_tracking: true,
             emit_int_div_checks: true,
         }
     }
