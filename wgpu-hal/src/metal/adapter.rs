@@ -1247,6 +1247,14 @@ impl super::CapabilitiesQuery {
                     >= MTLArgumentBuffersTier::Tier2,
         );
         features.set(
+            F::BUFFER_BINDING_ARRAY,
+            self.msl_version >= MTLLanguageVersion::Version2_0
+                && self
+                    .argument_buffers
+                    .unwrap_or(MTLArgumentBuffersTier::Tier1)
+                    >= MTLArgumentBuffersTier::Tier2,
+        );
+        features.set(
             F::STORAGE_RESOURCE_BINDING_ARRAY,
             self.msl_version >= MTLLanguageVersion::Version3_0
                 && self.supports_arrays_of_textures

@@ -173,6 +173,8 @@ By @stuartparmenter in [#9658](https://github.com/gfx-rs/wgpu/pull/9658).
 - Add `metal::Queue::add_wait_event` / `add_signal_event` (with `remove_*` companions) to stage `MTLSharedEvent` waits/signals on the next `Queue::submit`, for GPU-side interop with foreign APIs. Waits run on an internal CB committed before user CBs. By @AdrianEddy in [#9483](https://github.com/gfx-rs/wgpu/pull/9483).
 - Unconditionally enable `Features::CLIP_DISTANCES`. By @ErichDonGubler in [#9270](https://github.com/gfx-rs/wgpu/pull/9270).
 - Added full support for mesh shaders, including in WGSL shaders. By @inner-daemons in [#8739](https://github.com/gfx-rs/wgpu/pull/8739).
+- Fixed structure field names incorrectly ignoring reserved keywords in the Metal (MSL) backend. By @39ali [#9379](https://github.com/gfx-rs/wgpu/pull/9379).
+- Added support for bindless storage buffers (buffer binding arrays) on Metal. By @mate-h in [#9081](https://github.com/gfx-rs/wgpu/pull/9081).
 - Added `DropCallback`s to Metal textures. By @jerzywilczek in [#9634](https://github.com/gfx-rs/wgpu/pull/9634).
 
 #### GLES
