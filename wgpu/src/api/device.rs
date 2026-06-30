@@ -384,8 +384,6 @@ impl Device {
     /// always external and wgpu never destroys it, whereas on Vulkan a `None`
     /// callback means wgpu takes ownership of the image and destroys it.
     ///
-    /// # Safety
-    ///
     /// The caller must guarantee:
     ///
     /// 1. `texture` was produced by the same underlying `GpuDevice` that this `Device` wraps.
