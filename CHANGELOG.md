@@ -305,6 +305,11 @@ By @stuartparmenter in [#9658](https://github.com/gfx-rs/wgpu/pull/9658).
 - Fixed structure field names incorrectly ignoring reserved keywords in the Metal (MSL) backend. By @39ali [#9379](https://github.com/gfx-rs/wgpu/pull/9379).
 - Restore the `Queue::as_raw` method, which was removed without good reason in v29. It now returns `&ProtocolObject<dyn MTLCommandQueue>`. By @andyleiserson in [#9560](https://github.com/gfx-rs/wgpu/pull/9560).
 
+#### WebGPU
+
+- Expose the underlying JS handles of WebGPU-backed resources via new `as_webgpu` accessors on `Texture`, `TextureView`, `Buffer`, `Queue`, and `Device`, returning `Option<&wgpu::webgpu::Gpu*>`. This is the WebGPU counterpart of `as_hal` (which returns `None` on the WebGPU backend, since WebGPU is not a `wgpu_hal` API). The vendored handle types are re-exported under the new `wgpu::webgpu` module. By @AdrianEddy in [#9530](https://github.com/gfx-rs/wgpu/pull/9530)
+- Add `Device::create_texture_from_webgpu_handle(texture, desc, drop_callback)` for wrapping a foreign `webgpu::GpuTexture` (e.g. a canvas `getCurrentTexture()` result) as a `wgpu::Texture` without copy. Use the `drop_callback` to decide if you want to call `GpuTexture.destroy()` when wgpu is done with the texture. By @AdrianEddy in [#9530](https://github.com/gfx-rs/wgpu/pull/9530)
+
 ### Dependency Updates
 
 #### WebGPU
