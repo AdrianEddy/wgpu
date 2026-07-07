@@ -2007,7 +2007,7 @@ impl dispatch::DeviceInterface for WebDevice {
                 crate::CompilationInfo::from(naga::error::ShaderError {
                     source: source.to_string(),
                     label: desc.label.map(|s| s.to_string()),
-                    inner: Box::new(err),
+                    inner: err,
                 })
             })?;
 
