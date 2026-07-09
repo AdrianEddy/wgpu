@@ -295,7 +295,7 @@ gpu-allocator = { version = "0.28", default-features = false, features = [
 
 # Gles dependencies
 khronos-egl = "6"
-glow = { git = "https://github.com/grovesNL/glow.git" }
+glow = "0.18"
 glutin = { version = "0.32", default-features = false }
 glutin-winit = { version = "0.5", default-features = false }
 glutin_wgl_sys = "0.6"
