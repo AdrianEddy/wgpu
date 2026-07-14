@@ -243,6 +243,7 @@ webgpu:api,validation,image_copy,layout_related:required_bytes_in_copy:*
 webgpu:api,validation,image_copy,layout_related:rows_per_image_alignment:*
 webgpu:api,validation,image_copy,texture_related:*
 fails-if(dx12) webgpu:api,validation,layout_shader_compat:pipeline_layout_shader_exact_match:*
+webgpu:api,validation,pipeline,immediates:*
 webgpu:api,validation,query_set,destroy:*
 webgpu:api,validation,queue,buffer_mapped:*
 webgpu:api,validation,queue,destroyed,query_set:*
@@ -380,6 +381,14 @@ webgpu:shader,validation,decl,assignment_statement:*
 webgpu:shader,validation,decl,compound_statement:*
 webgpu:shader,validation,decl,const:*
 webgpu:shader,validation,decl,context_dependent_resolution:*
+webgpu:shader,validation,decl,immediate:access_mode:*
+webgpu:shader,validation,decl,immediate:binding_attributes:*
+webgpu:shader,validation,decl,immediate:entry_point_interface:*
+webgpu:shader,validation,decl,immediate:pointers:*
+webgpu:shader,validation,decl,immediate:scope:*
+//FAIL: Fixed array should be disallowed in immediates
+// webgpu:shader,validation,decl,immediate:store_type,invalid:*
+webgpu:shader,validation,decl,immediate:store_type,valid:*
 webgpu:shader,validation,expression,access,array:early_eval_errors:case="override_array_cnt_size_neg"
 webgpu:shader,validation,expression,access,array:early_eval_errors:case="override_array_cnt_size_one"
 webgpu:shader,validation,expression,access,array:early_eval_errors:case="override_array_cnt_size_zero_signed"
