@@ -74,7 +74,6 @@ license = "MIT OR Apache-2.0"
 homepage = "https://wgpu.rs/"
 repository = "https://github.com/gfx-rs/wgpu"
 version = "30.0.0"
-authors = ["gfx-rs developers"]
 
 [workspace.dependencies]
 naga = { version = "30.0.0", path = "./naga" }
@@ -116,8 +115,8 @@ arbitrary = "1.4.2"
 argh = "0.1.13"
 arrayvec = { version = "0.7.1", default-features = false }
 bincode = "2"
-bit-set = { version = "0.10", default-features = false }
-bit-vec = { version = "0.9.1", default-features = false }
+bit-set = { version = "0.11", default-features = false }
+bit-vec = { version = "0.10", default-features = false }
 bitflags = "2.9"
 bytemuck = { version = "1.22", features = [
     "extern_crate_alloc",
@@ -303,7 +302,7 @@ glutin_wgl_sys = "0.6"
 # DX12 and GLES dependencies
 windows = { version = "0.62", default-features = false }
 
-# wasm32 dependencies
+# wasm dependencies
 console_error_panic_hook = "0.1.5"
 console_log = "1"
 js-sys = { version = "0.3.100", default-features = false }

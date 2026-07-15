@@ -333,7 +333,7 @@ impl super::Device {
         gl: &glow::Context,
         shader: &str,
         naga_stage: naga::ShaderStage,
-        #[cfg_attr(target_arch = "wasm32", allow(unused))] label: Option<&str>,
+        #[cfg_attr(target_family = "wasm", allow(unused))] label: Option<&str>,
     ) -> Result<glow::Shader, crate::PipelineError> {
         let target = match naga_stage {
             naga::ShaderStage::Vertex => glow::VERTEX_SHADER,
@@ -487,7 +487,7 @@ impl super::Device {
         gl: &glow::Context,
         shaders: ArrayVec<ShaderStage<'a>, { crate::MAX_CONCURRENT_SHADER_STAGES }>,
         layout: &super::PipelineLayout,
-        #[cfg_attr(target_arch = "wasm32", allow(unused))] label: Option<&str>,
+        #[cfg_attr(target_family = "wasm", allow(unused))] label: Option<&str>,
         multiview_mask: Option<NonZeroU32>,
     ) -> Result<Arc<super::PipelineInner>, crate::PipelineError> {
         let mut program_stages = ArrayVec::new();
@@ -549,7 +549,7 @@ impl super::Device {
         gl: &glow::Context,
         shaders: ArrayVec<ShaderStage<'a>, { crate::MAX_CONCURRENT_SHADER_STAGES }>,
         layout: &super::PipelineLayout,
-        #[cfg_attr(target_arch = "wasm32", allow(unused))] label: Option<&str>,
+        #[cfg_attr(target_family = "wasm", allow(unused))] label: Option<&str>,
         multiview_mask: Option<NonZeroU32>,
         glsl_version: naga::back::glsl::Version,
         private_caps: PrivateCapabilities,
@@ -1778,7 +1778,7 @@ impl crate::Device for super::Device {
     }
     unsafe fn destroy_pipeline_cache(&self, _: super::PipelineCache) {}
 
-    #[cfg_attr(target_arch = "wasm32", allow(unused))]
+    #[cfg_attr(target_family = "wasm", allow(unused))]
     unsafe fn create_query_set(
         &self,
         desc: &wgt::QuerySetDescriptor<crate::Label>,
@@ -1834,7 +1834,7 @@ impl crate::Device for super::Device {
         &self,
         fence: &super::Fence,
     ) -> Result<crate::FenceValue, crate::DeviceError> {
-        #[cfg_attr(target_arch = "wasm32", allow(clippy::needless_borrow))]
+        #[cfg_attr(target_family = "wasm", allow(clippy::needless_borrow))]
         Ok(fence.get_latest(&self.shared.context.lock()))
     }
     unsafe fn wait(
