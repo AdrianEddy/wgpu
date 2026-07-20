@@ -4633,8 +4633,16 @@ impl Device {
         let pipeline_layout = match binding_layout_source {
             validation::BindingLayoutSource::Provided(pipeline_layout) => pipeline_layout,
             validation::BindingLayoutSource::Derived(entries) => {
-                self.create_derived_pipeline_layout(entries, io.immediate_size_required)?
+                self.create_derived_pipeline_layout(entries, io.immediates.size())?
             }
+        };
+
+        let naga::valid::ImmediateUsage::Valid {
+            slots: immediate_slots_required,
+            size: _,
+        } = io.immediates
+        else {
+            unreachable!("Immediates exceeding maxImmediateSize should have been rejected");
         };
 
         let late_sized_buffer_groups =
@@ -4689,7 +4697,7 @@ impl Device {
             }),
             device: self.clone(),
             late_sized_buffer_groups,
-            immediate_slots_required: io.immediate_slots_required,
+            immediate_slots_required,
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(self.tracker_indices.compute_pipelines.clone()),
         };
@@ -5432,8 +5440,16 @@ impl Device {
         let pipeline_layout = match binding_layout_source {
             validation::BindingLayoutSource::Provided(pipeline_layout) => pipeline_layout,
             validation::BindingLayoutSource::Derived(entries) => {
-                self.create_derived_pipeline_layout(entries, io.immediate_size_required)?
+                self.create_derived_pipeline_layout(entries, io.immediates.size())?
             }
+        };
+
+        let naga::valid::ImmediateUsage::Valid {
+            slots: immediate_slots_required,
+            size: _,
+        } = io.immediates
+        else {
+            unreachable!("Immediates exceeding maxImmediateSize should have been rejected");
         };
 
         if let pipeline::RenderPipelineVertexProcessor::Vertex(ref vertex) = desc.vertex {
@@ -5613,7 +5629,7 @@ impl Device {
             strip_index_format: desc.primitive.strip_index_format,
             vertex_steps,
             late_sized_buffer_groups,
-            immediate_slots_required: io.immediate_slots_required,
+            immediate_slots_required,
             label: desc.label.to_string(),
             tracking_data: TrackingData::new(self.tracker_indices.render_pipelines.clone()),
             is_mesh,
