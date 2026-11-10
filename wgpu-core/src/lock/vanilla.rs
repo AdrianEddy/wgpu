@@ -99,6 +99,11 @@ impl<T> RwLock<T> {
         RwLockWriteGuard(self.0.write())
     }
 
+    /// Write-locks this lock if no other guard holds it, without blocking.
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        self.0.try_write().map(RwLockWriteGuard)
+    }
+
     /// Force an read-unlock operation on this lock.
     ///
     /// Safety:

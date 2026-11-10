@@ -38,7 +38,7 @@ use crate::{
     lock::{rank, Mutex, MutexGuard, RwLock},
     ray_tracing::{BlasCompactReadyPendingClosure, BlasPrepareCompactError},
     resource_log,
-    snatch::{SnatchGuard, Snatchable},
+    snatch::{ExclusiveSnatchGuard, SnatchGuard, Snatchable},
     timestamp_normalization::TimestampNormalizationBindGroup,
     track::{SharedTrackerIndexAllocator, TrackerIndex},
     weak_vec::WeakVec,
@@ -2108,6 +2108,42 @@ impl Texture {
         let last_submit_index = life_lock.get_texture_latest_submission_index(self);
         if let Some(last_submit_index) = last_submit_index {
             life_lock.schedule_resource_destruction(temp, last_submit_index);
+        }
+    }
+
+    /// Destroys the clear view of `self`, a surface texture that is no longer acquired, and the
+    /// HAL views of its [`TextureView`]s, which stay alive as destroyed views. See
+    /// [`Presentation::destroy_texture_views`].
+    ///
+    /// Presenting, discarding or releasing the texture, or configuring the surface while it was
+    /// acquired, destroyed it already. The GPU must be done with the views.
+    ///
+    /// [`Presentation::destroy_texture_views`]: crate::present::Presentation::destroy_texture_views
+    pub(crate) fn destroy_surface_texture_views(&self, snatch_guard: &mut ExclusiveSnatchGuard) {
+        let views = mem::take(&mut *self.views.lock());
+        for view in views {
+            let Some(view) = view.upgrade() else {
+                continue;
+            };
+            let Ok(view_state) = view.state() else {
+                continue;
+            };
+            if let Some(raw) = view_state.raw.snatch(snatch_guard) {
+                resource_log!("Destroy raw {}", view.error_ident());
+                unsafe { self.device.raw().destroy_texture_view(raw) };
+            }
+        }
+
+        if let TextureClearMode::Surface { clear_view } =
+            mem::replace(&mut *self.clear_mode.write(), TextureClearMode::None)
+        {
+            let raw = ManuallyDrop::into_inner(clear_view);
+            unsafe { self.device.raw().destroy_texture_view(raw) };
+        }
+
+        // A texture released while the snatch lock was held still has its raw texture.
+        if let Ok(state) = self.state() {
+            drop(state.inner.snatch(snatch_guard));
         }
     }
 

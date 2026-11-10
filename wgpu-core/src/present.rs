@@ -10,7 +10,7 @@ extract it from the hub.
 !*/
 
 use alloc::{boxed::Box, sync::Arc, vec::Vec};
-use core::mem::ManuallyDrop;
+use core::mem::{self, ManuallyDrop};
 
 #[cfg(feature = "trace")]
 use crate::device::trace::{Action, IntoTrace};
@@ -23,6 +23,7 @@ use crate::{
     hal_label,
     instance::Surface,
     resource::{self, Labeled},
+    weak_vec::WeakVec,
 };
 
 use thiserror::Error;
@@ -38,6 +39,52 @@ pub(crate) struct Presentation {
     pub(crate) device: Arc<Device>,
     pub(crate) config: wgt::SurfaceConfiguration<Vec<wgt::TextureFormat>>,
     pub(crate) acquired_texture: Option<Arc<resource::Texture>>,
+    /// The textures acquired with this configuration, which the application can keep
+    /// referencing after they are presented or discarded. See [`Self::destroy_texture_views`].
+    pub(crate) textures: WeakVec<resource::Texture>,
+}
+
+impl Presentation {
+    pub(crate) fn new(
+        device: Arc<Device>,
+        config: wgt::SurfaceConfiguration<Vec<wgt::TextureFormat>>,
+    ) -> Self {
+        Self {
+            device,
+            config,
+            acquired_texture: None,
+            textures: WeakVec::new(),
+        }
+    }
+
+    /// Destroys the HAL views of the textures acquired with this configuration that are still
+    /// referenced, before the HAL surface is reconfigured or unconfigured.
+    ///
+    /// The HAL requires them destroyed by then (see `hal::Surface::configure`;
+    /// <https://github.com/gfx-rs/wgpu/issues/4105>). Presenting, discarding or releasing a
+    /// texture destroys it, but its clear view, and the views of its
+    /// [`TextureView`](resource::TextureView)s, live as long as those do, and the application
+    /// can keep them alive: `SurfaceTexture`s, texture and view handles, bind groups.
+    ///
+    /// Nothing observable changes for the application: the textures are destroyed already, so
+    /// their views fail validation wherever they are used.
+    ///
+    /// No texture may be acquired, and the GPU must be done with all of them.
+    pub(crate) fn destroy_texture_views(&mut self) {
+        let textures = mem::take(&mut self.textures)
+            .into_iter()
+            .filter_map(|texture| texture.upgrade())
+            .collect::<Vec<_>>();
+        if textures.is_empty() {
+            return;
+        }
+        let mut snatch_guard = self.device.snatchable_lock.write();
+        for texture in &textures {
+            texture.destroy_surface_texture_views(&mut snatch_guard);
+        }
+        // Released before the last references to the textures can be dropped.
+        drop(snatch_guard);
+    }
 }
 
 #[derive(Clone, Debug, Error)]
@@ -271,6 +318,7 @@ impl Surface {
                     return Err(SurfaceError::AlreadyAcquired);
                 }
                 present.acquired_texture = Some(texture.clone());
+                present.textures.push(Arc::downgrade(&texture));
 
                 let status = if ast.suboptimal {
                     Status::Suboptimal
@@ -523,8 +571,8 @@ impl Surface {
         self.release_inner()
     }
 
-    /// Like `discard`, drops the inner texture reference, but skips the
-    /// HAL `discard_texture` call. Safe to call during unwinding
+    /// Like `discard`, destroys the acquired texture, but skips the HAL
+    /// `discard_texture` call. Safe to call during unwinding.
     pub(crate) fn release_inner(&self) -> Result<(), SurfaceError> {
         profiling::scope!("Surface::release");
 
@@ -533,14 +581,23 @@ impl Surface {
             return Err(SurfaceError::NotConfigured);
         };
 
-        // `texture` is dropped here, decrementing the refcount of
-        // Arc<SwapchainAcquireSemaphore>. If this was the last Arc, the Texture
-        // is freed, which drops NativeSurfaceTextureMetadata and
-        // its Arc<SwapchainAcquireSemaphore>.
-        _ = present
+        let texture = present
             .acquired_texture
             .take()
             .ok_or(SurfaceError::NothingToPresent)?;
+        // Destroy the texture, as presenting and discarding do: its raw texture is dropped here
+        // even if the application still references the texture. On Vulkan, that drops the
+        // texture's `Arc<SwapchainAcquireSemaphore>`, which the swapchain's teardown checks.
+        //
+        // This runs while the thread unwinds, which may hold the snatch lock itself, through an
+        // `as_hal` guard, so it never waits for the lock. If the lock is held, configuring,
+        // unconfiguring or dropping the surface drops the raw texture instead, in
+        // `Texture::destroy_surface_texture_views`.
+        if let Ok(state) = texture.state() {
+            if let Some(mut snatch_guard) = present.device.snatchable_lock.try_write() {
+                drop(state.inner.snatch(&mut snatch_guard));
+            }
+        }
 
         Ok(())
     }

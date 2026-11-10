@@ -120,6 +120,185 @@ fn drop_destroyed(device: &wgpu::Device, frame: wgpu::SurfaceTexture) {
     fail(device, || drop(frame), Some(NOTHING_TO_PRESENT));
 }
 
+// Views of textures that the application holds.
+
+/// Configuring requires the views of the previous configuration's textures to be destroyed. The
+/// application can still hold the texture of a presented `SurfaceTexture`, and with it its clear
+/// view, and views of it.
+#[test]
+fn configure_destroys_the_views_of_held_textures() {
+    let s = setup();
+    let frame = s.acquire();
+    let texture = frame.texture.clone();
+    let view = frame.texture.create_view(&Default::default());
+    s.queue.present(frame);
+
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+
+    // The view is of a destroyed texture.
+    let mut encoder = s.device.create_command_encoder(&Default::default());
+    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &view,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations::default(),
+        })],
+        ..Default::default()
+    });
+    fail(
+        &s.device,
+        || s.queue.submit([encoder.finish()]),
+        Some("destroyed"),
+    );
+    drop((texture, view));
+    s.assert_no_violations();
+}
+
+/// A `SurfaceTexture` dropped while unwinding gives its texture back without discarding it. The
+/// texture is destroyed all the same, though the application holds it.
+#[test]
+fn a_released_texture_is_destroyed() {
+    let s = setup();
+    let held = Mutex::new(None);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let frame = s.acquire();
+        *held.lock().unwrap() = Some(frame.texture.clone());
+        panic!("dropping the frame while unwinding");
+    }));
+    assert!(unwound.is_err());
+
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    drop(held);
+}
+
+/// Configuring destroys the acquired texture, whose `SurfaceTexture` the application still holds.
+#[test]
+fn configure_destroys_the_acquired_texture() {
+    let s = setup();
+    let frame = s.acquire();
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    drop_destroyed(&s.device, frame);
+
+    let frame = s.acquire();
+    assert_eq!(frame.texture.width(), s.resized(1).width);
+    s.queue.present(frame);
+    s.assert_no_violations();
+}
+
+/// A `SurfaceTexture` dropped while unwinding does not wait for an `as_hal` guard that another
+/// thread holds, which would hold up the unwinding thread for as long as the guard lives.
+/// Configuring the surface destroys the texture instead.
+#[test]
+fn releasing_a_texture_does_not_wait_for_an_as_hal_guard() {
+    let s = setup();
+    let guarded = s.device.create_texture(&wgpu::TextureDescriptor {
+        label: None,
+        size: wgpu::Extent3d::default(),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+        texture_binding_view_dimension: None,
+    });
+    let (guard_held, wait_for_guard) = mpsc::channel();
+    let (released, wait_for_release) = mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        // SAFETY: The guard is only held.
+        let guard = unsafe { guarded.as_hal::<Noop>() };
+        guard_held.send(()).unwrap();
+        let waited = wait_for_release.recv_timeout(Duration::from_secs(10));
+        drop(guard);
+        waited.is_ok()
+    });
+    wait_for_guard.recv().unwrap();
+
+    let held = Mutex::new(None);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let frame = s.acquire();
+        *held.lock().unwrap() = Some(frame.texture.clone());
+        panic!("dropping the frame while unwinding");
+    }));
+    assert!(unwound.is_err());
+    let _ = released.send(());
+    assert!(
+        holder.join().unwrap(),
+        "the release waited for the guard to be dropped"
+    );
+
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    drop(held);
+}
+
+/// Releases a texture of the surface while another thread holds the snatch lock, through an
+/// `as_hal` guard: the release then leaves the texture alive. Returns the texture.
+fn release_while_the_snatch_lock_is_held(s: &Setup) -> wgpu::Texture {
+    let guarded = s.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let (guard_held, wait_for_guard) = mpsc::channel();
+    let (released, wait_for_release) = mpsc::channel::<()>();
+    let holder = thread::spawn(move || {
+        // SAFETY: The guard is only held.
+        let guard = unsafe { guarded.as_hal::<Noop>() };
+        guard_held.send(()).unwrap();
+        let _ = wait_for_release.recv_timeout(Duration::from_secs(10));
+        drop(guard);
+    });
+    wait_for_guard.recv().unwrap();
+    let held = Mutex::new(None);
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let frame = s.acquire();
+        *held.lock().unwrap() = Some(frame.texture.clone());
+        panic!("dropping the frame while unwinding");
+    }));
+    assert!(unwound.is_err());
+    released.send(()).unwrap();
+    holder.join().unwrap();
+    held.into_inner().unwrap().unwrap()
+}
+
+/// A texture released while another thread held the snatch lock stays alive until the surface
+/// is configured again. Configuring destroys it before it waits for the GPU, so that no work can
+/// use it while configuring waits, and destroys its views afterwards: here the wait times out, and
+/// the texture is destroyed all the same.
+#[test]
+fn configuring_destroys_a_released_texture_before_it_waits() {
+    let s = setup();
+    let texture = release_while_the_snatch_lock_is_held(&s);
+    s.noop_device().stall_gpu();
+    s.queue.submit([]);
+    fail(
+        &s.device,
+        || s.surface.configure(&s.device, &s.resized(1)),
+        Some("Failed to wait for GPU"),
+    );
+    fail(
+        &s.device,
+        || {
+            s.queue.write_texture(
+                texture.as_image_copy(),
+                &[0; 4],
+                wgpu::TexelCopyBufferLayout::default(),
+                wgpu::Extent3d::default(),
+            )
+        },
+        Some("has been destroyed"),
+    );
+    s.noop_device().resume_gpu();
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+}
+
 // Releasing the device configured before.
 
 /// Configuring a surface for another device releases the device it was configured for. If the

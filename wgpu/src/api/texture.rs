@@ -40,6 +40,14 @@ impl Texture {
     /// - The returned guard holds a read-lock on a device-local "destruction"
     ///   lock, which will cause all calls to `destroy` to block until the
     ///   guard is released.
+    /// - Configuring, unconfiguring or dropping a [`Surface`] configured for the
+    ///   device, and presenting or discarding its texture, may take that lock
+    ///   for writing while they hold the surface locked. While the guard is
+    ///   held, call no function of such a surface, on any thread: the call would
+    ///   block until the guard is released, and every other call on the surface
+    ///   with it.
+    ///
+    /// [`Surface`]: crate::Surface
     ///
     /// # Errors
     ///

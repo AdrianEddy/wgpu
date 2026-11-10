@@ -1,4 +1,11 @@
-use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{
+    borrow::ToOwned as _,
+    boxed::Box,
+    string::String,
+    sync::{Arc, Weak},
+    vec,
+    vec::Vec,
+};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -882,11 +889,12 @@ impl Surface {
             .map(|surface| surface.as_ref())
     }
 
-    /// Discards the acquired texture of the current configuration, waits for all work on its
-    /// device to finish, then takes the configuration.
+    /// Discards the acquired texture of the current configuration, destroys its other textures,
+    /// waits for all work on its device to finish, then takes the configuration and destroys the
+    /// views of its textures.
     ///
-    /// Returns the device the surface was configured for. The raw surface is still configured, so
-    /// the caller must unconfigure it next.
+    /// The raw surface is still configured, so the caller must unconfigure it next, with the
+    /// returned configuration's device.
     ///
     /// If the wait times out, the GPU may still use the surface's textures: the configuration is
     /// left in place, without its acquired texture, and the error is returned. A backend can time
@@ -894,7 +902,7 @@ impl Surface {
     fn take_presentation<'a>(
         &self,
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
-    ) -> (Result<Option<Arc<Device>>, WaitIdleError>, UserClosures) {
+    ) -> (Result<Option<Presentation>, WaitIdleError>, UserClosures) {
         let Some(present) = presentation.as_mut() else {
             return (Ok(None), UserClosures::default());
         };
@@ -902,6 +910,12 @@ impl Surface {
             // Given back to the HAL, so that the HAL surface has no texture acquired, whether the
             // configuration is taken or stays.
             self.discard_raw(&present.device, &texture);
+        }
+        // Presented and discarded textures are destroyed already, but a texture released while the
+        // snatch lock was held is not: destroyed before the wait, it can no longer be used by work
+        // submitted during the wait, whose views would be destroyed under it.
+        for texture in present.textures.iter().filter_map(Weak::upgrade) {
+            texture.destroy();
         }
 
         // Wait for all work that uses the surface's textures to finish.
@@ -922,7 +936,14 @@ impl Surface {
                 unreachable!("no submission index was provided")
             }
         };
-        let taken = waited.map(|()| presentation.take().map(|present| present.device));
+        let taken = waited.map(|()| {
+            presentation.take().map(|mut present| {
+                // The HAL surface is unconfigured next, which requires the views of its textures
+                // destroyed, including those of textures that the application still references.
+                present.destroy_texture_views();
+                present
+            })
+        });
         (taken, user_callbacks)
     }
 
@@ -946,11 +967,15 @@ impl Surface {
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
     ) -> (Option<Arc<Device>>, UserClosures) {
         let (taken, user_callbacks) = self.take_presentation(presentation);
-        let device = taken.unwrap_or_else(|error| {
+        let present = taken.unwrap_or_else(|error| {
             // Unconfiguring cannot fail, and dropping a surface must release it.
             log::error!("Failed to wait for the GPU before unconfiguring the surface: {error}");
-            presentation.take().map(|present| present.device)
+            presentation.take().map(|mut present| {
+                present.destroy_texture_views();
+                present
+            })
         });
+        let device = present.map(|present| present.device);
         if let Some(device) = &device {
             unsafe { self.unconfigure_raw(device) };
         }
@@ -1052,7 +1077,7 @@ impl Surface {
             let taken;
             (taken, user_callbacks) = self.take_presentation(&mut presentation);
             let previous = match taken {
-                Ok(previous) => previous,
+                Ok(previous) => previous.map(|previous| previous.device),
                 // The surface stays configured, without the texture it had acquired.
                 Err(error) => {
                     previous_device = None;
@@ -1081,11 +1106,7 @@ impl Surface {
             };
             match result {
                 Ok(()) => {
-                    *presentation = Some(Presentation {
-                        device: Arc::clone(device),
-                        config: config.clone(),
-                        acquired_texture: None,
-                    });
+                    *presentation = Some(Presentation::new(Arc::clone(device), config.clone()));
                     Ok(())
                 }
                 Err(error) => Err(match error {
