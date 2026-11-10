@@ -721,6 +721,9 @@ pub trait Surface: WasmNotSendSync {
     /// - Must be externally synchronized with all other queue operations on
     ///   `device`'s queue, including `configure` and `unconfigure` of other
     ///   surfaces.
+    /// - Must be externally synchronized with [`Surface::acquire_texture`] and
+    ///   [`Surface::discard_texture`] on `self`, and with [`Queue::present`] of
+    ///   its textures: they use the swapchain state that this replaces.
     unsafe fn configure(
         &self,
         device: &<Self::A as Api>::Device,
@@ -738,6 +741,9 @@ pub trait Surface: WasmNotSendSync {
     /// - Must be externally synchronized with all other queue operations on
     ///   `device`'s queue, including `configure` and `unconfigure` of other
     ///   surfaces.
+    /// - Must be externally synchronized with [`Surface::acquire_texture`] and
+    ///   [`Surface::discard_texture`] on `self`, and with [`Queue::present`] of
+    ///   its textures: they use the swapchain state that this releases.
     unsafe fn unconfigure(&self, device: &<Self::A as Api>::Device);
 
     /// Return the next texture to be presented by `self`, for the caller to draw on.

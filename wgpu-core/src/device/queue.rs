@@ -127,10 +127,16 @@ impl Queue {
     pub(crate) fn prepare_surface_texture_for_present(
         &self,
         texture: &Arc<Texture>,
-    ) -> Result<(), DeviceError> {
+    ) -> Result<(), crate::present::SurfaceError> {
         let snatch_guard = self.device.snatchable_lock.read();
         let submission = self.allocate_submission(snatch_guard)?;
         let device = &self.device;
+
+        // The application may have destroyed the texture since it was acquired, with
+        // `Texture::destroy` or `Device::destroy`.
+        if texture.check_destroyed(&submission.snatch_guard).is_err() {
+            return Err(crate::present::SurfaceError::TextureDestroyed);
+        }
 
         let mut pending_writes = self.pending_writes.lock();
 

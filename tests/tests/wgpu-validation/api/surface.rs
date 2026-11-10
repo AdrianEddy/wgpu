@@ -11,7 +11,7 @@
 
 use std::{
     ops::Deref,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Barrier, Mutex},
     thread,
     time::Duration,
 };
@@ -670,5 +670,116 @@ fn a_write_to_a_texture_is_submitted_before_discarding_it() {
     write_pixel(&s, &frame);
     drop(frame);
     s.queue.submit([]);
+    s.assert_no_violations();
+}
+
+// Presenting and discarding.
+
+/// Presenting a texture that was never rendered to first clears it, in a submission of its own.
+/// The texture stays acquired until it is presented: acquiring on another thread meanwhile waits
+/// for the presentation, then acquires an image, the only one acquired.
+#[test]
+fn a_texture_stays_acquired_while_it_is_being_presented() {
+    let s = setup();
+    let (acquirer, wait_for_acquirer) = mpsc::channel();
+    {
+        let surface = Arc::clone(&s.surface);
+        s.noop_device().run_during_next_submit(move || {
+            let (acquiring, wait_for_acquiring) = mpsc::channel();
+            let handle = thread::spawn(move || {
+                acquiring.send(()).unwrap();
+                let frame = acquire(&surface);
+                // SAFETY: The noop surface is only inspected.
+                let acquired = unsafe { surface.as_hal::<Noop>() }
+                    .unwrap()
+                    .acquired_images();
+                (frame, acquired)
+            });
+            wait_for_acquiring.recv().unwrap();
+            // Give the acquisition time to start while the texture is being presented.
+            thread::sleep(core::time::Duration::from_millis(50));
+            acquirer.send(handle).unwrap();
+        });
+    }
+
+    let frame = s.acquire();
+    s.queue.present(frame);
+    let (frame, acquired_with_it) = wait_for_acquirer
+        .recv()
+        .unwrap()
+        .join()
+        .expect("acquiring on another thread failed");
+    assert_eq!(
+        acquired_with_it, 1,
+        "acquired while the presented texture was still acquired"
+    );
+    s.queue.present(frame);
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    s.assert_no_violations();
+}
+
+/// A texture whose presentation fails before the HAL presents it is given back to the swapchain.
+#[test]
+fn a_texture_whose_presentation_failed_is_given_back() {
+    let s = setup();
+    let frame = s.acquire();
+    // Clearing the texture before presenting it submits, and the submission fails.
+    s.noop_device()
+        .fail_next(DeviceOperation::Submit, wgpu_hal::DeviceError::Lost);
+    s.queue.present(frame);
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    s.assert_no_violations();
+}
+
+/// Configuring on one thread while presenting on another.
+///
+/// Whether configuring destroys the texture before it is presented depends on timing, so this
+/// runs many rounds, and catches a broken requirement only in the rounds whose timing exposes it.
+#[test]
+fn configure_racing_a_presentation() {
+    let s = setup();
+    for round in 0..200 {
+        let barrier = Barrier::new(2);
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let frame = s.acquire();
+                barrier.wait();
+                let error_scope = s.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                s.queue.present(frame);
+                if let Some(error) = pollster::block_on(error_scope.pop()) {
+                    assert!(error.to_string().contains(NOTHING_TO_PRESENT), "{error}");
+                }
+            });
+            scope.spawn(|| {
+                barrier.wait();
+                s.surface.configure(&s.device, &s.resized(round));
+            });
+        });
+        assert_eq!(
+            s.noop_surface().take_violations(),
+            [] as [SurfaceViolation; 0],
+            "round {round}"
+        );
+    }
+}
+
+/// A presentation whose preparing submission fails drops the submission's pending writes with the
+/// surface locked. They can hold the last reference to a buffer that the application wrote to and
+/// dropped, and dropping a buffer locks its map state.
+#[test]
+fn a_failed_presentation_drops_the_last_reference_to_a_written_buffer() {
+    let s = setup();
+    let frame = s.acquire();
+    let buffer = s.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    s.queue.write_buffer(&buffer, 0, &[0; 4]);
+    drop(buffer);
+    s.noop_device()
+        .fail_next(DeviceOperation::Submit, wgpu_hal::DeviceError::Lost);
+    s.queue.present(frame);
     s.assert_no_violations();
 }

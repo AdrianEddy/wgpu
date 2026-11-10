@@ -229,6 +229,10 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Sub-allocate `wgpu_hal::MemoryFlags::TRANSIENT` buffers and acceleration structure build scratch from a separate Vulkan memory pool, so short-lived allocations no longer pin memory blocks shared with long-lived resources. By @stuartparmenter in [#10232](https://github.com/gfx-rs/wgpu/pull/10232).
 - Allocate acceleration structures created with `AccelerationStructureFlags::ALLOW_COMPACTION` from the transient Vulkan memory pool, since they are usually replaced by their compacted copies. By @stuartparmenter in [#10233](https://github.com/gfx-rs/wgpu/pull/10233).
 
+#### Hal
+
+- `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
+
 ### Bug Fixes
 
 #### General
@@ -257,6 +261,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - A `SurfaceTexture` dropped while its thread unwinds now logs the error of its release instead of reporting it: the default uncaptured error handler panicked, which aborted the process. By @AdrianEddy.
 - Fix `Surface::get_current_texture` racing `Surface::configure` on another thread, which could panic in the backend or present an image of a replaced swapchain: acquiring now holds the surface's lock throughout. A `get_current_texture` that fails because a texture is already acquired no longer takes a texture from the swapchain. By @AdrianEddy.
 - `Queue::write_texture` and `Queue::copy_external_image_to_texture` to a surface texture now submit the write at once: a write left pending could reach the GPU after presenting, discarding or configuring had given the image back or destroyed it. Each such write is now a submission of its own, so batch them, or write to another texture and copy it. By @AdrianEddy.
+- Fix `Queue::present` racing `Surface::configure` or `Surface::get_current_texture` on another thread, which could present an image of a replaced swapchain, or acquire a texture while one was being presented. The texture now stays acquired until it is presented, and one whose presentation fails before reaching the backend is given back. Presenting a texture destroyed with `Texture::destroy` is a `TextureDestroyed` error. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
 - Fix `wgpu-core` failing to build without its `std` feature in debug builds with `--cfg wgpu_validate_locks_debug`, as in wgpu's own tree. Lock validation now requires `std`. By @AdrianEddy.
