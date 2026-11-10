@@ -145,13 +145,18 @@ pub enum WaitIdleError {
 }
 
 impl WaitIdleError {
-    pub fn to_poll_error(&self) -> Option<wgt::PollError> {
+    /// The [`wgt::PollError`] that `Device::poll` reports for this error.
+    pub fn to_poll_error(&self) -> wgt::PollError {
         match self {
-            WaitIdleError::Timeout => Some(wgt::PollError::Timeout),
+            WaitIdleError::Timeout => wgt::PollError::Timeout,
             &WaitIdleError::WrongSubmissionIndex(a, b) => {
-                Some(wgt::PollError::WrongSubmissionIndex(a, b))
+                wgt::PollError::WrongSubmissionIndex(a, b)
             }
-            _ => None,
+            // `Device::maintain` reports a device error only after losing the
+            // device (`Device::handle_hal_error`). It returns early, leaving
+            // map callbacks pending, so this must be an error: a caller told
+            // that the poll succeeded would wait for them.
+            WaitIdleError::Device(_) => wgt::PollError::DeviceLost,
         }
     }
 }
@@ -433,3 +438,6 @@ impl LifetimeTracker {
         pending_callbacks
     }
 }
+
+#[cfg(test)]
+mod tests;
