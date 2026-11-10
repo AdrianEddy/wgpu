@@ -135,6 +135,12 @@ define_lock_ranks! {
         TEXTURE_VIEWS,
         DEVICE_DEFERRED_DESTROY,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
+        // A presentation whose preparing submission fails drops that submission's command
+        // buffers and pending writes with the surface locked: they can hold the last reference
+        // to a buffer.
+        COMMAND_ALLOCATOR_FREE_ENCODERS,
+        BUFFER_POOL,
+        BUFFER_MAP_STATE,
     }
     rank DEVICE_SNATCHABLE_LOCK "Device::snatchable_lock" followed by {
         BUFFER_MAP_STATE,

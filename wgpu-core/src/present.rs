@@ -432,60 +432,59 @@ impl Queue {
     ) -> Result<Status, SurfaceError> {
         profiling::scope!("Queue::present");
 
-        let (texture, damage_rects) = {
-            let mut presentation = surface.presentation.lock();
-            let present = match presentation.as_mut() {
-                Some(present) => present,
-                None => return Err(SurfaceError::NotConfigured),
-            };
+        let device = &self.device;
 
-            let device = &self.device;
-
-            // Check the surface is configured for this device.
-            if !Arc::ptr_eq(&present.device, device) {
-                return Err(SurfaceError::Device(DeviceError::DeviceMismatch(Box::new(
-                    crate::device::DeviceMismatch {
-                        res: self.error_ident(),
-                        res_device: device.error_ident(),
-                        target: None,
-                        target_device: present.device.error_ident(),
-                    },
-                ))));
-            }
-
-            let texture = present
-                .acquired_texture
-                .take()
-                .ok_or(SurfaceError::NothingToPresent)?;
-
-            // hal requires damage rects to be non-empty and within the surface.
-            let surface_rect = wgt::Rect {
-                x: 0,
-                y: 0,
-                w: present.config.width,
-                h: present.config.height,
-            };
-            let damage_rects = damage_rects
-                .iter()
-                .filter_map(|rect| rect.intersect(&surface_rect))
-                .collect::<Vec<_>>();
-
-            (texture, damage_rects)
+        // Held until the HAL has presented the texture, so that the surface cannot be
+        // reconfigured, nor another texture acquired, in between.
+        let mut presentation = surface.presentation.lock();
+        let present = match presentation.as_mut() {
+            Some(present) => present,
+            None => return Err(SurfaceError::NotConfigured),
         };
+
+        // Check the surface is configured for this device.
+        if !Arc::ptr_eq(&present.device, device) {
+            return Err(SurfaceError::Device(DeviceError::DeviceMismatch(Box::new(
+                crate::device::DeviceMismatch {
+                    res: self.error_ident(),
+                    res_device: device.error_ident(),
+                    target: None,
+                    target_device: present.device.error_ident(),
+                },
+            ))));
+        }
+
+        let texture = present
+            .acquired_texture
+            .take()
+            .ok_or(SurfaceError::NothingToPresent)?;
+
+        // hal requires damage rects to be non-empty and within the surface.
+        let surface_rect = wgt::Rect {
+            x: 0,
+            y: 0,
+            w: present.config.width,
+            h: present.config.height,
+        };
+        let damage_rects = damage_rects
+            .iter()
+            .filter_map(|rect| rect.intersect(&surface_rect))
+            .collect::<Vec<_>>();
 
         // If the texture was never rendered to, clear it and transition to
         // PRESENT state before presenting.
         // Fixes <https://github.com/gfx-rs/wgpu/issues/6748>
-        self.prepare_surface_texture_for_present(&texture)?;
+        if let Err(error) = self.prepare_surface_texture_for_present(&texture) {
+            // The texture is no longer acquired: give it back to the HAL, which would otherwise
+            // never hand it out again.
+            surface.discard_raw(device, &texture);
+            return Err(error);
+        }
 
-        let device = &self.device;
-
-        let mut exclusive_snatch_guard = device.snatchable_lock.write();
-        let inner = texture
-            .state()
-            .ok()
-            .and_then(|state| state.inner.snatch(&mut exclusive_snatch_guard));
-        drop(exclusive_snatch_guard);
+        let inner = texture.state().ok().and_then(|state| {
+            let mut snatch_guard = device.snatchable_lock.write();
+            state.inner.snatch(&mut snatch_guard)
+        });
 
         let result = match inner {
             None => return Err(SurfaceError::TextureDestroyed),
@@ -498,7 +497,7 @@ impl Queue {
                 let _command_indices = device.command_indices.write();
                 unsafe { raw_queue.present(raw_surface, raw, &damage_rects) }
             }
-            _ => unreachable!(),
+            Some(resource::TextureInner::Native { .. }) => unreachable!(),
         };
 
         match result {

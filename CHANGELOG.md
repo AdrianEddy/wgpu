@@ -293,6 +293,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 
 - `TextureDescriptor` has a new field `texture_binding_view_dimension`. It must be `Some` on devices without `DownlevelFlags::ARBITRARY_BINDING_VIEW_DIMENSIONS` (the GLES backend allocates the texture's GL target from it), and is ignored otherwise. By @alextechcc in [#8014](https://github.com/gfx-rs/wgpu/pull/8014).
 - `hal::Queue::present` gained a `damage_rects: &[wgt::Rect<u32>]` parameter. The rects must be non-empty and within the surface. Pass an empty slice for the previous behavior. By @sauliusvl in [#10152](https://github.com/gfx-rs/wgpu/pull/10152).
+- `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
 
 #### Metal
 
@@ -334,6 +335,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - A `SurfaceTexture` dropped while its thread unwinds now logs the error of its release instead of reporting it: the default uncaptured error handler panicked, which aborted the process. By @AdrianEddy.
 - Fix `Surface::get_current_texture` racing `Surface::configure` on another thread, which could panic in the backend or present an image of a replaced swapchain: acquiring now holds the surface's lock throughout. A `get_current_texture` that fails because a texture is already acquired no longer takes a texture from the swapchain. By @AdrianEddy.
 - `Queue::write_texture` and `Queue::copy_external_image_to_texture` to a surface texture now submit the write at once: a write left pending could reach the GPU after presenting, discarding or configuring had given the image back or destroyed it. Each such write is now a submission of its own, so batch them, or write to another texture and copy it. By @AdrianEddy.
+- Fix `Queue::present` racing `Surface::configure` or `Surface::get_current_texture` on another thread, which could present an image of a replaced swapchain, or acquire a texture while one was being presented. The texture now stays acquired until it is presented, and one whose presentation fails before reaching the backend is given back. Presenting a texture destroyed with `Texture::destroy` is a `TextureDestroyed` error. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Fixed some cases where `Adapter::get_texture_format_features` and `TextureFormat::guaranteed_format_features` did not match the validation applied by `create_texture`. By @andyleiserson in [#TODO](https://github.com/gfx-rs/wgpu/pull/TODO).
 - `STORAGE_BINDING` usage is no longer allowed for multi-planar textures. It was previously accepted, but was untested, and likely broken. By @andyleiserson in [#TODO](https://github.com/gfx-rs/wgpu/pull/TODO).
