@@ -243,6 +243,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Fix pending buffer mappings incorrectly succeeding when the device is lost before they are processed. By @jinleili in [#10301](https://github.com/gfx-rs/wgpu/pull/10301).
 - Fix initialization tracking for `external_texture` binding points, for both `ExternalTexture`s and `TextureView`s bound to them. By @ErichDonGubler in [#10276](https://github.com/gfx-rs/wgpu/pull/10276) and [#10366](https://github.com/gfx-rs/wgpu/pull/10366).
 - Fix `Surface::configure` and dropping a `Surface` or `Queue` racing with queue operations on other threads, which could crash on Vulkan. By @AdrianEddy in [#10675](https://github.com/gfx-rs/wgpu/pull/10675).
+- Fix two `unfulfilled_lint_expectations` warnings from `wgpu-core` in builds without lock validation, such as release builds, with Rust 1.98 and later. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
 
