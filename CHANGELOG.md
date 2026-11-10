@@ -253,6 +253,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Fix a failed `Queue::submit` dropping the work it did not submit with its locks held, and releasing them out of order, which made lock validation panic and could deadlock. By @AdrianEddy.
 - Every call that reports an error, and `Queue::on_submitted_work_done`, now deliver callbacks too, so a device lost callback is called before the call that finds the loss returns. A callback's own wgpu calls deliver the rest of its batch first, so callbacks keep their order. By @AdrianEddy.
 - Fix a presentation clearing a surface texture after a write that another thread recorded while the presentation prepared the texture, which wiped the write. By @AdrianEddy.
+- Fix configuring or dropping a `Surface` while the application still references one of its textures, a view of one, or a bind group using one: their views stayed alive, which the backends forbid, and DX12's `ResizeBuffers` failed ([#4105](https://github.com/gfx-rs/wgpu/issues/4105)). They are now destroyed first. A `SurfaceTexture` dropped while unwinding now destroys its texture too. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
 - Fix `wgpu-core` failing to build without its `std` feature in debug builds with `--cfg wgpu_validate_locks_debug`, as in wgpu's own tree. Lock validation now requires `std`. By @AdrianEddy.
@@ -379,6 +380,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 
 #### General
 
+- Document that the `as_hal` guard of a buffer, texture, texture view or acceleration structure must not be held across a call on a surface configured for its device, on any thread. By @AdrianEddy.
 - Fix the `BlasAabbGeometry` docs to refer to the `stride` field instead of a nonexistent `size.stride`, and document the packed AABB buffer layout (each primitive a minimum then a maximum corner, two consecutive `vec3<f32>`). By @mstampfli in [#9934](https://github.com/gfx-rs/wgpu/pull/9934).
 - Fix stale `poll()` docs that described a boolean return value instead of `PollStatus`/`PollError`. By @helgev-in-arcana in [#10151](https://github.com/gfx-rs/wgpu/pull/10151).
 

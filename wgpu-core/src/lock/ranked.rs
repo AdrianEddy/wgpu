@@ -341,6 +341,16 @@ impl<T> RwLock<T> {
         }
     }
 
+    /// Write-locks this lock if no other guard holds it, without blocking.
+    ///
+    /// The acquisition is checked against the lock ranks like [`Self::write`]'s.
+    #[track_caller]
+    pub fn try_write(&self) -> Option<RwLockWriteGuard<'_, T>> {
+        let saved = LockStateGuard(acquire(self.rank, Location::caller()));
+        let inner = self.inner.try_write()?;
+        Some(RwLockWriteGuard { inner, saved })
+    }
+
     /// Force an read-unlock operation on this lock.
     ///
     /// Safety:

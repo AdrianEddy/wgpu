@@ -165,6 +165,15 @@ impl SnatchLock {
         ExclusiveSnatchGuard(self.lock.write())
     }
 
+    /// Request write access to snatchable resources if no guard holds the lock, on this thread
+    /// or another, without blocking.
+    #[track_caller]
+    pub fn try_write(&self) -> Option<ExclusiveSnatchGuard<'_>> {
+        let guard = self.lock.try_write()?;
+        LockTrace::enter("write");
+        Some(ExclusiveSnatchGuard(guard))
+    }
+
     #[track_caller]
     pub unsafe fn force_unlock_read(&self, data: RankData) {
         // This is unsafe because it can cause deadlocks if the lock is held.
