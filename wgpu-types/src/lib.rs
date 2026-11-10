@@ -356,6 +356,9 @@ pub enum PollError {
     WrongSubmissionIndex(u64, u64),
     /// The backend doesn't support synchronously waiting.
     CantWait,
+    /// The device was found lost while polling: the backend reported it while waiting, or while
+    /// reading the queue's progress. The device lost callback tells why.
+    DeviceLost,
 }
 
 // This impl could be derived by `thiserror`, but by not doing so, we can reduce the number of
@@ -375,6 +378,7 @@ impl fmt::Display for PollError {
             PollError::CantWait => {
                 f.write_str("The backend doesn't support synchronously waiting.")
             }
+            PollError::DeviceLost => f.write_str("The device was lost."),
         }
     }
 }

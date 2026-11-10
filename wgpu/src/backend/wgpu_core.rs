@@ -1706,16 +1706,9 @@ impl dispatch::DeviceInterface for CoreDevice {
     }
 
     fn poll(&self, poll_type: wgt::PollType<u64>) -> Result<crate::PollStatus, crate::PollError> {
-        match self.wgpu_device.poll(poll_type) {
-            Ok(status) => Ok(status),
-            Err(err) => {
-                if let Some(poll_error) = err.to_poll_error() {
-                    return Err(poll_error);
-                }
-
-                handle_error_fatal(err, "Device::poll")
-            }
-        }
+        self.wgpu_device
+            .poll(poll_type)
+            .map_err(|err| err.to_poll_error())
     }
 
     fn get_internal_counters(&self) -> crate::InternalCounters {

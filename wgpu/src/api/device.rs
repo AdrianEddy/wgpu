@@ -106,6 +106,9 @@ impl Device {
     /// receives it. `Queue`s can be shared between threads, so other threads
     /// could submit new work at any time.)
     ///
+    /// Returns [`crate::PollError::DeviceLost`] if the poll finds the device lost. The device lost
+    /// callback (see [`Device::set_device_lost_callback`]) tells why.
+    ///
     /// On the WebGPU backend, a call with [`PollType::Poll`] is a no-op since `Device`s are automatically polled. A call with [`PollType::Wait`] is not supported (always returns [`crate::PollError::CantWait`]).
     pub fn poll(&self, poll_type: PollType) -> Result<crate::PollStatus, crate::PollError> {
         self.inner.poll(poll_type.map_index(|s| s.index))
