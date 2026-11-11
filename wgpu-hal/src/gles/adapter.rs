@@ -367,16 +367,21 @@ impl super::Adapter {
             log::debug!("Max vertex shader SSBO == 0 and SSTO != 0. Interpreting as false zero.");
         }
 
+        // A pipeline layout gives these bindings `u8` slots, so the per-stage limits are at most
+        // `MAX_BINDING_SLOTS_PER_STAGE` (see `device::number_bindings`). So is the uniform
+        // buffers' limit below.
         let max_storage_buffers_per_shader_stage = if vertex_shader_storage_blocks == 0 {
             fragment_shader_storage_blocks
         } else {
             vertex_shader_storage_blocks.min(fragment_shader_storage_blocks)
-        };
+        }
+        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
         let max_storage_textures_per_shader_stage = if vertex_shader_storage_textures == 0 {
             fragment_shader_storage_textures
         } else {
             vertex_shader_storage_textures.min(fragment_shader_storage_textures)
-        };
+        }
+        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
         // NOTE: GL_ARB_compute_shader adds support for indirect dispatch
         let indirect_execution = supported((3, 1), (4, 3))
             || (extensions.contains("GL_ARB_draw_indirect") && supports_compute);
@@ -752,9 +757,10 @@ impl super::Adapter {
             256
         };
         let max_uniform_buffers_per_shader_stage =
-            unsafe { gl.get_parameter_i32(glow::MAX_VERTEX_UNIFORM_BLOCKS) }
+            (unsafe { gl.get_parameter_i32(glow::MAX_VERTEX_UNIFORM_BLOCKS) }
                 .min(unsafe { gl.get_parameter_i32(glow::MAX_FRAGMENT_UNIFORM_BLOCKS) })
-                as u32;
+                as u32)
+                .min(super::MAX_BINDING_SLOTS_PER_STAGE);
 
         let max_compute_workgroups_per_dimension = if supports_work_group_params {
             unsafe { gl.get_parameter_indexed_i32(glow::MAX_COMPUTE_WORK_GROUP_COUNT, 0) }
@@ -788,8 +794,8 @@ impl super::Adapter {
             max_bindings_per_bind_group: u32::MAX,
             max_dynamic_uniform_buffers_per_pipeline_layout: max_uniform_buffers_per_shader_stage,
             max_dynamic_storage_buffers_per_pipeline_layout: max_storage_buffers_per_shader_stage,
-            max_sampled_textures_per_shader_stage: super::MAX_TEXTURE_SLOTS as u32,
-            max_samplers_per_shader_stage: super::MAX_SAMPLERS as u32,
+            max_sampled_textures_per_shader_stage: super::MAX_TEXTURE_SLOTS_PER_STAGE as u32,
+            max_samplers_per_shader_stage: super::MAX_SAMPLERS_PER_STAGE as u32,
             max_storage_buffers_per_shader_stage,
             max_storage_buffers_in_vertex_stage: 0,
             max_storage_buffers_in_fragment_stage: 0,

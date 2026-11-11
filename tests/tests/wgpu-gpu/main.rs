@@ -79,6 +79,7 @@ mod texture_binding;
 mod texture_blit;
 mod texture_bounds;
 mod texture_sampling;
+mod texture_units_across_stages;
 mod texture_view_creation;
 mod timestamp_normalization;
 mod timestamp_query;
@@ -173,6 +174,7 @@ fn all_tests() -> Vec<wgpu_test::GpuTestInitializer> {
     texture_blit::all_tests(&mut tests);
     texture_sampling::all_tests(&mut tests);
     texture_bounds::all_tests(&mut tests);
+    texture_units_across_stages::all_tests(&mut tests);
     texture_view_creation::all_tests(&mut tests);
     timestamp_normalization::all_tests(&mut tests);
     timestamp_query::all_tests(&mut tests);
