@@ -1,11 +1,4 @@
-use alloc::{
-    borrow::ToOwned as _,
-    boxed::Box,
-    string::String,
-    sync::{Arc, Weak},
-    vec,
-    vec::Vec,
-};
+use alloc::{borrow::ToOwned as _, boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 use core::{
     fmt,
     sync::atomic::{AtomicBool, Ordering},
@@ -906,16 +899,16 @@ impl Surface {
         let Some(present) = presentation.as_mut() else {
             return (Ok(None), UserClosures::default());
         };
-        if let Some(texture) = present.acquired_texture.take() {
-            // Given back to the HAL, so that the HAL surface has no texture acquired, whether the
-            // configuration is taken or stays.
+        // Given back to the HAL, so that the HAL surface has no texture acquired, whether the
+        // configuration is taken or stays. Destroyed before the wait, they can no longer be used
+        // by work submitted during the wait, whose views would be destroyed under it. The other
+        // textures of the configuration were presented or discarded, which destroyed them.
+        let acquired = [
+            present.acquired_texture.take(),
+            present.released_texture.take(),
+        ];
+        for texture in acquired.into_iter().flatten() {
             self.discard_raw(&present.device, &texture);
-        }
-        // Presented and discarded textures are destroyed already, but a texture released while the
-        // snatch lock was held is not: destroyed before the wait, it can no longer be used by work
-        // submitted during the wait, whose views would be destroyed under it.
-        for texture in present.textures.iter().filter_map(Weak::upgrade) {
-            texture.destroy();
         }
 
         // Wait for all work that uses the surface's textures to finish.

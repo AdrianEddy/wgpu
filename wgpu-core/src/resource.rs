@@ -1707,6 +1707,18 @@ pub enum TextureClearMode {
 #[derive(Debug)]
 pub struct TextureState {
     pub(crate) inner: Snatchable<TextureInner>,
+    /// The HAL texture of a surface texture that [`Texture::destroy`] destroyed while it was
+    /// acquired. The image is still acquired from the HAL, so the surface gives it back when it
+    /// presents, discards or releases the texture, or is configured again: see
+    /// [`Texture::take_surface_texture`].
+    destroyed_surface_texture: Snatchable<Box<dyn hal::DynSurfaceTexture>>,
+}
+
+/// The HAL texture of a surface texture, taken to give its image back to the HAL.
+pub(crate) struct TakenSurfaceTexture {
+    pub(crate) raw: Box<dyn hal::DynSurfaceTexture>,
+    /// Whether the texture had been destroyed, by [`Texture::destroy`], before it was taken.
+    pub(crate) destroyed: bool,
 }
 
 #[derive(Debug)]
@@ -1738,6 +1750,7 @@ impl Texture {
         Texture {
             state: ResourceState::Valid(TextureState {
                 inner: Snatchable::new(inner),
+                destroyed_surface_texture: Snatchable::empty(),
             }),
             device: device.clone(),
             desc: desc.map_label(|label| label.to_string()),
@@ -1952,9 +1965,12 @@ impl Texture {
         };
 
         let temp = {
-            let raw = match state.inner.snatch(&mut device.snatchable_lock.write()) {
+            let mut snatch_guard = device.snatchable_lock.write();
+            let raw = match state.inner.snatch(&mut snatch_guard) {
                 Some(TextureInner::Native { raw }) => raw,
-                Some(TextureInner::Surface { .. }) => {
+                Some(TextureInner::Surface { raw }) => {
+                    // Its image is acquired from the HAL until the surface gives it back.
+                    state.destroyed_surface_texture.put(raw, &mut snatch_guard);
                     return;
                 }
                 None => {
@@ -1962,6 +1978,7 @@ impl Texture {
                     return;
                 }
             };
+            drop(snatch_guard);
 
             let views = {
                 let mut guard = self.views.lock();
@@ -2002,12 +2019,37 @@ impl Texture {
         }
     }
 
+    /// Takes the HAL texture of `self`, a surface texture, to give its image back to the HAL: its
+    /// own, which destroys `self`, or if `self` was destroyed already, the one that
+    /// [`Self::destroy`] kept. Returns `None` if it was taken already.
+    pub(crate) fn take_surface_texture(
+        &self,
+        snatch_guard: &mut ExclusiveSnatchGuard,
+    ) -> Option<TakenSurfaceTexture> {
+        let state = self.state().ok()?;
+        match state.inner.snatch(snatch_guard) {
+            Some(TextureInner::Surface { raw }) => Some(TakenSurfaceTexture {
+                raw,
+                destroyed: false,
+            }),
+            Some(TextureInner::Native { .. }) => unreachable!("not a surface texture"),
+            None => state
+                .destroyed_surface_texture
+                .snatch(snatch_guard)
+                .map(|raw| TakenSurfaceTexture {
+                    raw,
+                    destroyed: true,
+                }),
+        }
+    }
+
     /// Destroys the clear view of `self`, a surface texture that is no longer acquired, and the
     /// HAL views of its [`TextureView`]s, which stay alive as destroyed views. See
     /// [`Presentation::destroy_texture_views`].
     ///
     /// Presenting, discarding or releasing the texture, or configuring the surface while it was
-    /// acquired, destroyed it already. The GPU must be done with the views.
+    /// acquired, destroyed it and gave its image back already. The GPU must be done with the
+    /// views.
     ///
     /// [`Presentation::destroy_texture_views`]: crate::present::Presentation::destroy_texture_views
     pub(crate) fn destroy_surface_texture_views(&self, snatch_guard: &mut ExclusiveSnatchGuard) {
@@ -2032,10 +2074,11 @@ impl Texture {
             unsafe { self.device.raw().destroy_texture_view(raw) };
         }
 
-        // A texture released while the snatch lock was held still has its raw texture.
-        if let Ok(state) = self.state() {
-            drop(state.inner.snatch(snatch_guard));
-        }
+        let not_given_back = self.take_surface_texture(snatch_guard);
+        debug_assert!(
+            not_given_back.is_none(),
+            "a surface texture's image was not given back"
+        );
     }
 
     fn create_view_inner(
