@@ -344,10 +344,6 @@ impl crate::Surface for super::Surface {
         // this gets ignored on iOS for certain OS/device combinations (iphone5s iOS 10.3)
         render_layer.setMaximumDrawableCount(config.maximum_frame_latency as usize + 1);
         render_layer.setDrawableSize(drawable_size);
-        // https://developer.apple.com/documentation/quartzcore/cametallayer/allowsnextdrawabletimeout
-        if available!(macos = 10.13, ios = 11.0, tvos = 11.0, visionos = 1.0) {
-            render_layer.setAllowsNextDrawableTimeout(false);
-        }
         if OsFeatures::display_sync() {
             render_layer.setDisplaySyncEnabled(display_sync);
         }
@@ -361,10 +357,22 @@ impl crate::Surface for super::Surface {
 
     unsafe fn acquire_texture(
         &self,
-        _timeout: Option<core::time::Duration>, // TODO
+        timeout: Option<core::time::Duration>,
         _fence: &super::Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<super::Api>, crate::SurfaceError> {
         let render_layer = self.render_layer.lock();
+
+        // `nextDrawable` either gives up after one second, or waits indefinitely
+        // (https://developer.apple.com/documentation/quartzcore/cametallayer/allowsnextdrawabletimeout).
+        // So a timeout, whatever its length, bounds the wait to one second, and no timeout waits
+        // indefinitely. wgpu-core acquires with a timeout of one second, which is the layer's
+        // default, so the property is written only when it changes.
+        if available!(macos = 10.13, ios = 11.0, tvos = 11.0, visionos = 1.0) {
+            let allows_timeout = timeout.is_some();
+            if allows_timeout != render_layer.allowsNextDrawableTimeout() {
+                render_layer.setAllowsNextDrawableTimeout(allows_timeout);
+            }
+        }
 
         #[cfg(target_os = "macos")]
         {
