@@ -335,6 +335,31 @@ impl Surface {
     }
 }
 
+impl Surface {
+    /// Gives `texture`, acquired from this surface on `device`, back to the HAL without
+    /// presenting it. Returns `false` if the texture was destroyed.
+    ///
+    /// The caller must have taken `texture` out of the surface's locked [`Presentation`].
+    pub(crate) fn discard_raw(&self, device: &Device, texture: &resource::Texture) -> bool {
+        let Ok(state) = texture.state() else {
+            return false;
+        };
+        let mut snatch_guard = device.snatchable_lock.write();
+        let inner = state.inner.snatch(&mut snatch_guard);
+        drop(snatch_guard);
+
+        match inner {
+            None => false,
+            Some(resource::TextureInner::Surface { raw }) => {
+                let raw_surface = self.raw(device.backend()).unwrap();
+                unsafe { raw_surface.discard_texture(raw) };
+                true
+            }
+            Some(resource::TextureInner::Native { .. }) => unreachable!(),
+        }
+    }
+}
+
 impl Queue {
     pub fn present(&self, surface: &Surface) -> Result<Status, SurfaceError> {
         self.present_with_damage(surface, &[])

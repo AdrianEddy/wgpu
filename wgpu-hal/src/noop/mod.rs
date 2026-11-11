@@ -78,6 +78,8 @@ pub enum DeviceOperation {
 struct DeviceHooks {
     failures: lock::SpinLock<Vec<(DeviceOperation, crate::DeviceError)>>,
     during_submit: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
+    /// Whether the GPU is stalled (see [`Context::stall_gpu`]).
+    stalled: wgpu_sync::atomic::AtomicBool,
 }
 
 #[cfg(feature = "noop_test_hooks")]
@@ -137,6 +139,27 @@ impl Context {
     pub fn run_during_next_submit(&self, f: impl FnOnce() + Send + 'static) {
         self.hooks().during_submit.lock().push(Box::new(f));
     }
+
+    /// Stalls this device's GPU: the submissions made from now on run, but their fence values
+    /// are reached only once [`Self::resume_gpu`] is called. Meanwhile, waiting for them times
+    /// out, as on a backend whose waits have a bound, such as GL's.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn stall_gpu(&self) {
+        self.hooks().stalled.store(true, Ordering::Release);
+    }
+
+    /// Resumes this device's GPU after [`Self::stall_gpu`]: its fences reach the values of the
+    /// submissions made meanwhile.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn resume_gpu(&self) {
+        self.hooks().stalled.store(false, Ordering::Release);
+    }
 }
 #[derive(Debug)]
 pub struct Encoder;
@@ -158,6 +181,22 @@ pub struct TextureView {
 #[derive(Debug)]
 pub struct Fence {
     value: AtomicU64,
+    /// The value of the last submission made while the GPU was stalled (see
+    /// [`Context::stall_gpu`]), which the fence reaches once the GPU resumes.
+    #[cfg(feature = "noop_test_hooks")]
+    stalled_value: AtomicU64,
+}
+
+impl Fence {
+    /// The value of the last submission that the GPU has finished.
+    fn completed(&self, #[cfg(feature = "noop_test_hooks")] hooks: &DeviceHooks) -> u64 {
+        #[cfg(feature = "noop_test_hooks")]
+        if !hooks.stalled.load(Ordering::Acquire) {
+            self.value
+                .fetch_max(self.stalled_value.load(Ordering::Acquire), Ordering::AcqRel);
+        }
+        self.value.load(Ordering::Acquire)
+    }
 }
 
 type DeviceResult<T> = Result<T, crate::DeviceError>;
@@ -421,6 +460,11 @@ impl crate::Queue for Context {
                 cb.execute();
             }
         }
+        #[cfg(feature = "noop_test_hooks")]
+        if self.hooks().stalled.load(Ordering::Acquire) {
+            fence.stalled_value.fetch_max(fence_value, Ordering::AcqRel);
+            return Ok(());
+        }
         fence.value.store(fence_value, Ordering::Release);
         Ok(())
     }
@@ -580,11 +624,16 @@ impl crate::Device for Context {
     unsafe fn create_fence(&self) -> DeviceResult<Fence> {
         Ok(Fence {
             value: AtomicU64::new(0),
+            #[cfg(feature = "noop_test_hooks")]
+            stalled_value: AtomicU64::new(0),
         })
     }
     unsafe fn destroy_fence(&self, fence: Fence) {}
     unsafe fn get_fence_value(&self, fence: &Fence) -> DeviceResult<crate::FenceValue> {
-        Ok(fence.value.load(Ordering::Acquire))
+        Ok(fence.completed(
+            #[cfg(feature = "noop_test_hooks")]
+            self.hooks(),
+        ))
     }
     unsafe fn wait(
         &self,
@@ -596,13 +645,19 @@ impl crate::Device for Context {
         if let Some(error) = self.hooks().take_failure(DeviceOperation::Wait) {
             return Err(error);
         }
+        let completed = fence.completed(
+            #[cfg(feature = "noop_test_hooks")]
+            self.hooks(),
+        );
+        // A stalled GPU finishes nothing until it resumes: the wait times out.
+        #[cfg(feature = "noop_test_hooks")]
+        if completed < value && self.hooks().stalled.load(Ordering::Acquire) {
+            return Ok(false);
+        }
         // The relevant commands must have already been submitted, and noop-backend commands are
         // executed synchronously, so there is no waiting — either it is already done,
         // or this method was called incorrectly.
-        assert!(
-            fence.value.load(Ordering::Acquire) >= value,
-            "submission must have already been done"
-        );
+        assert!(completed >= value, "submission must have already been done");
         Ok(true)
     }
 

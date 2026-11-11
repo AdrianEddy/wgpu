@@ -333,6 +333,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Fix the start state of a texture subresource that a pass uses for the first time in a command buffer that already uses other subresources of the same texture. If the pass used the subresource in two ways, the subresource began the submission in the wrong state. By @cwfitzgerald in [#10212](https://github.com/gfx-rs/wgpu/pull/10212).
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
 - Fix `Device::destroy` deadlocking when another thread drops one of the device's buffers at the same time. By @AdrianEddy.
+- A GPU wait that times out while configuring a surface is now the error `ConfigureSurfaceError::GpuWaitTimeout`, and the surface stays configured, apart from its acquired texture, which is destroyed as when configuring succeeds. Unconfiguring or dropping the surface logs the timeout and carries on. Each panicked, and GL's waits time out after about two seconds. By @AdrianEddy.
 
 #### naga
 
