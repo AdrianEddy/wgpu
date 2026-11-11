@@ -575,3 +575,60 @@ fn a_write_recorded_while_a_presentation_prepares_is_presented() {
     );
     s.assert_no_violations();
 }
+
+// Acquiring.
+
+/// Acquiring while a texture is acquired fails without acquiring one from the swapchain, which
+/// would never be given back.
+#[test]
+fn acquiring_while_acquired_takes_no_image() {
+    let s = setup();
+    let frame = s.acquire();
+    for _ in 0..3 {
+        fail(
+            &s.device,
+            || s.surface.get_current_texture(),
+            Some("already acquired"),
+        );
+    }
+    s.queue.present(frame);
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    for _ in 0..4 {
+        let frame = s.acquire();
+        s.queue.present(frame);
+    }
+    s.assert_no_violations();
+}
+
+/// Configuring on another thread waits until the acquisition is done.
+#[test]
+fn configure_waits_for_an_acquisition() {
+    let s = setup();
+    let finished_during_acquisition = Arc::new(Mutex::new(None));
+    let configure_thread = Arc::new(Mutex::new(None));
+    {
+        let surface = Arc::clone(&s.surface);
+        let device = s.device.clone();
+        let config = s.resized(1);
+        let finished_during_acquisition = Arc::clone(&finished_during_acquisition);
+        let configure_thread = Arc::clone(&configure_thread);
+        s.noop_surface()
+            .run_during_next(SurfaceCall::Acquire, move || {
+                let (sender, receiver) = mpsc::channel();
+                let handle = thread::spawn(move || {
+                    surface.configure(&device, &config);
+                    let _ = sender.send(());
+                });
+                let finished = receiver.recv_timeout(BLOCKED_FOR).is_ok();
+                *finished_during_acquisition.lock().unwrap() = Some(finished);
+                *configure_thread.lock().unwrap() = Some(handle);
+            });
+    }
+
+    let frame = s.acquire();
+    let handle = configure_thread.lock().unwrap().take().unwrap();
+    handle.join().unwrap();
+    assert_eq!(*finished_during_acquisition.lock().unwrap(), Some(false));
+    s.assert_no_violations();
+    drop_destroyed(&s.device, frame);
+}

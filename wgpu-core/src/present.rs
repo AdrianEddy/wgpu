@@ -230,106 +230,30 @@ impl Surface {
     pub(crate) fn get_current_texture_inner(&self) -> Result<SurfaceOutput, SurfaceError> {
         profiling::scope!("Surface::get_current_texture");
 
-        let (device, config) = if let Some(ref present) = *self.presentation.lock() {
-            present.device.check_is_valid()?;
-            (present.device.clone(), present.config.clone())
-        } else {
+        // Held until the acquired texture is recorded, so that the surface cannot be
+        // reconfigured, nor another texture acquired, in between.
+        let mut presentation = self.presentation.lock();
+        let Some(present) = presentation.as_mut() else {
             return Err(SurfaceError::NotConfigured);
         };
+        present.device.check_is_valid()?;
+        // Checked before acquiring: a texture acquired from the HAL must be presented or
+        // discarded, or the swapchain does not get it back.
+        if present.acquired_texture.is_some() {
+            return Err(SurfaceError::AlreadyAcquired);
+        }
+        let device = Arc::clone(&present.device);
 
         let suf = self.raw(device.backend()).unwrap();
-        let (texture, status) = match unsafe {
+        let ast = match unsafe {
             suf.acquire_texture(
                 Some(core::time::Duration::from_millis(FRAME_TIMEOUT_MS as u64)),
                 device.fence.as_ref(),
             )
         } {
-            Ok(ast) => {
-                let texture_desc = wgt::TextureDescriptor {
-                    label: hal_label(
-                        Some(alloc::borrow::Cow::Borrowed("<Surface Texture>")),
-                        device.instance_flags,
-                    ),
-                    size: wgt::Extent3d {
-                        width: config.width,
-                        height: config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    sample_count: 1,
-                    mip_level_count: 1,
-                    format: config.format,
-                    dimension: wgt::TextureDimension::D2,
-                    texture_binding_view_dimension: None,
-                    usage: config.usage,
-                    view_formats: config.view_formats,
-                };
-                let format_features = wgt::TextureFormatFeatures {
-                    allowed_usages: wgt::TextureUsages::RENDER_ATTACHMENT,
-                    flags: wgt::TextureFormatFeatureFlags::MULTISAMPLE_X4
-                        | wgt::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE,
-                };
-                let hal_usage = conv::map_texture_usage(
-                    config.usage,
-                    config.format.into(),
-                    format_features.flags,
-                );
-                let clear_view_desc = hal::TextureViewDescriptor {
-                    label: hal_label(
-                        Some("(wgpu internal) clear surface texture view"),
-                        device.instance_flags,
-                    ),
-                    format: config.format,
-                    dimension: wgt::TextureViewDimension::D2,
-                    usage: wgt::TextureUses::COLOR_TARGET,
-                    range: wgt::ImageSubresourceRange::default(),
-                    swizzle: wgt::TextureComponentSwizzle::default(),
-                };
-                let clear_view = unsafe {
-                    device
-                        .raw()
-                        .create_texture_view(ast.texture.as_ref().borrow(), &clear_view_desc)
-                }
-                .map_err(|e| device.handle_hal_error(e))?;
-
-                let mut presentation = self.presentation.lock();
-                let present = presentation.as_mut().unwrap();
-                let texture = resource::Texture::new(
-                    &device,
-                    resource::TextureInner::Surface { raw: ast.texture },
-                    hal_usage,
-                    &texture_desc,
-                    format_features,
-                    resource::TextureClearMode::Surface {
-                        clear_view: ManuallyDrop::new(clear_view),
-                    },
-                    true,
-                    None,
-                );
-
-                let texture = Arc::new(texture);
-
-                device
-                    .trackers
-                    .lock()
-                    .textures
-                    .insert_single(&texture, wgt::TextureUses::UNINITIALIZED);
-
-                if present.acquired_texture.is_some() {
-                    return Err(SurfaceError::AlreadyAcquired);
-                }
-                present.acquired_texture = Some(texture.clone());
-                present.textures.push(Arc::downgrade(&texture));
-
-                let status = if ast.suboptimal {
-                    Status::Suboptimal
-                } else {
-                    Status::Good
-                };
-                (Some(texture), status)
-            }
-            Err(err) => (
-                None,
-                match err {
+            Ok(ast) => ast,
+            Err(err) => {
+                let status = match err {
                     hal::SurfaceError::Timeout => Status::Timeout,
                     hal::SurfaceError::Occluded => Status::Occluded,
                     hal::SurfaceError::Lost => Status::Lost,
@@ -341,11 +265,95 @@ impl Surface {
                         log::error!("acquire error: {msg}");
                         Status::Lost
                     }
-                },
-            ),
+                };
+                return Ok(SurfaceOutput {
+                    status,
+                    texture: None,
+                });
+            }
         };
 
-        Ok(SurfaceOutput { status, texture })
+        let config = &present.config;
+        let texture_desc = wgt::TextureDescriptor {
+            label: hal_label(
+                Some(alloc::borrow::Cow::Borrowed("<Surface Texture>")),
+                device.instance_flags,
+            ),
+            size: wgt::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            sample_count: 1,
+            mip_level_count: 1,
+            format: config.format,
+            dimension: wgt::TextureDimension::D2,
+            texture_binding_view_dimension: None,
+            usage: config.usage,
+            view_formats: config.view_formats.clone(),
+        };
+        let format_features = wgt::TextureFormatFeatures {
+            allowed_usages: wgt::TextureUsages::RENDER_ATTACHMENT,
+            flags: wgt::TextureFormatFeatureFlags::MULTISAMPLE_X4
+                | wgt::TextureFormatFeatureFlags::MULTISAMPLE_RESOLVE,
+        };
+        let hal_usage =
+            conv::map_texture_usage(config.usage, config.format.into(), format_features.flags);
+        let clear_view_desc = hal::TextureViewDescriptor {
+            label: hal_label(
+                Some("(wgpu internal) clear surface texture view"),
+                device.instance_flags,
+            ),
+            format: config.format,
+            dimension: wgt::TextureViewDimension::D2,
+            usage: wgt::TextureUses::COLOR_TARGET,
+            range: wgt::ImageSubresourceRange::default(),
+            swizzle: wgt::TextureComponentSwizzle::default(),
+        };
+        let clear_view = match unsafe {
+            device
+                .raw()
+                .create_texture_view(ast.texture.as_ref().borrow(), &clear_view_desc)
+        } {
+            Ok(clear_view) => clear_view,
+            Err(err) => {
+                // Give the texture back, so that the swapchain can hand it out again.
+                unsafe { suf.discard_texture(ast.texture) };
+                return Err(device.handle_hal_error(err).into());
+            }
+        };
+
+        let status = if ast.suboptimal {
+            Status::Suboptimal
+        } else {
+            Status::Good
+        };
+        let texture = Arc::new(resource::Texture::new(
+            &device,
+            resource::TextureInner::Surface { raw: ast.texture },
+            hal_usage,
+            &texture_desc,
+            format_features,
+            resource::TextureClearMode::Surface {
+                clear_view: ManuallyDrop::new(clear_view),
+            },
+            true,
+            None,
+        ));
+
+        device
+            .trackers
+            .lock()
+            .textures
+            .insert_single(&texture, wgt::TextureUses::UNINITIALIZED);
+
+        present.acquired_texture = Some(Arc::clone(&texture));
+        present.textures.push(Arc::downgrade(&texture));
+
+        Ok(SurfaceOutput {
+            status,
+            texture: Some(texture),
+        })
     }
 
     pub fn present(self: &Arc<Self>) -> Result<Status, SurfaceError> {
