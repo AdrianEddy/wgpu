@@ -209,11 +209,12 @@ fn dropping_the_queue_delivers_its_callbacks() {
     assert!(done.load(Relaxed));
 }
 
-/// A device lost callback that arises in a call that delivers no callbacks, here creating a buffer
-/// mapped at creation, waits for the next call that does, here mapping another buffer. wgpu
-/// releases that buffer's own lock before it maps it, so the callback can unmap it.
+/// A call that delivers no callbacks otherwise, here creating a buffer mapped at creation, reports
+/// the error of losing the device, and reporting an error delivers callbacks: the device lost
+/// callback is called before the call returns. wgpu holds no lock then, so the callback can use
+/// another buffer.
 #[test]
-fn device_lost_callback_of_a_call_that_delivers_nothing() {
+fn device_lost_callback_of_a_call_that_reports_an_error() {
     let (_instance, device, _queue) = noop();
     let buffer = map_read_buffer(&device);
     let lost = on_device_lost(&device, {
@@ -232,10 +233,88 @@ fn device_lost_callback_of_a_call_that_delivers_nothing() {
         usage: wgpu::BufferUsages::MAP_WRITE,
         mapped_at_creation: true,
     });
-    assert!(!lost.load(Relaxed));
-
-    buffer.map_async(wgpu::MapMode::Read, .., |_| ());
     assert!(lost.load(Relaxed));
+}
+
+/// `Queue::on_submitted_work_done` submits the pending writes, which can lose the device, and
+/// discards the error: it delivers the device lost callback itself.
+#[test]
+fn device_lost_callback_of_on_submitted_work_done() {
+    let (_instance, device, queue) = noop();
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, &[0; 4]);
+    let lost = on_device_lost(&device, || ());
+
+    fail_next(
+        &device,
+        DeviceOperation::Submit,
+        wgpu_hal::DeviceError::Lost,
+    );
+    queue.on_submitted_work_done(|| ());
+    assert!(lost.load(Relaxed));
+}
+
+/// A callback that polls delivers the rest of its own batch before later batches: here a
+/// mapping callback that registers a second work-done callback and polls, in the batch of a first
+/// work-done callback registered before.
+#[test]
+fn work_done_callbacks_stay_in_order_when_a_callback_polls() {
+    let (_instance, device, queue) = noop();
+    let buffer = map_read_buffer(&device);
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let push =
+        |log: &Arc<std::sync::Mutex<Vec<&'static str>>>, entry| log.lock().unwrap().push(entry);
+    buffer.map_async(wgpu::MapMode::Read, .., {
+        let (log, device, queue) = (Arc::clone(&log), device.clone(), queue.clone());
+        move |_| {
+            push(&log, "map start");
+            queue.on_submitted_work_done({
+                let log = Arc::clone(&log);
+                move || push(&log, "work done 2")
+            });
+            device.poll(wgpu::PollType::Poll).unwrap();
+            push(&log, "map end");
+        }
+    });
+    queue.on_submitted_work_done({
+        let log = Arc::clone(&log);
+        move || push(&log, "work done 1")
+    });
+    device.poll(wgpu::PollType::Poll).unwrap();
+
+    assert_eq!(
+        *log.lock().unwrap(),
+        ["map start", "work done 1", "work done 2", "map end"]
+    );
+}
+
+/// A callback that maps another buffer and polls until that mapping's callback has run, as a
+/// blocking read-back helper does, finds it called.
+#[test]
+fn a_callback_s_poll_delivers_the_callback_it_waits_for() {
+    let (_instance, device, _queue) = noop();
+    let first = map_read_buffer(&device);
+    let second = map_read_buffer(&device);
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    first.map_async(wgpu::MapMode::Read, .., {
+        let (device, seen) = (device.clone(), Arc::clone(&seen));
+        move |_| {
+            let mapped = Arc::new(AtomicBool::new(false));
+            second.map_async(wgpu::MapMode::Read, .., {
+                let mapped = Arc::clone(&mapped);
+                move |_| mapped.store(true, Relaxed)
+            });
+            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+            *seen.lock().unwrap() = Some(mapped.load(Relaxed));
+        }
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    assert_eq!(*seen.lock().unwrap(), Some(true));
 }
 
 /// The uncaptured error handler of a failed acquisition can use the surface: wgpu releases the
