@@ -77,9 +77,10 @@ pub(super) trait Swapchain: Send + Sync + 'static {
         fence: &super::Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<crate::api::Vulkan>, crate::SurfaceError>;
 
-    /// Tries to discard the acquired texture without presenting it.
+    /// Gives the acquired texture back without presenting it, so that the next [`acquire`]
+    /// returns it.
     ///
-    /// In practice, this doesn't really work in the current implementations.
+    /// [`acquire`]: Swapchain::acquire
     unsafe fn discard_texture(
         &mut self,
         texture: super::SurfaceTexture,

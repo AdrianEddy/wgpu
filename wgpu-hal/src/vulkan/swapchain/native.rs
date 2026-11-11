@@ -324,6 +324,8 @@ impl Surface for NativeSurface {
             acquire_semaphores,
             next_acquire_index: 0,
             present_semaphores,
+            discarded: None,
+            acquired_suboptimal: false,
             next_present_time: None,
             next_present_chain: None,
         }))
@@ -384,6 +386,22 @@ pub(crate) struct NativeSwapchain {
     ///
     /// [`vkAcquireNextImageKHR`]: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#vkAcquireNextImageKHR
     present_semaphores: Vec<Arc<Mutex<SwapchainPresentSemaphores>>>,
+
+    /// The texture last discarded, which the next [`acquire`] returns.
+    ///
+    /// Vulkan has no core way to give an acquired image back to the presentation engine without
+    /// presenting it, so a discarded image stays acquired, and the next acquisition hands it out
+    /// again instead of acquiring another image. Its semaphores go with it: the acquire semaphore,
+    /// still to be waited for if no submission has used the image yet, and the present semaphores
+    /// signaled by the submissions that have, which the presentation of the image waits for.
+    ///
+    /// [`acquire`]: Swapchain::acquire
+    discarded: Option<crate::AcquiredSurfaceTexture<crate::api::Vulkan>>,
+
+    /// Whether `vkAcquireNextImageKHR` reported the image it last acquired as suboptimal. Only
+    /// one image is acquired at a time, so a discarded texture has that image, and is handed out
+    /// again as suboptimal as it was.
+    acquired_suboptimal: bool,
 
     /// The present timing information which will be set in the next call to [`present()`](crate::Queue::present()).
     ///
@@ -453,6 +471,8 @@ impl Swapchain for NativeSwapchain {
             unsafe { device.shared.raw.destroy_fence(fence, None) }
         }
 
+        // A discarded texture holds its semaphores, which would otherwise be skipped below.
+        self.discarded = None;
         destroy_swapchain_semaphores(
             &mut self.acquire_semaphores,
             &mut self.present_semaphores,
@@ -481,6 +501,11 @@ impl Swapchain for NativeSwapchain {
         // Android 11 corresponds to an SDK_INT/ro.build.version.sdk of 30
         if cfg!(target_os = "android") && self.device.instance.android_sdk_version < 30 {
             timeout_ns = u64::MAX;
+        }
+
+        // The image of a discarded texture is still acquired: hand it out again.
+        if let Some(discarded) = self.discarded.take() {
+            return self.reacquire_discarded(discarded, fence, timeout_ns);
         }
 
         let acquire_semaphore_arc = self.get_acquire_semaphore();
@@ -562,6 +587,7 @@ impl Swapchain for NativeSwapchain {
         // We only advance the surface semaphores if we successfully acquired an image, otherwise
         // we should try to re-acquire using the same semaphores.
         self.advance_acquire_semaphore();
+        self.acquired_suboptimal = suboptimal;
 
         let present_semaphore_arc = self.get_present_semaphores(index);
 
@@ -600,9 +626,18 @@ impl Swapchain for NativeSwapchain {
 
     unsafe fn discard_texture(
         &mut self,
-        _texture: crate::vulkan::SurfaceTexture,
+        texture: crate::vulkan::SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
-        // TODO: Current implementation no-ops
+        // Only one texture is acquired at a time, so the next acquisition comes before another
+        // discard.
+        debug_assert!(
+            self.discarded.is_none(),
+            "a texture was discarded twice without an acquisition in between"
+        );
+        self.discarded = Some(crate::AcquiredSurfaceTexture {
+            texture,
+            suboptimal: self.acquired_suboptimal,
+        });
         Ok(())
     }
 
@@ -733,6 +768,49 @@ impl NativeSwapchain {
     /// See [`Surface::set_next_present_chain()`](crate::vulkan::Surface::set_next_present_chain).
     pub unsafe fn set_next_present_chain(&mut self, chain: *mut core::ffi::c_void) {
         self.next_present_chain = Some(PnextChain::new(chain));
+    }
+
+    /// Hands out `discarded` again, once the submissions that used its image have finished.
+    ///
+    /// Waiting for them throttles the CPU as acquiring another image would: a loop that renders
+    /// to every texture and discards it would otherwise never wait. It also lets the present
+    /// semaphores that those submissions signaled be destroyed. Only a presentation waits for
+    /// them, so they would otherwise pile up, one per submission, until the image is presented.
+    fn reacquire_discarded(
+        &mut self,
+        discarded: crate::AcquiredSurfaceTexture<crate::api::Vulkan>,
+        fence: &crate::vulkan::Fence,
+        timeout_ns: u64,
+    ) -> Result<crate::AcquiredSurfaceTexture<crate::api::Vulkan>, crate::SurfaceError> {
+        let metadata = discarded
+            .texture
+            .metadata
+            .as_any()
+            .downcast_ref::<NativeSurfaceTextureMetadata>()
+            .unwrap();
+        let last_use = metadata
+            .acquire_semaphores
+            .lock()
+            .previously_used_submission_index;
+        let completed = match self.device.wait_for_fence(fence, last_use, timeout_ns) {
+            Ok(completed) => completed,
+            Err(error) => {
+                self.discarded = Some(discarded);
+                return Err(error.into());
+            }
+        };
+        if !completed {
+            self.discarded = Some(discarded);
+            return Err(crate::SurfaceError::Timeout);
+        }
+        // SAFETY: The submissions that signaled them have finished.
+        unsafe {
+            metadata
+                .present_semaphores
+                .lock()
+                .destroy_signaled(&self.device.raw)
+        };
+        Ok(discarded)
     }
 
     /// Mark the current frame finished, advancing to the next acquire semaphore.
@@ -932,6 +1010,19 @@ impl SwapchainPresentSemaphores {
     fn end_semaphore_usage(&mut self) {
         // Reset the index to 0, so that the next time we get a semaphore, we
         // start from the beginning of the list.
+        self.present_index = 0;
+    }
+
+    /// Destroys the semaphores that the submissions since the last presentation signaled, so
+    /// that the next presentation waits only for the submissions made from now on.
+    ///
+    /// # Safety
+    ///
+    /// The submissions that signaled them must have finished.
+    unsafe fn destroy_signaled(&mut self, device: &ash::Device) {
+        for sem in self.present.drain(..self.present_index) {
+            unsafe { device.destroy_semaphore(sem, None) };
+        }
         self.present_index = 0;
     }
 
