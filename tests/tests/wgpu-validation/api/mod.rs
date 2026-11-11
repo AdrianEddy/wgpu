@@ -15,4 +15,6 @@ mod overrides;
 mod ray_tracing_pipeline;
 mod render_bundle;
 mod render_pipeline;
+#[cfg(not(target_family = "wasm"))] // tests share wgpu objects across threads
+mod surface;
 mod texture;

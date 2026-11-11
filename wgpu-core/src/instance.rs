@@ -865,53 +865,48 @@ impl Surface {
             .map(|surface| surface.as_ref())
     }
 
-    /// Takes the current configuration, destroys its acquired texture and waits
-    /// for all work on its device to finish.
+    /// Discards the acquired texture of the current configuration, waits for all work on its
+    /// device to finish, then takes the configuration.
     ///
-    /// Returns the device the surface was configured for. The raw surface is
-    /// still configured, so the caller must unconfigure it next.
+    /// Returns the device the surface was configured for. The raw surface is still configured, so
+    /// the caller must unconfigure it next.
+    ///
+    /// If the wait times out, the GPU may still use the surface's textures: the configuration is
+    /// left in place, without its acquired texture, and the error is returned. A backend can time
+    /// out even without a timeout: GL waits for at most `i32::MAX` nanoseconds.
     fn take_presentation<'a>(
         &self,
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
-    ) -> (Option<Arc<Device>>, UserClosures) {
-        let mut result = UserClosures::default();
-        let mut device = None;
-        if let Some(mut present) = presentation.take() {
-            if let Some(texture) = present.acquired_texture.take() {
-                texture.destroy();
-            }
-
-            let user_callbacks;
-            {
-                // Wait for all work that uses the surface texture to finish
-                let snatch_guard = present.device.snatchable_lock.read();
-
-                let result;
-                (user_callbacks, result) = present
-                    .device
-                    .maintain(wgt::PollType::wait_indefinitely(), snatch_guard);
-                match result {
-                    Ok(_) => {}
-                    Err(WaitIdleError::Device(_)) => {
-                        // we can ignore device lost errors here, since we are just cleaning up
-                    }
-                    Err(WaitIdleError::Timeout) if cfg!(target_family = "wasm") => {
-                        // On wasm, you cannot actually successfully wait for the surface.
-                        // However WebGL does not actually require you do this, so ignoring
-                        // the failure is totally fine. See https://github.com/gfx-rs/wgpu/issues/7363
-                    }
-                    Err(WaitIdleError::Timeout) => {
-                        unreachable!("wait_indefinitely() should never timeout")
-                    }
-                    Err(WaitIdleError::WrongSubmissionIndex(_, _)) => {
-                        unreachable!("no submission index was provided")
-                    }
-                }
-            }
-            result.extend(user_callbacks);
-            device = Some(present.device);
+    ) -> (Result<Option<Arc<Device>>, WaitIdleError>, UserClosures) {
+        let Some(present) = presentation.as_mut() else {
+            return (Ok(None), UserClosures::default());
+        };
+        if let Some(texture) = present.acquired_texture.take() {
+            // Given back to the HAL, so that the HAL surface has no texture acquired, whether the
+            // configuration is taken or stays.
+            self.discard_raw(&present.device, &texture);
         }
-        (device, result)
+
+        // Wait for all work that uses the surface's textures to finish.
+        let snatch_guard = present.device.snatchable_lock.read();
+        let (user_callbacks, result) = present
+            .device
+            .maintain(wgt::PollType::wait_indefinitely(), snatch_guard);
+        let waited = match result {
+            Ok(_) => Ok(()),
+            // A lost device runs no more work, so cleaning up can go on.
+            Err(WaitIdleError::Device(_)) => Ok(()),
+            // On wasm, you cannot actually successfully wait for the surface. However WebGL does
+            // not actually require you do this, so ignoring the failure is totally fine. See
+            // https://github.com/gfx-rs/wgpu/issues/7363
+            Err(WaitIdleError::Timeout) if cfg!(target_family = "wasm") => Ok(()),
+            Err(error @ WaitIdleError::Timeout) => Err(error),
+            Err(WaitIdleError::WrongSubmissionIndex(_, _)) => {
+                unreachable!("no submission index was provided")
+            }
+        };
+        let taken = waited.map(|()| presentation.take().map(|present| present.device));
+        (taken, user_callbacks)
     }
 
     /// Unconfigures the raw surface from `device`.
@@ -931,7 +926,12 @@ impl Surface {
         &self,
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
     ) -> UserClosures {
-        let (device, user_callbacks) = self.take_presentation(presentation);
+        let (taken, user_callbacks) = self.take_presentation(presentation);
+        let device = taken.unwrap_or_else(|error| {
+            // Unconfiguring cannot fail, and dropping a surface must release it.
+            log::error!("Failed to wait for the GPU before unconfiguring the surface: {error}");
+            presentation.take().map(|present| present.device)
+        });
         if let Some(device) = device {
             unsafe { self.unconfigure_raw(&device) };
         }
@@ -1024,13 +1024,18 @@ impl Surface {
         device.check_is_valid()?;
 
         let user_callbacks;
-        let result = {
+        let result = 'configure: {
             // we keep presentation locked for the entire duration of the configure call,
             // so that no change can happen in the middle of it.
             let mut presentation = self.presentation.lock();
 
-            let previous_device;
-            (previous_device, user_callbacks) = self.take_presentation(&mut presentation);
+            let taken;
+            (taken, user_callbacks) = self.take_presentation(&mut presentation);
+            let previous_device = match taken {
+                Ok(previous_device) => previous_device,
+                // The surface stays configured, without the texture it had acquired.
+                Err(error) => break 'configure Err(E::from(error)),
+            };
 
             let surface_raw = self.raw(device.backend()).unwrap();
             // `command_indices` serializes these calls with other queue

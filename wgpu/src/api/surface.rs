@@ -108,6 +108,9 @@ impl Surface<'_> {
     /// # Validation Errors
     /// - Submissions that happen _during_ the configure may cause the
     ///   internal wait-for-idle to fail, raising a validation error.
+    /// - Waiting for the GPU times out, as GL's waits do after about two seconds. The surface
+    ///   stays configured as it was, except that a texture still acquired from it is destroyed,
+    ///   as when configuring succeeds.
     ///
     /// # Panics
     ///
