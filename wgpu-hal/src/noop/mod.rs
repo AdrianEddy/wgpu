@@ -17,6 +17,8 @@ mod lock;
 mod surface;
 #[cfg(test)]
 mod tests;
+#[cfg(feature = "noop_test_hooks")]
+pub use surface::ImageWrite;
 pub use surface::{Surface, SurfaceCall, SurfaceTexture, SurfaceViolation};
 
 #[derive(Clone, Debug)]
@@ -80,6 +82,7 @@ pub enum DeviceOperation {
 struct DeviceHooks {
     failures: lock::SpinLock<Vec<(DeviceOperation, crate::DeviceError)>>,
     during_submit: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
+    during_begin_encoding: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
     /// Whether the GPU is stalled (see [`Context::stall_gpu`]).
     stalled: wgpu_sync::atomic::AtomicBool,
 }
@@ -104,8 +107,18 @@ impl DeviceHooks {
 
     /// Runs the hook of the next submission, if any.
     fn run_during_submit(&self) {
+        Self::run_next(&self.during_submit);
+    }
+
+    /// Runs the hook of the next `begin_encoding`, if any.
+    fn run_during_begin_encoding(&self) {
+        Self::run_next(&self.during_begin_encoding);
+    }
+
+    /// Runs the first of `hooks`, if any, with `hooks` unlocked.
+    fn run_next(hooks: &lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>) {
         let hook = {
-            let mut hooks = self.during_submit.lock();
+            let mut hooks = hooks.lock();
             (!hooks.is_empty()).then(|| hooks.remove(0))
         };
         if let Some(hook) = hook {
@@ -140,6 +153,16 @@ impl Context {
     /// If `self` is an instance or an adapter.
     pub fn run_during_next_submit(&self, f: impl FnOnce() + Send + 'static) {
         self.hooks().during_submit.lock().push(Box::new(f));
+    }
+
+    /// Runs `f` inside the next [`crate::CommandEncoder::begin_encoding`] of an encoder of this
+    /// device, on the encoding thread. Hooks run one per call, in the order they were added.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn run_during_next_begin_encoding(&self, f: impl FnOnce() + Send + 'static) {
+        self.hooks().during_begin_encoding.lock().push(Box::new(f));
     }
 
     /// Stalls this device's GPU: the submissions made from now on run, but their fence values

@@ -132,7 +132,11 @@ impl Queue {
         let submission = self.allocate_submission(snatch_guard)?;
         let device = &self.device;
 
-        // If the texture is uninitialized it needs to be cleared before presenting
+        let mut pending_writes = self.pending_writes.lock();
+
+        // If the texture is uninitialized it needs to be cleared before presenting. Read with the
+        // pending writes locked: a write recorded meanwhile initialized it, and must not be
+        // cleared after it.
         let needs_clear = {
             let status = texture.initialization_status.read();
             status
@@ -140,8 +144,6 @@ impl Queue {
                 .first()
                 .is_some_and(|mip| mip.check(0..1).is_some())
         };
-
-        let mut pending_writes = self.pending_writes.lock();
 
         if needs_clear {
             // After encoding the clear operation, we must not return without

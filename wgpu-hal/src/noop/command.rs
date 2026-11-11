@@ -28,6 +28,12 @@ enum Command {
         dst: Buffer,
         regions: Vec<crate::BufferCopy>,
     },
+    /// A command that writes to a surface image.
+    #[cfg(feature = "noop_test_hooks")]
+    WriteImage {
+        image: ImageUse,
+        write: super::ImageWrite,
+    },
 }
 
 impl CommandBuffer {
@@ -67,6 +73,17 @@ impl CommandBuffer {
         self.use_image(view.image.as_deref());
     }
 
+    /// Records that `image`, if any, is written with `write`.
+    #[cfg(feature = "noop_test_hooks")]
+    fn write_image(&mut self, image: Option<&super::surface::Image>, write: super::ImageWrite) {
+        if let Some(image) = image {
+            self.commands.push(Command::WriteImage {
+                image: ImageUse::new(image),
+                write,
+            });
+        }
+    }
+
     fn use_image(&mut self, image: Option<&super::surface::Image>) {
         let Some(image) = image else {
             return;
@@ -83,6 +100,10 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn begin_encoding(&mut self, label: crate::Label) -> DeviceResult<()> {
         assert!(self.commands.is_empty());
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(hooks) = &self.hooks {
+            hooks.run_during_begin_encoding();
+        }
         Ok(())
     }
     unsafe fn discard_encoding(&mut self) {
@@ -163,11 +184,15 @@ impl crate::CommandEncoder for CommandBuffer {
         // TODO: consider implementing this and other texture manipulation
         self.use_texture(src);
         self.use_texture(dst);
+        #[cfg(feature = "noop_test_hooks")]
+        self.write_image(dst.image.as_deref(), super::ImageWrite::Copy);
     }
 
     unsafe fn copy_buffer_to_texture<T>(&mut self, src: &Buffer, dst: &Texture, regions: T) {
         // TODO: consider implementing this and other texture manipulation
         self.use_texture(dst);
+        #[cfg(feature = "noop_test_hooks")]
+        self.write_image(dst.image.as_deref(), super::ImageWrite::Copy);
     }
 
     unsafe fn copy_texture_to_buffer<T>(
@@ -209,6 +234,13 @@ impl crate::CommandEncoder for CommandBuffer {
     ) -> DeviceResult<()> {
         for attachment in desc.color_attachments.iter().flatten() {
             self.use_view(attachment.target.view);
+            #[cfg(feature = "noop_test_hooks")]
+            self.write_image(
+                attachment.target.view.image.as_deref(),
+                super::ImageWrite::RenderPass {
+                    cleared: attachment.ops.contains(crate::AttachmentOps::LOAD_CLEAR),
+                },
+            );
             if let Some(resolve_target) = &attachment.resolve_target {
                 self.use_view(resolve_target.view);
             }
@@ -400,6 +432,9 @@ impl Command {
                 let buffer_slice: &mut [u8] = unsafe { &mut *buffer.get_slice_ptr(range.clone()) };
                 buffer_slice.fill(0);
             }
+
+            #[cfg(feature = "noop_test_hooks")]
+            Command::WriteImage { image, write } => image.record_write(*write),
 
             Command::CopyBufferToBuffer { src, dst, regions } => {
                 for &crate::BufferCopy {
