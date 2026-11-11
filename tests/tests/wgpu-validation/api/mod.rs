@@ -8,6 +8,8 @@ mod encoding;
 mod error_scopes;
 mod experimental;
 mod external_texture;
+#[cfg(not(target_family = "wasm"))] // the callbacks need `wgpu` objects to be `Send`
+mod failed_submission;
 mod immediates;
 mod instance;
 mod mesh_shader;

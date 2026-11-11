@@ -1,3 +1,5 @@
+#[cfg(feature = "noop_test_hooks")]
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::mem;
 use core::ops::Range;
@@ -10,6 +12,9 @@ pub struct CommandBuffer {
     commands: Vec<Command>,
     /// The surface images the commands use, which the queue checks on submission.
     surface_images: Vec<ImageUse>,
+    /// The test hooks of the encoder's device. `None` for a finished command buffer.
+    #[cfg(feature = "noop_test_hooks")]
+    hooks: Option<Arc<super::DeviceHooks>>,
 }
 
 #[derive(Debug)]
@@ -36,10 +41,14 @@ impl CommandBuffer {
         }
     }
 
-    pub(crate) fn new() -> Self {
+    pub(super) fn new(
+        #[cfg(feature = "noop_test_hooks")] hooks: Option<Arc<super::DeviceHooks>>,
+    ) -> Self {
         Self {
             commands: Vec::new(),
             surface_images: Vec::new(),
+            #[cfg(feature = "noop_test_hooks")]
+            hooks,
         }
     }
 
@@ -81,9 +90,19 @@ impl crate::CommandEncoder for CommandBuffer {
         self.surface_images.clear();
     }
     unsafe fn end_encoding(&mut self) -> DeviceResult<CommandBuffer> {
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(error) = self
+            .hooks
+            .as_deref()
+            .and_then(|hooks| hooks.take_failure(super::DeviceOperation::EndEncoding))
+        {
+            return Err(error);
+        }
         Ok(CommandBuffer {
             commands: mem::take(&mut self.commands),
             surface_images: mem::take(&mut self.surface_images),
+            #[cfg(feature = "noop_test_hooks")]
+            hooks: None,
         })
     }
     unsafe fn reset_all<I>(&mut self, command_buffers: I) {}

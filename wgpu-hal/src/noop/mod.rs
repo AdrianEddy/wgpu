@@ -70,6 +70,8 @@ pub enum DeviceOperation {
     MapBuffer,
     /// [`crate::Device::check_if_oom`].
     CheckIfOom,
+    /// [`crate::CommandEncoder::end_encoding`], of an encoder of the device.
+    EndEncoding,
 }
 
 /// The test hooks of a noop device and its queue.
@@ -545,7 +547,10 @@ impl crate::Device for Context {
         &self,
         desc: &crate::CommandEncoderDescriptor<Context>,
     ) -> DeviceResult<CommandBuffer> {
-        Ok(CommandBuffer::new())
+        Ok(CommandBuffer::new(
+            #[cfg(feature = "noop_test_hooks")]
+            self.device.clone(),
+        ))
     }
 
     unsafe fn create_bind_group_layout(
