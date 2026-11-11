@@ -24,7 +24,9 @@
 //! [`ranked`] module's locks. `.config/cargo.toml` in the `wgpu` tree specifies
 //! `wgpu_validate_locks_debug`, so lock validation is active by default in
 //! `wgpu` CI and `wgpu` development trees, but not in `wgpu`-using applications
-//! unless specifically requested.
+//! unless specifically requested. Lock validation needs the `std` feature: the
+//! alias does not enable it without, and setting it directly without is an
+//! error.
 //!
 //! If the `observe_locks` feature is enabled, `wgpu-core` uses the
 //! [`observing`] module's locks.
@@ -47,6 +49,9 @@ mod observing;
 
 #[cfg_attr(any(wgpu_validate_locks, feature = "observe_locks"), allow(dead_code))]
 mod vanilla;
+
+#[cfg(all(wgpu_validate_locks, not(feature = "std")))]
+compile_error!("`wgpu_validate_locks` requires the `std` feature of `wgpu-core`");
 
 #[cfg(wgpu_validate_locks)]
 use ranked as chosen;

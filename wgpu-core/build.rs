@@ -32,7 +32,9 @@ fn main() {
             all(
                 debug_assertions,
                 wgpu_validate_locks_debug,
-                not(target_family = "wasm")
+                not(target_family = "wasm"),
+                // The ranked locks keep their state in thread-locals.
+                feature = "std"
             )
         }
     }

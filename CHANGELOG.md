@@ -246,6 +246,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Fix two `unfulfilled_lint_expectations` warnings from `wgpu-core` in builds without lock validation, such as release builds, with Rust 1.98 and later. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
+- Fix `wgpu-core` failing to build without its `std` feature in debug builds with `--cfg wgpu_validate_locks_debug`, as in wgpu's own tree. Lock validation now requires `std`. By @AdrianEddy.
 
 #### naga
 
