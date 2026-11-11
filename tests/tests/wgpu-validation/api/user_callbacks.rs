@@ -15,7 +15,7 @@ use std::{
 
 use wgpu_hal::{api::Noop, noop::DeviceOperation};
 
-fn noop() -> (wgpu::Instance, wgpu::Device, wgpu::Queue) {
+pub(super) fn noop() -> (wgpu::Instance, wgpu::Device, wgpu::Queue) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::NOOP,
         backend_options: wgpu::BackendOptions {
@@ -33,7 +33,11 @@ fn noop() -> (wgpu::Instance, wgpu::Device, wgpu::Queue) {
 }
 
 /// Makes the next `operation` of the noop `device` fail with `error`.
-fn fail_next(device: &wgpu::Device, operation: DeviceOperation, error: wgpu_hal::DeviceError) {
+pub(super) fn fail_next(
+    device: &wgpu::Device,
+    operation: DeviceOperation,
+    error: wgpu_hal::DeviceError,
+) {
     // SAFETY: The noop device is only told to fail an operation.
     unsafe { device.as_hal::<Noop>() }
         .unwrap()
@@ -41,7 +45,10 @@ fn fail_next(device: &wgpu::Device, operation: DeviceOperation, error: wgpu_hal:
 }
 
 /// Sets a device lost callback that runs `f`. Returns whether the callback has run.
-fn on_device_lost(device: &wgpu::Device, f: impl Fn() + Send + 'static) -> Arc<AtomicBool> {
+pub(super) fn on_device_lost(
+    device: &wgpu::Device,
+    f: impl Fn() + Send + 'static,
+) -> Arc<AtomicBool> {
     let lost = Arc::new(AtomicBool::new(false));
     device.set_device_lost_callback({
         let lost = Arc::clone(&lost);

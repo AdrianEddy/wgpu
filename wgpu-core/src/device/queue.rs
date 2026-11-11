@@ -614,26 +614,31 @@ impl PendingWrites {
         Ok(staging_buffers)
     }
 
+    /// Ends the recording of the pending writes, and returns it to submit.
+    ///
+    /// On an error, also returns the work it had already taken out of the pending writes. The
+    /// caller holds this `PendingWrites` locked, and must drop that work only once it has
+    /// released its locks: dropping it locks what may not be locked under them.
     fn pre_submit(
         &mut self,
         command_allocator: &CommandAllocator,
         device: &Arc<Device>,
         queue: &Queue,
         snatch_guard: &SnatchGuard,
-    ) -> Result<Option<EncoderInFlight>, DeviceError> {
+    ) -> Result<Option<EncoderInFlight>, (DeviceError, Option<Box<EncoderInFlight>>)> {
         if self.is_recording {
-            let pending_buffers = mem::take(&mut self.dst_buffers);
-            let pending_textures = mem::take(&mut self.dst_textures);
-            let pending_blas_s = mem::take(&mut self.copied_blas_s);
-            let pending_shader_binding_data = mem::take(&mut self.written_shader_binding_data);
-
             let cmd_buf = unsafe { self.command_encoder.end_encoding() }
-                .map_err(|e| device.handle_hal_error(e))?;
+                .map_err(|e| (device.handle_hal_error(e), None))?;
             self.is_recording = false;
 
             let new_encoder = command_allocator
                 .acquire_encoder(device.raw(), queue.raw())
-                .map_err(|e| device.handle_hal_error(e))?;
+                .map_err(|e| (device.handle_hal_error(e), None))?;
+
+            let pending_buffers = mem::take(&mut self.dst_buffers);
+            let pending_textures = mem::take(&mut self.dst_textures);
+            let pending_blas_s = mem::take(&mut self.copied_blas_s);
+            let pending_shader_binding_data = mem::take(&mut self.written_shader_binding_data);
 
             let mut encoder = EncoderInFlight {
                 inner: crate::command::InnerCommandEncoder {
@@ -655,7 +660,10 @@ impl PendingWrites {
                 _pending_shader_binding_data: pending_shader_binding_data,
             };
 
-            let staging_buffers = self.record_hoisted_barriers(&mut encoder, snatch_guard)?;
+            let staging_buffers = match self.record_hoisted_barriers(&mut encoder, snatch_guard) {
+                Ok(staging_buffers) => staging_buffers,
+                Err(error) => return Err((error, Some(Box::new(encoder)))),
+            };
             encoder
                 .temp_resources
                 .extend(staging_buffers.into_iter().map(TempResource::StagingBuffer));
@@ -1648,7 +1656,7 @@ impl Queue {
         api_log!("Queue::submit");
 
         let snatch_guard = self.device.snatchable_lock.read();
-        let mut submission = self
+        let submission = self
             .allocate_submission(snatch_guard)
             .map_err(|e| (None, e.into()))?;
         let submit_index = submission.index;
@@ -1660,6 +1668,9 @@ impl Queue {
         let mut successfully_submitted = false;
 
         let res = 'error: {
+            // Owned by the block, so that an error releases the submission's locks before it is
+            // handled below.
+            let mut submission = submission;
             let mut used_surface_textures = track::TextureUsageScope::default();
             let mut baked_command_buffers = Vec::with_capacity(command_buffers.len());
 
@@ -1766,6 +1777,8 @@ impl Queue {
 
                 // Note: locking the trackers has to be done after the storages
                 let mut trackers = self.device.trackers.lock();
+                // On an error, `trackers` is released before the command buffers are dropped:
+                // dropping their encoders and resources locks what may not be locked under it.
 
                 for mut baked in baked_command_buffers {
                     profiling::scope!("process baked commands");
@@ -1775,6 +1788,7 @@ impl Queue {
                         Some("(wgpu internal) Transit"),
                         self.device.instance_flags,
                     )) {
+                        drop(trackers);
                         break 'error Err(e.into());
                     }
 
@@ -1787,6 +1801,7 @@ impl Queue {
                     ) {
                         Ok(discards) => discards,
                         Err(e) => {
+                            drop(trackers);
                             break 'error Err(QueueSubmitError::CommandEncoder(
                                 CommandEncoderError::Clear(e),
                             ));
@@ -1803,6 +1818,7 @@ impl Queue {
                     );
 
                     if let Err(e) = baked.encoder.close_and_push_front() {
+                        drop(trackers);
                         break 'error Err(e.into());
                     }
 
@@ -1811,6 +1827,7 @@ impl Queue {
                             Some("(wgpu internal) Finalize"),
                             self.device.instance_flags,
                         )) {
+                            drop(trackers);
                             break 'error Err(e.into());
                         }
 
@@ -1820,6 +1837,7 @@ impl Queue {
                             &self.device,
                             &submission.snatch_guard,
                         ) {
+                            drop(trackers);
                             break 'error Err(QueueSubmitError::CommandEncoder(
                                 CommandEncoderError::Clear(e),
                             ));
@@ -1839,6 +1857,7 @@ impl Queue {
                             baked.encoder.raw.transition_textures(&texture_barriers);
                         };
                         if let Err(e) = baked.encoder.close() {
+                            drop(trackers);
                             break 'error Err(e.into());
                         }
                         used_surface_textures = track::TextureUsageScope::default();
@@ -1902,6 +1921,8 @@ impl Queue {
         let callbacks = match res {
             Ok(ok) => ok,
             Err(e) => {
+                // The submission's guards were released when the 'error block ended.
+                crate::lock::assert_no_locks_held();
                 if lose_device_on_error {
                     self.device.lose("submission failed");
                 }
@@ -2057,14 +2078,23 @@ impl Queue {
                 executions.insert(0, pending_execution);
             }
             Ok(None) => {}
-            Err(e) => return Err(e),
+            Err((error, unsubmitted)) => {
+                // Release the locks in the reverse order of their acquisition before the
+                // submission's work is dropped: dropping it locks what may not be locked under
+                // `pending_writes`.
+                drop(pending_writes);
+                drop(command_index_guard);
+                drop(snatch_guard);
+                drop(unsubmitted);
+                return Err(error);
+            }
         }
         let hal_command_buffers = executions
             .iter()
             .flat_map(|e| e.inner.list.iter().map(|b| b.as_ref()))
             .collect::<Vec<_>>();
 
-        {
+        let submitted = {
             let mut submit_surface_textures =
                 SmallVec::<[&dyn hal::DynSurfaceTexture; 2]>::with_capacity(surface_textures.len());
             for texture in surface_textures.values() {
@@ -2082,18 +2112,26 @@ impl Queue {
                     (self.device.fence.as_ref(), submit_index),
                 )
             }
-            .map_err(|e| self.device.handle_hal_error(e))?;
-
-            // Submissions must have strictly increasing indices, so we must hold the
-            // command index guard until we have submitted, to prevent another submission
-            // from claiming the next index and reaching `submit` before we do.
+        };
+        if let Err(error) = submitted {
+            // Release the locks in the reverse order of their acquisition before the
+            // submission's work is dropped: dropping it locks what may not be locked under
+            // `pending_writes`.
             drop(pending_writes);
-
-            // Advance the successful submission index.
-            self.device
-                .last_successful_submission_index
-                .fetch_max(submit_index, Ordering::SeqCst);
+            drop(command_index_guard);
+            drop(snatch_guard);
+            return Err(self.device.handle_hal_error(error));
         }
+
+        // Submissions must have strictly increasing indices, so we must hold the
+        // command index guard until we have submitted, to prevent another submission
+        // from claiming the next index and reaching `submit` before we do.
+        drop(pending_writes);
+
+        // Advance the successful submission index.
+        self.device
+            .last_successful_submission_index
+            .fetch_max(submit_index, Ordering::SeqCst);
 
         // this will register the new submission to the life time tracker
         self.lock_life().track_submission(submit_index, executions);

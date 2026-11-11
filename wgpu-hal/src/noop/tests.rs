@@ -342,7 +342,7 @@ mod hooks {
     use super::setup;
     use crate::{
         noop::{DeviceOperation, SurfaceCall, SurfaceViolation},
-        Device as _, Instance as _, Queue as _, Surface as _,
+        CommandEncoder as _, Device as _, Instance as _, Queue as _, Surface as _,
     };
 
     #[test]
@@ -495,6 +495,26 @@ mod hooks {
             s.device.map_buffer(&buffer, 0..4).unwrap();
             s.device.unmap_buffer(&buffer);
             s.device.destroy_buffer(buffer);
+        }
+
+        s.device
+            .fail_next(DeviceOperation::EndEncoding, crate::DeviceError::Lost);
+        // SAFETY: The encoder records nothing.
+        unsafe {
+            let mut encoder = s
+                .device
+                .create_command_encoder(&crate::CommandEncoderDescriptor {
+                    label: None,
+                    queue: &s.queue,
+                })
+                .unwrap();
+            encoder.begin_encoding(None).unwrap();
+            assert!(matches!(
+                encoder.end_encoding(),
+                Err(crate::DeviceError::Lost)
+            ));
+            encoder.begin_encoding(None).unwrap();
+            encoder.end_encoding().unwrap();
         }
     }
 
