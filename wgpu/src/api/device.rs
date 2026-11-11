@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, string::String, sync::Arc, vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec, vec::Vec};
 #[cfg(wgpu_core)]
 use core::ops::Deref;
 use core::{error, fmt, future::Future, marker::PhantomData};
@@ -864,7 +864,10 @@ impl Device {
     ///
     /// Panics if there is any [`BufferView`] or [`BufferViewMut`] alive.
     pub fn destroy(&self) {
-        for buffer in self.buffers.lock().drain() {
+        // Unmapped with the set unlocked: if another thread drops a buffer meanwhile, its map
+        // context can be dropped here, and its drop locks the set.
+        let buffers: Vec<_> = self.buffers.lock().drain().collect();
+        for buffer in buffers {
             buffer.unmap();
         }
         self.inner.destroy()
