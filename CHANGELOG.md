@@ -301,6 +301,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 
 #### Vulkan
 
+- Discarding a surface texture now gives its image back: the next `get_current_texture` returns the image again, as a new texture whose contents are not kept. A discarded image stayed acquired until the surface was configured again, leaving the swapchain one image short each time. Fixes [#5723](https://github.com/gfx-rs/wgpu/issues/5723). By @AdrianEddy.
 - On Windows, only wait for the swapchain acquire fence in `Fifo` and `FifoRelaxed` present modes. It added acquire latency in `Immediate` and `Mailbox`. By @HashimTheArab in [#10714](https://github.com/gfx-rs/wgpu/pull/10714).
 - Fix `HalCounters::textures` drifting negative: `create_texture` never incremented it while `destroy_texture` always decremented it. By @dustyleary in [#10022](https://github.com/gfx-rs/wgpu/pull/10022).
 - Fix `VUID-VkImageViewCreateInfo-image-04441` validation errors when creating a view of a texture whose only usages are `COPY_SRC` and/or `COPY_DST`. By @MannXo in [#10200](https://github.com/gfx-rs/wgpu/issues/10200).
