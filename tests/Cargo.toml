@@ -34,6 +34,10 @@ harness = true
 name = "wgpu_surface"
 harness = false
 
+[[test]]
+name = "wgpu_surface_operations"
+harness = false
+
 [features]
 webgl = ["wgpu/webgl"]
 exhaust = ["wgpu/exhaust"]
