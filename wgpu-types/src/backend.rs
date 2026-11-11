@@ -634,7 +634,7 @@ pub struct NoopBackendOptions {
     /// Specify the reported feature support. If `None`, reports support for all features.
     pub features: Option<crate::Features>,
 
-    /// Specify the reported device type. If `None`, uses [`crate::DeviceType::Other`].
+    /// Specify the reported device type. If `None`, uses [`crate::DeviceType::Cpu`].
     pub device_type: Option<crate::DeviceType>,
 
     /// Specify the reported minimum subgroup size.
