@@ -777,10 +777,12 @@ pub trait Surface: WasmNotSendSync {
     ///
     /// # Portability
     ///
-    /// Some backends can't support a timeout when acquiring a texture. On these
-    /// backends, `timeout` is ignored.
+    /// Some backends can't honour every timeout. On Metal, a timeout of any
+    /// length gives up after one second, the only bound that `CAMetalLayer`
+    /// offers. Vulkan on Android before 11 waits indefinitely. GL ignores the
+    /// timeout.
     ///
-    /// On macOS, this returns `Err(SurfaceError::Timeout)` when the window is
+    /// On macOS, this returns `Err(SurfaceError::Occluded)` when the window is
     /// not visible (minimized, fully occluded, or on another virtual desktop)
     /// to avoid blocking in `CAMetalLayer.nextDrawable()`.
     ///
