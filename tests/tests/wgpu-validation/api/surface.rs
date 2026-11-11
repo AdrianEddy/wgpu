@@ -9,7 +9,12 @@
 //! interleaved with it deterministically, and makes calls fail ([`noop::Surface::fail_next`],
 //! [`noop::Context::fail_next`]).
 
-use std::{ops::Deref, sync::Arc};
+use std::{
+    ops::Deref,
+    sync::{mpsc, Arc},
+    thread,
+    time::Duration,
+};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WebDisplayHandle, WebWindowHandle};
 use wgpu::CurrentSurfaceTexture;
@@ -28,6 +33,7 @@ struct Setup {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    instance: wgpu::Instance,
 }
 
 fn setup() -> Setup {
@@ -64,6 +70,7 @@ fn setup() -> Setup {
         device,
         queue,
         config,
+        instance,
     }
 }
 
@@ -108,6 +115,52 @@ fn acquire(surface: &wgpu::Surface<'_>) -> wgpu::SurfaceTexture {
 /// Drops `frame`, whose texture configuring the surface destroyed.
 fn drop_destroyed(device: &wgpu::Device, frame: wgpu::SurfaceTexture) {
     fail(device, || drop(frame), Some(NOTHING_TO_PRESENT));
+}
+
+// Releasing the device configured before.
+
+/// Configuring a surface for another device releases the device it was configured for. If the
+/// application no longer references that device, that is its last reference, and dropping the
+/// device drops its device lost callback, and with it what the callback captured. That must
+/// happen with the surface unlocked: here, what the callback captured acquires from the surface
+/// when it drops.
+#[test]
+fn configuring_for_another_device_releases_the_previous_one_unlocked() {
+    struct AcquiresOnDrop(Arc<wgpu::Surface<'static>>);
+    impl Drop for AcquiresOnDrop {
+        fn drop(&mut self) {
+            drop(self.0.get_current_texture());
+        }
+    }
+
+    let Setup {
+        surface,
+        device,
+        queue,
+        config,
+        instance,
+    } = setup();
+    let captured = AcquiresOnDrop(Arc::clone(&surface));
+    device.set_device_lost_callback(move |_reason, _message| {
+        let _captured = &captured;
+    });
+    drop((device, queue));
+
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    let (other_device, _other_queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    let (done, configured) = mpsc::channel();
+    thread::spawn(move || {
+        surface.configure(&other_device, &config);
+        done.send(()).unwrap();
+    });
+    configured
+        .recv_timeout(Duration::from_secs(10))
+        .expect("configuring for another device did not finish");
 }
 
 // A GPU that does not finish in time.
