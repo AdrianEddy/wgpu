@@ -332,3 +332,203 @@ fn a_submission_must_list_the_images_it_uses() {
         ]
     );
 }
+
+/// The test hooks of the `noop_test_hooks` feature.
+#[cfg(feature = "noop_test_hooks")]
+mod hooks {
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use super::setup;
+    use crate::{
+        noop::{DeviceOperation, SurfaceCall, SurfaceViolation},
+        Device as _, Instance as _, Queue as _, Surface as _,
+    };
+
+    #[test]
+    fn acquired_images_are_counted() {
+        let s = setup();
+        assert_eq!(s.surface.acquired_images(), 0);
+        s.configure(&s.surface);
+        let first = s.acquire(&s.surface).unwrap();
+        let second = s.acquire(&s.surface).unwrap();
+        assert_eq!(s.surface.acquired_images(), 2);
+        s.present(&s.surface, first);
+        s.discard(&s.surface, second);
+        assert_eq!(s.surface.acquired_images(), 0);
+    }
+
+    #[test]
+    fn configuring_during_an_acquisition_is_a_violation() {
+        let s = setup();
+        s.configure(&s.surface);
+        let s = Arc::new(s);
+        let ran = Arc::new(AtomicBool::new(false));
+        {
+            let hook_setup = Arc::clone(&s);
+            let ran = Arc::clone(&ran);
+            s.surface.run_during_next(SurfaceCall::Acquire, move || {
+                hook_setup.configure(&hook_setup.surface);
+                ran.store(true, Ordering::Relaxed);
+            });
+        }
+        let texture = s.acquire(&s.surface).unwrap();
+        assert!(ran.load(Ordering::Relaxed));
+        assert_eq!(
+            s.surface.take_violations(),
+            [SurfaceViolation::Overlap {
+                in_progress: SurfaceCall::Acquire,
+                call: SurfaceCall::Configure,
+            }]
+        );
+        drop(texture);
+    }
+
+    #[test]
+    fn a_surface_call_fails_when_asked_to() {
+        let s = setup();
+        s.configure(&s.surface);
+        s.surface
+            .fail_next(SurfaceCall::Acquire, crate::SurfaceError::Outdated);
+        assert!(matches!(
+            s.acquire(&s.surface),
+            Err(crate::SurfaceError::Outdated)
+        ));
+        assert_eq!(s.surface.acquired_images(), 0);
+
+        let texture = s.acquire(&s.surface).unwrap();
+        s.surface.fail_next(
+            SurfaceCall::Present,
+            crate::SurfaceError::Device(crate::DeviceError::Lost),
+        );
+        // SAFETY: The noop backend checks the requirements.
+        let presented = unsafe { s.queue.present(&s.surface, texture, &[]) };
+        assert!(matches!(
+            presented,
+            Err(crate::SurfaceError::Device(crate::DeviceError::Lost))
+        ));
+        // The texture was not given back.
+        assert_eq!(s.surface.acquired_images(), 1);
+        assert_eq!(s.surface.take_violations(), []);
+    }
+
+    #[test]
+    fn a_failed_configuration_leaves_the_surface_unconfigured() {
+        let s = setup();
+        s.configure(&s.surface);
+        s.surface
+            .fail_next(SurfaceCall::Configure, crate::SurfaceError::Lost);
+        let config = crate::SurfaceConfiguration {
+            maximum_frame_latency: 1,
+            present_mode: wgt::PresentMode::Fifo,
+            composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
+            format: wgt::TextureFormat::Bgra8Unorm,
+            color_space: wgt::SurfaceColorSpace::Srgb,
+            extent: wgt::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            usage: wgt::TextureUses::COLOR_TARGET,
+            view_formats: alloc::vec![],
+        };
+        // SAFETY: The noop backend checks the requirements.
+        let configured = unsafe { s.surface.configure(&s.device, &config) };
+        assert!(matches!(configured, Err(crate::SurfaceError::Lost)));
+        assert!(matches!(
+            s.acquire(&s.surface),
+            Err(crate::SurfaceError::Outdated)
+        ));
+        assert_eq!(
+            s.surface.take_violations(),
+            [SurfaceViolation::NotConfigured(SurfaceCall::Acquire)]
+        );
+    }
+
+    #[test]
+    fn a_device_operation_fails_when_asked_to() {
+        let s = setup();
+        s.device
+            .fail_next(DeviceOperation::Submit, crate::DeviceError::OutOfMemory);
+        // The queue shares the device's hooks.
+        s.queue
+            .fail_next(DeviceOperation::Wait, crate::DeviceError::Lost);
+        // SAFETY: The noop backend runs nothing that could break the requirements.
+        unsafe {
+            assert_eq!(
+                s.queue.submit(&[], &[], (&s.fence, 1)),
+                Err(crate::DeviceError::OutOfMemory)
+            );
+            s.queue.submit(&[], &[], (&s.fence, 1)).unwrap();
+            assert_eq!(
+                s.device.wait(&s.fence, 1, None),
+                Err(crate::DeviceError::Lost)
+            );
+            assert_eq!(s.device.wait(&s.fence, 1, None), Ok(true));
+        }
+
+        s.device
+            .fail_next(DeviceOperation::CheckIfOom, crate::DeviceError::OutOfMemory);
+        assert_eq!(
+            s.device.check_if_oom(),
+            Err(crate::DeviceError::OutOfMemory)
+        );
+        assert_eq!(s.device.check_if_oom(), Ok(()));
+
+        s.device
+            .fail_next(DeviceOperation::MapBuffer, crate::DeviceError::Lost);
+        // SAFETY: The buffer is unmapped before it is destroyed, and its mapping is not used.
+        unsafe {
+            let (buffer, _) = s
+                .device
+                .create_buffer(&crate::BufferDescriptor {
+                    label: None,
+                    size: 4,
+                    usage: wgt::BufferUses::MAP_READ,
+                    memory_flags: crate::MemoryFlags::empty(),
+                })
+                .unwrap();
+            assert!(matches!(
+                s.device.map_buffer(&buffer, 0..4),
+                Err(crate::DeviceError::Lost)
+            ));
+            s.device.map_buffer(&buffer, 0..4).unwrap();
+            s.device.unmap_buffer(&buffer);
+            s.device.destroy_buffer(buffer);
+        }
+    }
+
+    #[test]
+    fn code_runs_during_the_next_submission() {
+        let s = setup();
+        let ran = Arc::new(AtomicBool::new(false));
+        {
+            let ran = Arc::clone(&ran);
+            s.device
+                .run_during_next_submit(move || ran.store(true, Ordering::Relaxed));
+        }
+        assert!(!ran.load(Ordering::Relaxed));
+        // SAFETY: The noop backend runs nothing that could break the requirements.
+        unsafe { s.queue.submit(&[], &[], (&s.fence, 1)) }.unwrap();
+        assert!(ran.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    #[should_panic(expected = "only a noop device or queue has test hooks")]
+    fn an_instance_has_no_device_hooks() {
+        let s = setup();
+        s.instance
+            .fail_next(DeviceOperation::Submit, crate::DeviceError::Lost);
+    }
+
+    #[test]
+    #[should_panic(expected = "only a noop device or queue has test hooks")]
+    fn an_adapter_has_no_device_hooks() {
+        let s = setup();
+        // SAFETY: The noop backend has no requirements here.
+        let adapter = unsafe { s.instance.enumerate_adapters(None) }
+            .remove(0)
+            .adapter;
+        adapter.run_during_next_submit(|| ());
+    }
+}

@@ -1,5 +1,7 @@
 #![allow(unused_variables)]
 
+#[cfg(feature = "noop_test_hooks")]
+use alloc::boxed::Box;
 use alloc::{string::String, sync::Arc, vec, vec::Vec};
 use core::{ptr, sync::atomic::Ordering, time::Duration};
 
@@ -23,6 +25,118 @@ pub struct Api;
 #[derive(Debug)]
 pub struct Context {
     options: Arc<wgt::NoopBackendOptions>,
+    /// The test hooks of a device and its queue, which share them. `None` for an instance or an
+    /// adapter.
+    #[cfg(feature = "noop_test_hooks")]
+    device: Option<Arc<DeviceHooks>>,
+}
+
+impl Context {
+    /// An instance or an adapter.
+    fn new(options: &Arc<wgt::NoopBackendOptions>) -> Self {
+        Self {
+            options: Arc::clone(options),
+            #[cfg(feature = "noop_test_hooks")]
+            device: None,
+        }
+    }
+
+    /// A device and its queue.
+    fn new_device(options: &Arc<wgt::NoopBackendOptions>) -> crate::OpenDevice<Api> {
+        #[cfg(feature = "noop_test_hooks")]
+        let hooks = Arc::new(DeviceHooks::default());
+        let new = || Self {
+            options: Arc::clone(options),
+            #[cfg(feature = "noop_test_hooks")]
+            device: Some(Arc::clone(&hooks)),
+        };
+        crate::OpenDevice {
+            device: new(),
+            queue: new(),
+        }
+    }
+}
+
+/// An operation of a noop device or queue that [`Context::fail_next`] can make fail.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceOperation {
+    /// [`crate::Queue::submit`].
+    Submit,
+    /// [`crate::Device::wait`].
+    Wait,
+    /// [`crate::Device::map_buffer`].
+    MapBuffer,
+    /// [`crate::Device::check_if_oom`].
+    CheckIfOom,
+}
+
+/// The test hooks of a noop device and its queue.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Default)]
+struct DeviceHooks {
+    failures: lock::SpinLock<Vec<(DeviceOperation, crate::DeviceError)>>,
+    during_submit: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
+}
+
+#[cfg(feature = "noop_test_hooks")]
+impl core::fmt::Debug for DeviceHooks {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("DeviceHooks").finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "noop_test_hooks")]
+impl DeviceHooks {
+    /// Takes the error that the next `operation` must fail with, if any.
+    fn take_failure(&self, operation: DeviceOperation) -> Option<crate::DeviceError> {
+        let mut failures = self.failures.lock();
+        let index = failures
+            .iter()
+            .position(|&(failing, _)| failing == operation)?;
+        Some(failures.remove(index).1)
+    }
+
+    /// Runs the hook of the next submission, if any.
+    fn run_during_submit(&self) {
+        let hook = {
+            let mut hooks = self.during_submit.lock();
+            (!hooks.is_empty()).then(|| hooks.remove(0))
+        };
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+#[cfg(feature = "noop_test_hooks")]
+impl Context {
+    fn hooks(&self) -> &DeviceHooks {
+        self.device
+            .as_deref()
+            .expect("only a noop device or queue has test hooks, not an instance or an adapter")
+    }
+
+    /// Makes the next `operation` on this device or its queue fail with `error`. Failures of the
+    /// same operation apply one per operation, in the order they were added.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn fail_next(&self, operation: DeviceOperation, error: crate::DeviceError) {
+        self.hooks().failures.lock().push((operation, error));
+    }
+
+    /// Runs `f` inside the next submission to this device's queue, on the submitting thread.
+    /// Hooks run one per submission, in the order they were added.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn run_during_next_submit(&self, f: impl FnOnce() + Send + 'static) {
+        self.hooks().during_submit.lock().push(Box::new(f));
+    }
 }
 #[derive(Debug)]
 pub struct Encoder;
@@ -121,7 +235,7 @@ impl crate::Instance for Context {
     unsafe fn init(desc: &crate::InstanceDescriptor<'_>) -> Result<Self, crate::InstanceError> {
         let options = Arc::new(desc.backend_options.noop.clone());
         if options.enable {
-            Ok(Context { options })
+            Ok(Context::new(&options))
         } else {
             Err(crate::InstanceError::new(String::from(
                 "noop backend disabled because NoopBackendOptions::enable is false",
@@ -168,9 +282,7 @@ impl crate::Instance for Context {
         };
 
         vec![crate::ExposedAdapter {
-            adapter: Context {
-                options: Arc::clone(&self.options),
-            },
+            adapter: Context::new(&self.options),
             info,
             features,
             capabilities,
@@ -227,14 +339,7 @@ impl crate::Adapter for Context {
         _limits: &wgt::Limits,
         _memory_hints: &wgt::MemoryHints,
     ) -> DeviceResult<crate::OpenDevice<Api>> {
-        Ok(crate::OpenDevice {
-            device: Context {
-                options: Arc::clone(&self.options),
-            },
-            queue: Context {
-                options: Arc::clone(&self.options),
-            },
-        })
+        Ok(Context::new_device(&self.options))
     }
     unsafe fn texture_format_capabilities(
         &self,
@@ -297,6 +402,14 @@ impl crate::Queue for Context {
         surface_textures: &[&SurfaceTexture],
         (fence, fence_value): (&Fence, crate::FenceValue),
     ) -> DeviceResult<()> {
+        #[cfg(feature = "noop_test_hooks")]
+        {
+            let hooks = self.hooks();
+            hooks.run_during_submit();
+            if let Some(error) = hooks.take_failure(DeviceOperation::Submit) {
+                return Err(error);
+            }
+        }
         for cb in command_buffers {
             cb.check_surface_images(surface_textures);
         }
@@ -347,6 +460,10 @@ impl crate::Device for Context {
         buffer: &Buffer,
         range: crate::MemoryRange,
     ) -> DeviceResult<crate::BufferMapping> {
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(error) = self.hooks().take_failure(DeviceOperation::MapBuffer) {
+            return Err(error);
+        }
         // Safety: the `wgpu-core` validation layer will prevent any user-accessible aliasing
         // mappings from being created, so we don’t need to perform any checks here, except for
         // bounds checks on the range which are built into `get_slice_ptr()`.
@@ -475,6 +592,10 @@ impl crate::Device for Context {
         value: crate::FenceValue,
         timeout: Option<Duration>,
     ) -> DeviceResult<bool> {
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(error) = self.hooks().take_failure(DeviceOperation::Wait) {
+            return Err(error);
+        }
         // The relevant commands must have already been submitted, and noop-backend commands are
         // executed synchronously, so there is no waiting — either it is already done,
         // or this method was called incorrectly.
@@ -516,6 +637,10 @@ impl crate::Device for Context {
     }
 
     fn check_if_oom(&self) -> DeviceResult<()> {
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(error) = self.hooks().take_failure(DeviceOperation::CheckIfOom) {
+            return Err(error);
+        }
         Ok(())
     }
 }
