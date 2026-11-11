@@ -631,3 +631,44 @@ fn configure_waits_for_an_acquisition() {
     s.assert_no_violations();
     drop_destroyed(&s.device, frame);
 }
+
+// Writes to surface textures.
+
+/// Writes a pixel of `frame`'s texture with `Queue::write_texture`.
+fn write_pixel(s: &Setup, frame: &wgpu::SurfaceTexture) {
+    s.queue.write_texture(
+        frame.texture.as_image_copy(),
+        &[0; 4],
+        wgpu::TexelCopyBufferLayout::default(),
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+}
+
+/// A write to the acquired texture is submitted before configuring destroys the texture, not
+/// later against an image of a replaced swapchain.
+#[test]
+fn a_write_to_a_texture_is_submitted_before_configuring_destroys_it() {
+    let s = setup();
+    let frame = s.acquire();
+    write_pixel(&s, &frame);
+    s.surface.configure(&s.device, &s.resized(1));
+    drop_destroyed(&s.device, frame);
+    s.queue.submit([]);
+    s.assert_no_violations();
+}
+
+/// A write to the acquired texture is submitted before discarding gives its image back, not later
+/// against an image that is not acquired.
+#[test]
+fn a_write_to_a_texture_is_submitted_before_discarding_it() {
+    let s = setup();
+    let frame = s.acquire();
+    write_pixel(&s, &frame);
+    drop(frame);
+    s.queue.submit([]);
+    s.assert_no_violations();
+}
