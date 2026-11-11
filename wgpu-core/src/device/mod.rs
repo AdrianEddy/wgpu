@@ -21,6 +21,7 @@ use wgt::{
 };
 
 pub(crate) mod bgl;
+pub(crate) mod callbacks;
 mod life;
 pub mod queue;
 pub mod ray_tracing;
@@ -175,40 +176,6 @@ pub struct UserClosures {
     pub device_lost_invocations: SmallVec<[DeviceLostInvocation; 1]>,
 }
 
-impl UserClosures {
-    pub(crate) fn extend(&mut self, other: Self) {
-        self.mappings.extend(other.mappings);
-        self.blas_compact_ready.extend(other.blas_compact_ready);
-        self.submissions.extend(other.submissions);
-        self.device_lost_invocations
-            .extend(other.device_lost_invocations);
-    }
-
-    pub(crate) fn fire(self) {
-        // Note: this logic is specifically moved out of `handle_mapping()` in order to
-        // have nothing locked by the time we execute users callback code.
-
-        // Mappings _must_ be fired before submissions, as the spec requires all mapping callbacks that are registered before
-        // a on_submitted_work_done callback to be fired before the on_submitted_work_done callback.
-        for (mut callback, status) in self.mappings {
-            if let Some(callback) = callback.take() {
-                callback(status);
-            }
-        }
-        for (mut operation, status) in self.blas_compact_ready {
-            if let Some(callback) = operation.take() {
-                callback(status);
-            }
-        }
-        for closure in self.submissions {
-            closure();
-        }
-        for invocation in self.device_lost_invocations {
-            (invocation.closure)(invocation.reason, invocation.message);
-        }
-    }
-}
-
 #[cfg(send_sync)]
 pub type DeviceLostClosure = Box<dyn FnOnce(DeviceLostReason, String) + Send + 'static>;
 #[cfg(not(send_sync))]
@@ -218,6 +185,12 @@ pub struct DeviceLostInvocation {
     closure: DeviceLostClosure,
     reason: DeviceLostReason,
     message: String,
+}
+
+impl DeviceLostInvocation {
+    fn call(self) {
+        (self.closure)(self.reason, self.message);
+    }
 }
 
 pub(crate) fn map_buffer(

@@ -25,7 +25,7 @@ use crate::{
         CommandAllocator, CommandBuffer, CommandEncoder, CommandEncoderError, CopyRange, CopySide,
         TransferError,
     },
-    device::{DeviceError, QueueDescriptor, WaitIdleError},
+    device::{callbacks::CallbackScope, DeviceError, QueueDescriptor, WaitIdleError},
     get_lowest_common_denom, hal_label,
     init_tracker::{has_copy_partial_init_tracker_coverage, TextureInitRange},
     lock::{rank, Mutex, MutexGuard, RwLock, RwLockWriteGuard},
@@ -275,6 +275,10 @@ impl Drop for Queue {
         api_log!("Queue::drop {:?}", self as *const _);
         resource_log!("Drop {}", self.error_ident());
 
+        // Delivers the callbacks if the application dropped the queue. If wgpu-core held the last
+        // reference, its `InternalRef` keeps a scope open, so they wait for the next delivery.
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
+
         // On Vulkan, pending presents are not tracked by fences.
         // wait_for_idle covers both fence-tracked submissions and pending presents.
         let result = {
@@ -315,7 +319,7 @@ impl Drop for Queue {
             device_lost_invocations: SmallVec::new(),
         };
 
-        closures.fire();
+        self.device.pending_callbacks().defer(closures);
     }
 }
 
@@ -1895,7 +1899,11 @@ impl Queue {
                         wgt::PollStatus::QueueEmpty | wgt::PollStatus::Poll
                     ));
                 }
-                Err(WaitIdleError::Device(err)) => break 'error Err(QueueSubmitError::Queue(err)),
+                Err(WaitIdleError::Device(err)) => {
+                    // `maintain`'s closures are to be called even when it fails.
+                    self.device.pending_callbacks().defer(closures);
+                    break 'error Err(QueueSubmitError::Queue(err));
+                }
                 Err(WaitIdleError::WrongSubmissionIndex(..)) => {
                     unreachable!("Cannot get WrongSubmissionIndex from Poll")
                 }
@@ -1918,8 +1926,7 @@ impl Queue {
             }
         };
 
-        // the closures should execute with nothing locked!
-        callbacks.fire();
+        self.device.pending_callbacks().defer(callbacks);
 
         self.device.lose_if_oom();
 
@@ -1929,6 +1936,7 @@ impl Queue {
     }
 
     pub fn submit(&self, command_buffers: &[Arc<CommandBuffer>]) -> Option<SubmissionIndex> {
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
         match self.submit_inner(command_buffers) {
             Ok(submit_index) => Some(submit_index),
             Err(e) => {

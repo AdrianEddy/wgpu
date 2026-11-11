@@ -118,7 +118,6 @@ define_lock_ranks! {
         TEXTURE_CLEAR_MODE,
         TEXTURE_VIEWS,
         DEVICE_DEFERRED_DESTROY,
-        DEVICE_LOST_CLOSURE,
     }
     // Includes stuff from INSTANCE_DEVICES to cover Device::maintain
     // and SHARED_TRACKER_INDEX_ALLOCATOR_INNER to cover Texture::new.
@@ -135,7 +134,6 @@ define_lock_ranks! {
         TEXTURE_CLEAR_MODE,
         TEXTURE_VIEWS,
         DEVICE_DEFERRED_DESTROY,
-        DEVICE_LOST_CLOSURE,
         SHARED_TRACKER_INDEX_ALLOCATOR_INNER,
     }
     rank DEVICE_SNATCHABLE_LOCK "Device::snatchable_lock" followed by {
@@ -150,7 +148,6 @@ define_lock_ranks! {
         BUFFER_BIND_GROUPS,
         BUFFER_INITIALIZATION_STATUS,
         BUFFER_POOL,
-        DEVICE_LOST_CLOSURE,
         DEVICE_TRACE,
         DEVICE_USAGE_SCOPES,
         QUERY_SET_INITIALIZED_SLOTS,
@@ -244,7 +241,6 @@ define_lock_ranks! {
     rank BUFFER_INITIALIZATION_STATUS "Buffer::initialization_status" followed by { }
     rank BUFFER_POOL "BufferPool::buffers" followed by { }
     rank DEVICE_DEFERRED_DESTROY "Device::deferred_destroy" followed by { }
-    rank DEVICE_LOST_CLOSURE "Device::device_lost_closure" followed by { }
     rank DEVICE_TRACE "Device::trace" followed by { }
     rank DEVICE_USAGE_SCOPES "Device::usage_scopes" followed by { }
     rank QUERY_SET_INITIALIZED_SLOTS "QuerySet::initialized_slots" followed by { }

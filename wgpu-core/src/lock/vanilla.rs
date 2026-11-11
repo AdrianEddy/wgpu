@@ -9,6 +9,10 @@ use crate::lock::rank::LockRank;
 
 pub struct RankData;
 
+/// Without lock validation, this checks nothing.
+#[inline]
+pub fn assert_no_locks_held() {}
+
 /// A plain wrapper around [`wgpu_sync::Mutex`].
 ///
 /// This is just like [`wgpu_sync::Mutex`], except that our [`new`]
