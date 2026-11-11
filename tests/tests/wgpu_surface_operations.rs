@@ -1,0 +1,566 @@
+//! Surface operations on real windows and backends.
+//!
+//! `wgpu-validation`'s `api::surface` tests check wgpu-core's surface operations against the
+//! noop backend's surfaces. These check what only real backends and windows show, on every
+//! adapter that supports the window's surface, with validation layers on:
+//!
+//! - `held_views`: reconfiguring while the application still holds a presented texture, a view
+//!   of it and, where the surface offers `TEXTURE_BINDING`, a bind group using it. The HAL
+//!   requires the views of a surface's textures destroyed before the surface is configured again
+//!   (<https://github.com/gfx-rs/wgpu/issues/4105>).
+//! - `released_texture`: reconfiguring after a `SurfaceTexture` was dropped while unwinding,
+//!   while the application holds its texture, whose raw texture stayed alive the same way.
+//! - `discarded_images`: dropping more acquired textures unpresented than the swapchain has
+//!   images, rendered to and not, then presenting enough frames for Vulkan's ring of acquire
+//!   semaphores to wrap, and configuring again while a discarded image is kept for the next
+//!   acquisition. Vulkan's discard did nothing, so the images stayed acquired, and acquiring
+//!   waited out its timeout once too many were (<https://github.com/gfx-rs/wgpu/issues/5723>).
+//!   It prints whether Vulkan's validation layer is installed: without it, the trial checks
+//!   less.
+//! - `two_surfaces`: two surfaces of one device, configured on two threads at once, a bounded
+//!   number of times. DX12 waits for its queue to become idle with a fence that the device's
+//!   surfaces share, and Vulkan's swapchain teardown calls `vkDeviceWaitIdle`, which both need
+//!   the configurations excluded from each other and from queue operations
+//!   (<https://github.com/gfx-rs/wgpu/pull/10675>).
+//! - `configure_race`: one surface reconfigured a bounded number of times, with changing present
+//!   modes and frame latencies, while another thread submits; then configured for another device
+//!   and back; then dropped and created again.
+//!
+//! Each adapter gets windows of its own: a window that one API presented to is not reused with
+//! another. Like `wgpu_surface`, this binary owns the main thread, which `winit` requires, and runs
+//! its trials on it, sharing one event loop.
+
+#[cfg(any(
+    target_arch = "wasm32",
+    all(target_vendor = "apple", not(target_os = "macos")),
+    target_os = "android",
+))]
+fn main() {}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(not(target_vendor = "apple"), target_os = "macos"),
+    not(target_os = "android"),
+))]
+fn main() {
+    native::main();
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(not(target_vendor = "apple"), target_os = "macos"),
+    not(target_os = "android"),
+))]
+mod native {
+    use std::{
+        cell::RefCell,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex,
+        },
+        thread,
+    };
+
+    use winit::{
+        application::ApplicationHandler,
+        dpi::PhysicalSize,
+        event_loop::{ActiveEventLoop, EventLoop},
+        platform::run_on_demand::EventLoopExtRunOnDemand,
+        window::{Window, WindowAttributes},
+    };
+
+    /// The size of every window, and of every configuration of its surface: some backends require
+    /// the swapchain to match the window.
+    const SIZE: u32 = 256;
+    /// How many times `two_surfaces` configures each surface.
+    const TWO_SURFACES_ROUNDS: u32 = 20;
+    /// How many times `configure_race` reconfigures its surface while another thread submits.
+    const RACE_ROUNDS: u32 = 40;
+    /// How many frames `configure_race` presents with each device and surface it switches to.
+    const FRAMES: u32 = 5;
+    /// The most submissions `configure_race`'s submitting thread makes, should it not be stopped.
+    const MAX_SUBMISSIONS: u32 = 2000;
+
+    type Scenario = fn(&ActiveEventLoop, &wgpu::Instance) -> Result<(), String>;
+
+    thread_local! {
+        static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `scenario` once the event loop runs.
+    struct Harness {
+        scenario: Scenario,
+        result: Option<Result<(), String>>,
+    }
+
+    impl ApplicationHandler for Harness {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            let instance =
+                wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle_from_env(
+                    Box::new(event_loop.owned_display_handle()),
+                ));
+            let scenario = self.scenario;
+            self.result = Some(
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    scenario(event_loop, &instance)
+                }))
+                .unwrap_or_else(|payload| Err(panic_message(&*payload))),
+            );
+            event_loop.exit();
+        }
+
+        fn window_event(
+            &mut self,
+            _: &ActiveEventLoop,
+            _: winit::window::WindowId,
+            _: winit::event::WindowEvent,
+        ) {
+        }
+    }
+
+    fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+        if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_owned()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "panic with a non-string payload".to_owned()
+        }
+    }
+
+    fn run(scenario: Scenario) -> Result<(), libtest_mimic::Failed> {
+        // Messages left by an earlier trial are not this one's.
+        let _ = wgpu_hal::VALIDATION_CANARY.get_and_reset();
+        EVENT_LOOP.with_borrow_mut(|event_loop| {
+            let event_loop = event_loop.get_or_insert_with(|| {
+                EventLoop::builder()
+                    .build()
+                    .unwrap_or_else(|error| panic!("no event loop (no display?): {error}"))
+            });
+            let mut harness = Harness {
+                scenario,
+                result: None,
+            };
+            event_loop.run_app_on_demand(&mut harness).unwrap();
+            harness
+                .result
+                .expect("the event loop ran no scenario")
+                .map_err(libtest_mimic::Failed::from)
+        })
+    }
+
+    type Errors = Arc<Mutex<Vec<String>>>;
+
+    /// A device of `adapter`, whose uncaptured errors are collected in the returned list.
+    fn device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue, Errors) {
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        let errors = Errors::default();
+        let sink = Arc::clone(&errors);
+        device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+            sink.lock().unwrap().push(error.to_string());
+        }));
+        (device, queue, errors)
+    }
+
+    /// Fails if a device of `backend` reported an uncaptured error, or a validation layer reported a
+    /// message. Call it once the devices, queues and surfaces it checks are dropped, so that the
+    /// messages of their teardown count too.
+    fn check(backend: wgpu::Backend, errors: &[Errors]) -> Result<(), String> {
+        let errors = errors
+            .iter()
+            .flat_map(|errors| core::mem::take(&mut *errors.lock().unwrap()))
+            .collect::<Vec<_>>();
+        let messages = wgpu_hal::VALIDATION_CANARY.get_and_reset();
+        if errors.is_empty() && messages.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "{backend:?}: errors {errors:?}, validation messages {messages:?}"
+            ))
+        }
+    }
+
+    fn window(event_loop: &ActiveEventLoop) -> Arc<Window> {
+        Arc::new(
+            event_loop
+                .create_window(
+                    WindowAttributes::default()
+                        .with_visible(false)
+                        .with_inner_size(PhysicalSize::new(SIZE, SIZE)),
+                )
+                .expect("failed to create window"),
+        )
+    }
+
+    /// An adapter, with windows of its own and their surfaces.
+    type AdapterWithSurfaces = (wgpu::Adapter, Vec<(Arc<Window>, wgpu::Surface<'static>)>);
+
+    /// Each adapter whose surfaces `windows` new windows of its own support, with the windows and
+    /// their surfaces.
+    fn adapters(
+        event_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+        windows: usize,
+    ) -> Vec<AdapterWithSurfaces> {
+        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+            .into_iter()
+            .filter_map(|adapter| {
+                let surfaces = (0..windows)
+                    .map(|_| {
+                        let window = window(event_loop);
+                        let surface = instance.create_surface(Arc::clone(&window)).ok()?;
+                        adapter
+                            .is_surface_supported(&surface)
+                            .then_some((window, surface))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some((adapter, surfaces))
+            })
+            .collect()
+    }
+
+    /// The default configuration of `surface`, at the windows' size, with every usage it offers
+    /// that the scenarios use.
+    fn config(surface: &wgpu::Surface<'_>, adapter: &wgpu::Adapter) -> wgpu::SurfaceConfiguration {
+        let mut config = surface.get_default_config(adapter, SIZE, SIZE).unwrap();
+        config.usage |=
+            surface.get_capabilities(adapter).usages & wgpu::TextureUsages::TEXTURE_BINDING;
+        config
+    }
+
+    fn acquire(surface: &wgpu::Surface<'_>) -> wgpu::SurfaceTexture {
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            other => panic!("no texture acquired: {other:?}"),
+        }
+    }
+
+    fn render(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::GREEN),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        queue.submit([encoder.finish()]);
+    }
+
+    /// Acquires a texture of `surface`, renders to it and presents it.
+    fn present_frame(surface: &wgpu::Surface<'_>, device: &wgpu::Device, queue: &wgpu::Queue) {
+        let frame = acquire(surface);
+        render(
+            device,
+            queue,
+            &frame.texture.create_view(&Default::default()),
+        );
+        queue.present(frame);
+    }
+
+    fn held_views(event_loop: &ActiveEventLoop, instance: &wgpu::Instance) -> Result<(), String> {
+        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+            let errors = {
+                let (_, surface) = &surfaces[0];
+                let (device, queue, errors) = device(&adapter);
+                let config = config(surface, &adapter);
+                surface.configure(&device, &config);
+                let frame = acquire(surface);
+                let texture = frame.texture.clone();
+                let view = frame.texture.create_view(&Default::default());
+                let bind_group = config
+                    .usage
+                    .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+                    .then(|| bind_group(&device, &view));
+                render(&device, &queue, &view);
+                queue.present(frame);
+
+                surface.configure(&device, &config);
+                present_frame(surface, &device, &queue);
+                drop((texture, view, bind_group));
+                errors
+            };
+            drop(surfaces);
+            check(adapter.get_info().backend, &[errors])?;
+        }
+        Ok(())
+    }
+
+    /// A bind group using `view`, as an application holding one would.
+    fn bind_group(device: &wgpu::Device, view: &wgpu::TextureView) -> wgpu::BindGroup {
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: None,
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }],
+        });
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            }],
+        })
+    }
+
+    fn released_texture(
+        event_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+    ) -> Result<(), String> {
+        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+            let errors = {
+                let (_, surface) = &surfaces[0];
+                let (device, queue, errors) = device(&adapter);
+                let config = config(surface, &adapter);
+                surface.configure(&device, &config);
+                let held = Mutex::new(None);
+                let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let frame = acquire(surface);
+                    *held.lock().unwrap() = Some(frame.texture.clone());
+                    std::panic::resume_unwind(Box::new("dropping the frame while unwinding"));
+                }));
+                assert!(unwound.is_err());
+
+                surface.configure(&device, &config);
+                present_frame(surface, &device, &queue);
+                drop(held);
+                errors
+            };
+            drop(surfaces);
+            check(adapter.get_info().backend, &[errors])?;
+        }
+        Ok(())
+    }
+
+    fn discarded_images(
+        event_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+    ) -> Result<(), String> {
+        report_validation_layer(instance);
+        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+            let errors = {
+                let (_, surface) = &surfaces[0];
+                let (device, queue, errors) = device(&adapter);
+                let config = config(surface, &adapter);
+                surface.configure(&device, &config);
+                // More than a swapchain of this configuration has images, on usual drivers.
+                let frames = 2 * (config.desired_maximum_frame_latency + 1) + 1;
+                for _ in 0..frames {
+                    let frame = acquire(surface);
+                    render(
+                        &device,
+                        &queue,
+                        &frame.texture.create_view(&Default::default()),
+                    );
+                    // Dropped unpresented: the swapchain gets the image back.
+                    drop(frame);
+                }
+                for _ in 0..frames {
+                    // Dropped without being rendered to.
+                    drop(acquire(surface));
+                }
+                // Enough presentations for Vulkan's ring of acquire semaphores to wrap.
+                for _ in 0..frames {
+                    present_frame(surface, &device, &queue);
+                }
+                // Configured again while Vulkan keeps a discarded image for the next acquisition.
+                let frame = acquire(surface);
+                render(
+                    &device,
+                    &queue,
+                    &frame.texture.create_view(&Default::default()),
+                );
+                drop(frame);
+                surface.configure(&device, &config);
+                present_frame(surface, &device, &queue);
+                errors
+            };
+            drop(surfaces);
+            check(adapter.get_info().backend, &[errors])?;
+        }
+        Ok(())
+    }
+
+    /// Prints whether Vulkan's validation layer is installed. Without it, a Vulkan trial that
+    /// passes was checked by no layer: `check` finds no validation message.
+    fn report_validation_layer(instance: &wgpu::Instance) {
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            // SAFETY: The instance is only inspected.
+            let Some(vulkan) = (unsafe { instance.as_hal::<wgpu_hal::api::Vulkan>() }) else {
+                return;
+            };
+            // SAFETY: Enumerating the layers has no requirements.
+            let layers = unsafe {
+                vulkan
+                    .shared_instance()
+                    .entry()
+                    .enumerate_instance_layer_properties()
+            }
+            .unwrap_or_default();
+            let installed = layers
+                .iter()
+                .any(|layer| layer.layer_name_as_c_str() == Ok(c"VK_LAYER_KHRONOS_validation"));
+            println!("Vulkan validation layer installed: {installed}");
+        }
+        #[cfg(not(any(windows, target_os = "linux")))]
+        let _ = instance;
+    }
+
+    fn two_surfaces(event_loop: &ActiveEventLoop, instance: &wgpu::Instance) -> Result<(), String> {
+        for (adapter, surfaces) in adapters(event_loop, instance, 2) {
+            let errors = {
+                let (device, queue, errors) = device(&adapter);
+                thread::scope(|scope| {
+                    for (_, surface) in &surfaces {
+                        let config = config(surface, &adapter);
+                        let (device, queue) = (&device, &queue);
+                        scope.spawn(move || {
+                            for _ in 0..TWO_SURFACES_ROUNDS {
+                                surface.configure(device, &config);
+                                present_frame(surface, device, queue);
+                            }
+                        });
+                    }
+                });
+                errors
+            };
+            drop(surfaces);
+            check(adapter.get_info().backend, &[errors])?;
+        }
+        Ok(())
+    }
+
+    /// Sets its flag when dropped, also while the thread unwinds.
+    struct StopOnDrop<'a>(&'a AtomicBool);
+
+    impl Drop for StopOnDrop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Submits small batches of work on `device` until `stop` is set, at most [`MAX_SUBMISSIONS`].
+    fn submit_until_stopped(device: &wgpu::Device, queue: &wgpu::Queue, stop: &AtomicBool) {
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256,
+            usage: wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        for _ in 0..MAX_SUBMISSIONS {
+            if stop.load(Ordering::Relaxed) {
+                break;
+            }
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            encoder.clear_buffer(&buffer, 0, None);
+            queue.submit([encoder.finish()]);
+            // Keep the GPU from falling behind without bound.
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
+
+    fn configure_race(
+        event_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+    ) -> Result<(), String> {
+        for (adapter, mut surfaces) in adapters(event_loop, instance, 1) {
+            let (window, surface) = surfaces.pop().unwrap();
+            let (device, queue, errors) = device(&adapter);
+            let config = config(&surface, &adapter);
+            let present_modes = surface.get_capabilities(&adapter).present_modes;
+
+            // Reconfiguring while another thread submits.
+            let stop = AtomicBool::new(false);
+            thread::scope(|scope| {
+                scope.spawn(|| submit_until_stopped(&device, &queue, &stop));
+                // Stops the submitting thread before the scope joins it, even if this one panics.
+                let _stop = StopOnDrop(&stop);
+                for round in 0..RACE_ROUNDS {
+                    let config = wgpu::SurfaceConfiguration {
+                        present_mode: present_modes[round as usize % present_modes.len()],
+                        desired_maximum_frame_latency: 1 + round % 3,
+                        ..config.clone()
+                    };
+                    surface.configure(&device, &config);
+                    present_frame(&surface, &device, &queue);
+                }
+            });
+
+            // Configured for another device, and back.
+            let (other_device, other_queue, other_errors) = self::device(&adapter);
+            surface.configure(&other_device, &config);
+            for _ in 0..FRAMES {
+                present_frame(&surface, &other_device, &other_queue);
+            }
+            surface.configure(&device, &config);
+            for _ in 0..FRAMES {
+                present_frame(&surface, &device, &queue);
+            }
+
+            // Dropped, and created again for the same window.
+            drop(surface);
+            let surface = instance
+                .create_surface(Arc::clone(&window))
+                .map_err(|error| error.to_string())?;
+            surface.configure(&device, &config);
+            for _ in 0..FRAMES {
+                present_frame(&surface, &device, &queue);
+            }
+
+            drop(surface);
+            drop((device, queue, other_device, other_queue));
+            check(adapter.get_info().backend, &[errors, other_errors])?;
+        }
+        Ok(())
+    }
+
+    pub fn main() {
+        let mut args = libtest_mimic::Arguments::from_args();
+        // `winit` requires the main thread; this makes libtest-mimic run inline.
+        args.test_threads = Some(1);
+
+        let trials = [
+            ("held_views", held_views as Scenario),
+            ("released_texture", released_texture),
+            ("discarded_images", discarded_images),
+            ("two_surfaces", two_surfaces),
+            ("configure_race", configure_race),
+        ]
+        .map(|(name, scenario)| {
+            let trial = libtest_mimic::Trial::test(name, move || run(scenario));
+            // As in `wgpu_surface`: ignored on Linux without a display.
+            #[cfg(any(
+                target_os = "linux",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            ))]
+            let trial = {
+                let have_display = ["WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY"]
+                    .iter()
+                    .any(|var| std::env::var(var).is_ok_and(|s| !s.is_empty()));
+                trial.with_ignored_flag(!have_display)
+            };
+            trial
+        });
+
+        libtest_mimic::run(&args, trials.into()).exit_if_failed();
+    }
+}
