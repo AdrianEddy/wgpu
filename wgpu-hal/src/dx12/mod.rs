@@ -1138,8 +1138,9 @@ impl crate::Surface for Surface {
             flags |= Dxgi::DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
         }
 
-        // While `configure`s contract ensures that no work on the GPU's main queues
-        // are in flight, we still need to wait for the present queue to be idle.
+        // `configure`'s contract ensures that the GPU is done with this surface's
+        // textures, but presentations may still be pending. `present_queue` is the
+        // device's only queue, so this drains all of the work submitted to it.
         unsafe { device.wait_for_present_queue_idle() }?;
 
         let non_srgb_format = auxil::dxgi::conv::map_texture_format_nosrgb(config.format);
@@ -1356,8 +1357,9 @@ impl crate::Surface for Surface {
     unsafe fn unconfigure(&self, device: &Device) {
         if let Some(sc) = self.swap_chain.write().take() {
             unsafe {
-                // While `unconfigure`s contract ensures that no work on the GPU's main queues
-                // are in flight, we still need to wait for the present queue to be idle.
+                // `unconfigure`'s contract ensures that the GPU is done with this surface's
+                // textures, but presentations may still be pending. `present_queue` is the
+                // device's only queue, so this drains all of the work submitted to it.
 
                 // The major failure mode of this function is device loss,
                 // which if we have lost the device, we should just continue
@@ -1462,11 +1464,10 @@ impl crate::Queue for Queue {
             }
         }
 
-        // Note the lack of synchronization here between the main Direct queue
-        // and the dedicated presentation queue. This is automatically handled
-        // by the D3D runtime by detecting uses of resources derived from the
-        // swapchain. This automatic detection is why you cannot use a swapchain
-        // as an UAV in D3D12.
+        // Note the lack of synchronization here with presentation: there is no
+        // dedicated presentation queue. Swapchains are created on this queue
+        // (`Device::present_queue` is the same queue), and DXGI orders a present
+        // on it after the work submitted before it.
 
         Ok(())
     }

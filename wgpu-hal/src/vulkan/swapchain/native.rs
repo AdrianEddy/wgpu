@@ -458,6 +458,9 @@ impl Swapchain for NativeSwapchain {
             profiling::scope!("vkDeviceWaitIdle");
             // We need to also wait until all presentation work is done. Because there is no way to portably wait until
             // the presentation work is done, we are forced to wait until the device is idle.
+            //
+            // `vkDeviceWaitIdle` requires host access to all of the device's queues to be externally synchronized,
+            // which the contract of `Surface::configure` and `unconfigure`, the callers, ensures.
             let _ = unsafe {
                 device
                     .shared
