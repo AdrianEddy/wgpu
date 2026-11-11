@@ -3061,7 +3061,13 @@ impl dispatch::SurfaceInterface for CoreSurface {
                 .wgpu_device
                 .handle_error_nolabel(e, "Surface::configure");
         } else {
-            *self.configured_device.lock() = Some(device.wgpu_device.clone());
+            // Dropped unlocked: it can be the last reference to the device configured before, and
+            // dropping a device drops the application's callbacks.
+            let previous = self
+                .configured_device
+                .lock()
+                .replace(device.wgpu_device.clone());
+            drop(previous);
         }
     }
 

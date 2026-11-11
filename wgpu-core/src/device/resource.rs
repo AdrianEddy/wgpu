@@ -5674,7 +5674,9 @@ impl Device {
 
     /// `device_lost_closure` might never be called.
     pub fn set_device_lost_closure(&self, device_lost_closure: DeviceLostClosure) {
-        self.device_lost_closure.lock().replace(device_lost_closure);
+        let previous = self.device_lost_closure.lock().replace(device_lost_closure);
+        // Dropped unlocked: it drops what the closure captured, which belongs to the application.
+        drop(previous);
     }
 
     pub fn destroy(self: &Arc<Self>) {

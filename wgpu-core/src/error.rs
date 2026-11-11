@@ -199,8 +199,10 @@ pub struct EmptyErrorScopeStack;
 
 impl Device {
     pub fn on_uncaptured_error(&self, handler: Arc<dyn UncapturedErrorHandler>) {
-        let mut error_sink = self.error_sink.0.lock();
-        error_sink.uncaptured_handler = Some(handler);
+        // The replaced handler is dropped unlocked: dropping it drops what it captured, which can
+        // call wgpu, even report an error.
+        let previous = self.error_sink.0.lock().uncaptured_handler.replace(handler);
+        drop(previous);
     }
 
     /// <https://gpuweb.github.io/gpuweb/#dom-gpudevice-pusherrorscope>

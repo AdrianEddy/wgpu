@@ -43,6 +43,69 @@ fn recursive_uncaptured_error() {
     assert_eq!(errors_seen.load(Relaxed), 2);
 }
 
+/// Replacing the uncaptured error handler drops the handler it replaces. If that handler held the
+/// last `wgpu::Queue`, dropping it drops the queue, which calls the queue's work-done callbacks. A
+/// callback that pushes an error scope locks the device's error sink, so the handler must be
+/// dropped after the error sink is unlocked.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn replacing_the_uncaptured_error_handler_drops_the_old_one_unlocked() {
+    use std::sync::{mpsc, Arc};
+    use std::thread;
+    use std::time::Duration;
+
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    queue.submit([]);
+    let (done, replaced) = mpsc::channel();
+    thread::spawn(move || {
+        queue.on_submitted_work_done({
+            let device = device.clone();
+            move || drop(device.push_error_scope(wgpu::ErrorFilter::Validation))
+        });
+        // The handler to be replaced holds the last `wgpu::Queue`.
+        device.on_uncaptured_error(Arc::new(move |_error| {
+            let _queue = &queue;
+        }));
+        device.on_uncaptured_error(Arc::new(|_error| ()));
+        done.send(()).unwrap();
+    });
+    replaced
+        .recv_timeout(Duration::from_secs(10))
+        .expect("replacing the handler did not finish");
+}
+
+/// Setting a device lost callback drops the callback it replaces, and what that callback captured,
+/// which here sets the device lost callback again as it drops. The replaced callback must be
+/// dropped after the device unlocks its callback.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn replacing_the_device_lost_callback_drops_the_old_one_unlocked() {
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    struct SetsTheCallbackOnDrop(wgpu::Device);
+    impl Drop for SetsTheCallbackOnDrop {
+        fn drop(&mut self) {
+            self.0.set_device_lost_callback(|_reason, _message| ());
+        }
+    }
+
+    let (device, _queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    let (done, replaced) = mpsc::channel();
+    thread::spawn(move || {
+        let captured = SetsTheCallbackOnDrop(device.clone());
+        device.set_device_lost_callback(move |_reason, _message| {
+            let _captured = &captured;
+        });
+        device.set_device_lost_callback(|_reason, _message| ());
+        done.send(()).unwrap();
+    });
+    replaced
+        .recv_timeout(Duration::from_secs(10))
+        .expect("replacing the device lost callback did not finish");
+}
+
 /// [`wgpu::Device::destroy`] unmaps every buffer of the device. Another thread may drop a buffer
 /// meanwhile, so that unmapping it drops the last reference to its map context, whose drop
 /// unregisters it from the device's set of buffers. Destroying must not hold that set's lock then.
