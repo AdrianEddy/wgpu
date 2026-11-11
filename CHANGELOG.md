@@ -390,6 +390,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 
 #### General
 
+- Document the external synchronization that `wgpu_hal::Surface::configure`, `unconfigure` and `Queue::submit` require since [#10675](https://github.com/gfx-rs/wgpu/pull/10675), and what `wgpu::Surface::configure` waits for and does to an acquired texture, instead of saying that submissions on other threads make it fail. `Surface::get_current_texture` no longer says that configuring with a `SurfaceTexture` alive panics, and `Surface::get_configuration` says that it returns the configuration last passed, even if configuring failed. By @AdrianEddy.
 - Document that the `as_hal` guard of a buffer, texture, texture view or acceleration structure must not be held across a call on a surface configured for its device, on any thread. By @AdrianEddy.
 - Fix the `BlasAabbGeometry` docs to refer to the `stride` field instead of a nonexistent `size.stride`, and document the packed AABB buffer layout (each primitive a minimum then a maximum corner, two consecutive `vec3<f32>`). By @mstampfli in [#9934](https://github.com/gfx-rs/wgpu/pull/9934).
 - Fix stale `poll()` docs that described a boolean return value instead of `PollStatus`/`PollError`. By @helgev-in-arcana in [#10151](https://github.com/gfx-rs/wgpu/pull/10151).

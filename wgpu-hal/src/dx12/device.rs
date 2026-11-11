@@ -256,9 +256,12 @@ impl super::Device {
         signature.ok_or(crate::DeviceError::Unexpected)
     }
 
-    // Blocks until the dedicated present queue is finished with all of its work.
+    // Blocks until `present_queue`, the device's only queue (the one its swapchains present on),
+    // has finished all of the work submitted to it, presentations included.
     //
-    // Once this method completes, the surface is able to be resized or deleted.
+    // Once this method completes, the surface is able to be resized or deleted. Calls must not
+    // overlap, because the next value of the idle fence is derived from its completed value: the
+    // contract of `Surface::configure` and `unconfigure`, the only callers, excludes it.
     pub(super) unsafe fn wait_for_present_queue_idle(&self) -> Result<(), crate::DeviceError> {
         let cur_value = unsafe { self.idler.fence.GetCompletedValue() };
         if cur_value == !0 {

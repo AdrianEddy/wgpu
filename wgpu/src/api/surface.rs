@@ -102,8 +102,14 @@ impl Surface<'_> {
 
     /// Initializes [`Surface`] for presentation.
     ///
-    /// If the surface is already configured, this will wait for the GPU to come idle
-    /// before recreating the swapchain to prevent race conditions.
+    /// If the surface is already configured, this first waits for the GPU to finish the work
+    /// submitted before the call, then recreates the swapchain. Other threads can keep submitting
+    /// meanwhile: their work is not waited for, but their submissions block while the swapchain is
+    /// recreated, which on some backends (Vulkan) waits for the device to become idle.
+    ///
+    /// Configuring destroys the texture of a [`SurfaceTexture`] that is still acquired, as
+    /// WebGPU's `configure()` replaces the drawing buffer. Presenting or dropping that
+    /// [`SurfaceTexture`] afterwards reports a validation error.
     ///
     /// Textures of the previous configuration that the application still holds, and views of
     /// them, do not prevent configuring. They can no longer be used, as when they are presented.
@@ -111,8 +117,6 @@ impl Surface<'_> {
     /// Configuring waits while another thread acquires a texture of the surface, or presents one.
     ///
     /// # Validation Errors
-    /// - Submissions that happen _during_ the configure may cause the
-    ///   internal wait-for-idle to fail, raising a validation error.
     /// - Waiting for the GPU times out, as GL's waits do after about two seconds. The surface
     ///   stays configured as it was, except that a texture still acquired from it is destroyed,
     ///   as when configuring succeeds.
@@ -138,6 +142,10 @@ impl Surface<'_> {
     /// [`Surface::configure`]: automatic values such as
     /// [`SurfaceColorSpace::Auto`] are returned as-is, not as the concrete
     /// values they resolved to.
+    ///
+    /// As in WebGPU, it is the configuration last passed to [`Surface::configure`] even if
+    /// configuring failed: the error goes to the device's error handler. [`SurfaceTexture::texture`]
+    /// always describes the configuration that the texture was acquired with.
     pub fn get_configuration(&self) -> Option<SurfaceConfiguration> {
         self.config.lock().clone()
     }
@@ -147,8 +155,9 @@ impl Surface<'_> {
     /// After rendering to the returned [`SurfaceTexture`], submit work via [`Queue::submit`]
     /// and then call [`Queue::present`] to display it.
     ///
-    /// If a [`SurfaceTexture`] referencing this surface is alive when [`Surface::configure()`]
-    /// is called, the configure call will panic.
+    /// Acquiring fails with a validation error while a [`SurfaceTexture`] of this surface is
+    /// acquired: until it is presented or dropped, or the surface is configured again, which
+    /// destroys its texture.
     ///
     /// See the documentation of [`CurrentSurfaceTexture`] for how each possible result
     /// should be handled.

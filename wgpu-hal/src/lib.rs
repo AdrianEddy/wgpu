@@ -720,7 +720,10 @@ pub trait Surface: WasmNotSendSync {
     /// - The surface `self` must not currently be configured to use any other [`Device`].
     /// - Must be externally synchronized with all other queue operations on
     ///   `device`'s queue, including `configure` and `unconfigure` of other
-    ///   surfaces.
+    ///   surfaces. Vulkan waits for the device to become idle
+    ///   (`vkDeviceWaitIdle`), which requires host access to all of its queues
+    ///   to be synchronized, and DX12 waits for its queue to become idle with a
+    ///   fence that all of the device's surfaces share.
     /// - Must be externally synchronized with [`Surface::acquire_texture`] and
     ///   [`Surface::discard_texture`] on `self`, and with [`Queue::present`] of
     ///   its textures: they use the swapchain state that this replaces.
@@ -740,7 +743,10 @@ pub trait Surface: WasmNotSendSync {
     /// - The surface `self` must have been configured on `device`.
     /// - Must be externally synchronized with all other queue operations on
     ///   `device`'s queue, including `configure` and `unconfigure` of other
-    ///   surfaces.
+    ///   surfaces. Vulkan waits for the device to become idle
+    ///   (`vkDeviceWaitIdle`), which requires host access to all of its queues
+    ///   to be synchronized, and DX12 waits for its queue to become idle with a
+    ///   fence that all of the device's surfaces share.
     /// - Must be externally synchronized with [`Surface::acquire_texture`] and
     ///   [`Surface::discard_texture`] on `self`, and with [`Queue::present`] of
     ///   its textures: they use the swapchain state that this releases.
@@ -1359,6 +1365,11 @@ pub trait Queue: WasmNotSendSync {
     ///
     /// - The [`Fence`] passed as `signal_fence.0` must remain alive until
     ///   all submissions that will signal it have completed.
+    ///
+    /// - Must be externally synchronized with all other queue operations
+    ///   ([`submit`][Queue::submit], [`present`][Queue::present],
+    ///   [`wait_for_idle`][Queue::wait_for_idle]) on the same queue, and with
+    ///   [`Surface::configure`] and [`Surface::unconfigure`] on its device.
     ///
     /// [`Fence`]: Api::Fence
     /// [cb]: Api::CommandBuffer
