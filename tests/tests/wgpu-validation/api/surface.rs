@@ -24,6 +24,9 @@ use wgpu_hal::{
 };
 use wgpu_test::fail;
 
+/// How long a call that must stay blocked is given to finish anyway.
+const BLOCKED_FOR: Duration = Duration::from_millis(500);
+
 /// The message of `SurfaceError::NothingToPresent`. Configuring destroys the texture acquired
 /// from the surface, so presenting or dropping its `SurfaceTexture` afterwards reports it.
 const NOTHING_TO_PRESENT: &str = "No surface image is currently acquired";
@@ -326,5 +329,55 @@ fn the_device_lost_callback_of_a_failed_presentation_is_called_before_it_returns
     );
     s.queue.present(frame);
     assert_eq!(*finished.lock().unwrap(), Some(true));
+    s.assert_no_violations();
+}
+
+// A write that races a presentation.
+
+/// Presenting a texture that nothing wrote to clears it first. A write to the texture on another
+/// thread can be recorded while the presentation prepares the texture, and the presentation must
+/// then not clear the texture after the write.
+///
+/// The write is held inside the `begin_encoding` of the pending writes, after it locked them and
+/// before it marks the texture as initialized, while the presentation starts on another thread;
+/// then the write goes on.
+#[test]
+fn a_write_recorded_while_a_presentation_prepares_is_presented() {
+    let s = setup();
+    let frame = s.acquire();
+    let texture = frame.texture.clone();
+    // Submits the pending writes, so that the next write begins encoding them anew.
+    s.queue.submit([]);
+
+    let (presented, presentation) = mpsc::channel();
+    let queue = s.queue.clone();
+    s.noop_device().run_during_next_begin_encoding(move || {
+        thread::spawn(move || {
+            queue.present(frame);
+            presented.send(()).unwrap();
+        });
+        // Lets the presentation reach the pending writes.
+        thread::sleep(BLOCKED_FOR);
+    });
+    let bytes_per_row = texture.width() * texture.format().block_copy_size(None).unwrap();
+    // The whole texture, so that the write clears nothing itself.
+    s.queue.write_texture(
+        texture.as_image_copy(),
+        &vec![0; (bytes_per_row * texture.height()) as usize],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: None,
+        },
+        texture.size(),
+    );
+    presentation
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the presentation did not finish");
+
+    assert_eq!(
+        s.noop_surface().last_presented_write(),
+        Some(noop::ImageWrite::Copy)
+    );
     s.assert_no_violations();
 }

@@ -35,7 +35,8 @@
 //!
 //! With the `noop_test_hooks` feature, tests can run code inside a call on the surface
 //! ([`Surface::run_during_next`]), to interleave another thread's call with it
-//! deterministically, and make a call fail ([`Surface::fail_next`]).
+//! deterministically, make a call fail ([`Surface::fail_next`]), and see which command last wrote
+//! to the image last presented ([`Surface::last_presented_write`]).
 //!
 //! [`SurfaceError::Timeout`]: crate::SurfaceError::Timeout
 
@@ -101,6 +102,18 @@ pub enum SurfaceViolation {
     Unlisted { image: usize },
     /// A submission used `image` while it was not acquired, or after its swapchain was replaced.
     NotAcquiredInSubmission { image: usize },
+}
+
+/// A command that wrote to an image of a noop surface's swapchain, as
+/// [`Surface::last_presented_write`] reports it.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ImageWrite {
+    /// A copy to the image.
+    Copy,
+    /// A render pass with the image as a color attachment, which clears it first if `cleared`.
+    RenderPass { cleared: bool },
 }
 
 /// A surface of the noop backend.
@@ -176,6 +189,21 @@ impl ImageUse {
             && self.index == other.index
     }
 
+    /// Records that a submitted command wrote to the image, if it is still acquired.
+    #[cfg(feature = "noop_test_hooks")]
+    pub(super) fn record_write(&self, write: ImageWrite) {
+        let Some(shared) = self.surface.upgrade() else {
+            return;
+        };
+        shared.with_state(|state| {
+            if let Some(swapchain) = state.swapchain.as_mut() {
+                if swapchain.id == self.swapchain && swapchain.acquired[self.index] {
+                    swapchain.last_writes[self.index] = Some(write);
+                }
+            }
+        });
+    }
+
     /// Checks a submission's use of the image: it must be acquired, and its surface texture must
     /// be among the submission's `surface_textures`.
     pub(super) fn check_submitted(&self, surface_textures: &[&SurfaceTexture]) {
@@ -231,6 +259,9 @@ struct State {
     /// The violations recorded under the current lock, to log once it is released.
     unlogged: Vec<SurfaceViolation>,
     hooks: Hooks,
+    /// The command that last wrote to the image last presented, since it was acquired.
+    #[cfg(feature = "noop_test_hooks")]
+    last_presented_write: Option<ImageWrite>,
 }
 
 /// Code to run inside the next call of a kind, as [`Surface::run_during_next`] asks.
@@ -292,6 +323,9 @@ struct Swapchain {
     images: Vec<Arc<Image>>,
     acquired: Vec<bool>,
     next: usize,
+    /// For each image, the command that last wrote to it since it was acquired.
+    #[cfg(feature = "noop_test_hooks")]
+    last_writes: Vec<Option<ImageWrite>>,
 }
 
 impl State {
@@ -363,6 +397,13 @@ impl Surface {
                     .count()
             })
         })
+    }
+
+    /// Returns the command that last wrote to the image last presented, from when it was
+    /// acquired to when it was presented: `None` if nothing wrote to it, or nothing was presented.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn last_presented_write(&self) -> Option<ImageWrite> {
+        self.shared.with_state(|state| state.last_presented_write)
     }
 
     /// Runs `f` inside the next `call` on this surface, on the thread making the call, while the
@@ -459,6 +500,18 @@ impl Surface {
         if let Some(error) = failure {
             return Err(error);
         }
+        #[cfg(feature = "noop_test_hooks")]
+        {
+            let image = texture.image();
+            let (swapchain_id, index) = (image.swapchain, image.index);
+            self.shared.with_state(|state| {
+                state.last_presented_write = state
+                    .swapchain
+                    .as_ref()
+                    .filter(|swapchain| swapchain.id == swapchain_id)
+                    .and_then(|swapchain| swapchain.last_writes[index]);
+            });
+        }
         self.give_back(texture, SurfaceCall::Present);
         Ok(())
     }
@@ -495,6 +548,8 @@ impl crate::Surface for Surface {
                     .collect(),
                 acquired: vec![false; image_count],
                 next: 0,
+                #[cfg(feature = "noop_test_hooks")]
+                last_writes: vec![None; image_count],
             });
             Ok(())
         })
@@ -534,6 +589,10 @@ impl crate::Surface for Surface {
             };
             swapchain.acquired[index] = true;
             swapchain.next = (index + 1) % image_count;
+            #[cfg(feature = "noop_test_hooks")]
+            {
+                swapchain.last_writes[index] = None;
+            }
             Ok(crate::AcquiredSurfaceTexture {
                 texture: SurfaceTexture {
                     texture: Texture {
