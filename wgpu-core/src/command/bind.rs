@@ -226,7 +226,8 @@ mod compat {
                 let (must_set, must_rebind) = match (&mut e.expected, new_expected_bgl) {
                     (None, None) => (false, false),
                     (None, Some(_)) => (true, true),
-                    (Some(_), None) => (true, false),
+                    // The groups after it are numbered without it on some backends, such as GL.
+                    (Some(_), None) => (true, true),
                     (Some(old_expected_bgl), Some(new_expected_bgl)) => {
                         let is_different = !old_expected_bgl.is_equal(new_expected_bgl);
                         (is_different, is_different)

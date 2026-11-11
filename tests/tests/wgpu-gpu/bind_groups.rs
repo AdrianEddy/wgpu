@@ -14,6 +14,8 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
         BIND_GROUP_NONFILTERING_LAYOUT_MIPMAP_SAMPLER,
         BIND_GROUP_WITH_MAX_BINDING_INDEX,
         BIND_GROUP_STAGE_ORDER,
+        BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_NONE,
+        BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_EMPTY,
     ]);
 }
 
@@ -539,3 +541,177 @@ static BIND_GROUP_STAGE_ORDER: GpuTestConfiguration = GpuTestConfiguration::new(
             .features(wgpu::Features::EXPERIMENTAL_MESH_SHADER),
     )
     .run_async(bind_group_stage_order);
+
+/// What a pipeline layout has where the first pipeline's layout has a bind group layout.
+#[derive(Clone, Copy)]
+enum UnusedGroup {
+    None,
+    Empty,
+}
+
+/// In one compute pass, switches from a pipeline with the layout `[y, z]` to one with the layout
+/// `[unused, z]`, where `unused` is no bind group layout or an empty one, and checks that the
+/// second dispatch uses the bind group set at index 1.
+///
+/// Most backends number a bind group's bindings after the bindings of the groups before it. That
+/// numbering changes with the switch, so the bind group at index 1 must be set again, although
+/// its layout is the same.
+async fn bind_group_after_a_group_that_becomes_unused(ctx: TestingContext, unused: UnusedGroup) {
+    let device = &ctx.device;
+
+    const Y_VALUE: u32 = 0xBAD0_0000;
+    const Z_VALUE: u32 = 7;
+
+    let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Storage { read_only },
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let y_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("y"),
+        entries: &[storage_entry(0, true)],
+    });
+    let z_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("z"),
+        entries: &[storage_entry(0, true), storage_entry(1, false)],
+    });
+    let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("empty"),
+        entries: &[],
+    });
+
+    let y_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("y"),
+        usage: wgpu::BufferUsages::STORAGE,
+        contents: bytemuck::bytes_of(&Y_VALUE),
+    });
+    let z_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("z"),
+        usage: wgpu::BufferUsages::STORAGE,
+        contents: bytemuck::bytes_of(&Z_VALUE),
+    });
+    let output = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("output"),
+        size: 8,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let y_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("y"),
+        layout: &y_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: y_buffer.as_entire_binding(),
+        }],
+    });
+    let z_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("z"),
+        layout: &z_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: z_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: output.as_entire_binding(),
+            },
+        ],
+    });
+
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            "
+            @group(0) @binding(0) var<storage, read> y: u32;
+            @group(1) @binding(0) var<storage, read> z: u32;
+            @group(1) @binding(1) var<storage, read_write> output: array<u32, 2>;
+
+            @compute @workgroup_size(1)
+            fn first() {
+                output[0] = z;
+            }
+
+            @compute @workgroup_size(1)
+            fn second() {
+                output[1] = z;
+            }
+            "
+            .into(),
+        ),
+    });
+    let pipeline = |label: &str, layouts: &[Option<&wgpu::BindGroupLayout>]| {
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some(label),
+            bind_group_layouts: layouts,
+            immediate_size: 0,
+        });
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&layout),
+            module: &module,
+            entry_point: Some(label),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+    let first = pipeline("first", &[Some(&y_layout), Some(&z_layout)]);
+    let unused_layout = match unused {
+        UnusedGroup::None => None,
+        UnusedGroup::Empty => Some(&empty_layout),
+    };
+    let second = pipeline("second", &[unused_layout, Some(&z_layout)]);
+
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: 8,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&first);
+        pass.set_bind_group(0, &y_group, &[]);
+        pass.set_bind_group(1, &z_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&second);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 8);
+    ctx.queue.submit(Some(encoder.finish()));
+
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+    device.poll(PollType::wait_indefinitely()).unwrap();
+
+    let result: [u32; 2] = *bytemuck::from_bytes(&readback.slice(..).get_mapped_range().unwrap());
+    assert_eq!(
+        result,
+        [Z_VALUE, Z_VALUE],
+        "the second dispatch did not use the bind group at index 1"
+    );
+}
+
+fn unused_group_parameters() -> TestParameters {
+    TestParameters::default()
+        .limits(wgpu::Limits::downlevel_defaults())
+        .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+}
+
+#[apply(gpu_test!)]
+static BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_NONE: GpuTestConfiguration =
+    GpuTestConfiguration::new()
+        .parameters(unused_group_parameters())
+        .run_async(|ctx| bind_group_after_a_group_that_becomes_unused(ctx, UnusedGroup::None));
+
+#[apply(gpu_test!)]
+static BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_EMPTY: GpuTestConfiguration =
+    GpuTestConfiguration::new()
+        .parameters(unused_group_parameters())
+        .run_async(|ctx| bind_group_after_a_group_that_becomes_unused(ctx, UnusedGroup::Empty));
