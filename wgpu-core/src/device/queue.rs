@@ -1197,7 +1197,9 @@ impl Queue {
 
         let snatch_guard = self.device.snatchable_lock.read();
 
-        let dst_raw = dst.try_inner(&snatch_guard)?.raw();
+        let dst_inner = dst.try_inner(&snatch_guard)?;
+        let to_surface = matches!(dst_inner, TextureInner::Surface { .. });
+        let dst_raw = dst_inner.raw();
 
         // This must happen after parameter validation (so that errors are reported
         // as required by the spec), but before any side effects.
@@ -1365,6 +1367,11 @@ impl Queue {
         pending_writes.consume(staging_buffer);
         pending_writes.insert_texture(&dst);
 
+        if to_surface {
+            drop(pending_writes);
+            self.flush_writes_for_surface_texture(&dst, snatch_guard)?;
+        }
+
         Ok(())
     }
 
@@ -1491,6 +1498,7 @@ impl Queue {
 
         let snatch_guard = self.device.snatchable_lock.read();
 
+        let to_surface = matches!(dst.try_inner(&snatch_guard)?, TextureInner::Surface { .. });
         let dst_raw = dst.try_raw(&snatch_guard)?;
 
         // This must happen after parameter validation (so that errors are reported
@@ -1603,6 +1611,32 @@ impl Queue {
 
         pending_writes.insert_texture(&dst);
 
+        if to_surface {
+            drop(trackers);
+            drop(pending_writes);
+            self.flush_writes_for_surface_texture(&dst, snatch_guard)?;
+        }
+
+        Ok(())
+    }
+
+    /// Submits the pending writes, which write to the surface texture `texture`.
+    ///
+    /// `snatch_guard` must have been held since the writes were recorded, and is held until they
+    /// are submitted. Presenting, discarding or releasing a surface texture, and configuring,
+    /// unconfiguring or dropping its surface, destroy the texture, which takes the snatch lock
+    /// for writing: a write left pending would be submitted after that, against an image that
+    /// is no longer acquired, or that no longer exists.
+    fn flush_writes_for_surface_texture(
+        &self,
+        texture: &Arc<Texture>,
+        snatch_guard: SnatchGuard,
+    ) -> Result<(), DeviceError> {
+        let submission = self.allocate_submission(snatch_guard)?;
+        let pending_writes = self.pending_writes.lock();
+        if pending_writes.contains_texture(texture) {
+            submission.submit(pending_writes)?;
+        }
         Ok(())
     }
 
@@ -2060,9 +2094,11 @@ impl Queue {
                     };
                 }
                 // The texture must not have been destroyed when its usage here was
-                // encoded. If it was destroyed after that, then it was transferred
-                // to `pending_writes.temp_resources` at the time of destruction, so
-                // we are still okay to use it.
+                // encoded. A native texture destroyed after that was transferred to
+                // `pending_writes.temp_resources` at the time of destruction, so we are
+                // still okay to use it. A surface texture cannot be destroyed while a write
+                // to it is pending: the write is submitted at once, under the snatch read
+                // lock that its destruction waits for (`flush_writes_for_surface_texture`).
                 Err(InvalidOrDestroyedResourceError::DestroyedResource(_)) => {}
                 Err(InvalidOrDestroyedResourceError::InvalidResource(_)) => {
                     unreachable!()
