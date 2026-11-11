@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 use core::mem;
 use core::ops::Range;
 
-use super::{Api, Buffer, DeviceResult, Resource};
+use super::{Api, Buffer, DeviceResult, Resource, Texture};
 
 /// Command buffer type, which performs double duty as the command encoder type too.
 #[derive(Debug)]
@@ -66,7 +66,7 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn transition_textures<'a, T>(&mut self, barriers: T)
     where
-        T: Iterator<Item = crate::TextureBarrier<'a, Resource>>,
+        T: Iterator<Item = crate::TextureBarrier<'a, Texture>>,
     {
     }
 
@@ -92,7 +92,7 @@ impl crate::CommandEncoder for CommandBuffer {
     unsafe fn copy_external_image_to_texture<T>(
         &mut self,
         src: &wgt::CopyExternalImageSourceInfo,
-        dst: &Resource,
+        dst: &Texture,
         dst_premultiplication: bool,
         regions: T,
     ) where
@@ -102,21 +102,21 @@ impl crate::CommandEncoder for CommandBuffer {
 
     unsafe fn copy_texture_to_texture<T>(
         &mut self,
-        src: &Resource,
+        src: &Texture,
         src_usage: wgt::TextureUses,
-        dst: &Resource,
+        dst: &Texture,
         regions: T,
     ) {
         // TODO: consider implementing this and other texture manipulation
     }
 
-    unsafe fn copy_buffer_to_texture<T>(&mut self, src: &Buffer, dst: &Resource, regions: T) {
+    unsafe fn copy_buffer_to_texture<T>(&mut self, src: &Buffer, dst: &Texture, regions: T) {
         // TODO: consider implementing this and other texture manipulation
     }
 
     unsafe fn copy_texture_to_buffer<T>(
         &mut self,
-        src: &Resource,
+        src: &Texture,
         src_usage: wgt::TextureUses,
         dst: &Buffer,
         regions: T,
