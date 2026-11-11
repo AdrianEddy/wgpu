@@ -3103,8 +3103,10 @@ impl dispatch::SurfaceInterface for CoreSurface {
                 (data, status, output_detail)
             }
             Err(err) => {
-                let error_sink = self.configured_device.lock();
-                match error_sink.as_ref() {
+                // Unlocked before the error is handled: the uncaptured error handler may use
+                // the surface.
+                let error_sink = self.configured_device.lock().clone();
+                match error_sink {
                     Some(error_sink) => {
                         error_sink.handle_error_nolabel(err, "Surface::get_current_texture_view");
                         (None, crate::SurfaceStatus::Validation, output_detail)

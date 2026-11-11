@@ -101,6 +101,22 @@ impl Device {
 
     /// Check for resource cleanups and mapping callbacks. Will block if [`PollType::Wait`] is passed.
     ///
+    /// Polling delivers the callbacks that are ready, of every device of this device's instance:
+    /// buffer mapping, work-done, BLAS compaction and device lost callbacks. On native, they run on
+    /// the calling thread at the end of the call, with no wgpu lock held, so they can call wgpu,
+    /// and the call returns once they finish.
+    ///
+    /// On native, these calls deliver callbacks in the same way: [`Queue::submit`],
+    /// [`Instance::poll_all`], mapping, unmapping and destroying a [`Buffer`], preparing a
+    /// [`Blas`] for compaction, configuring a [`Surface`], acquiring, presenting and discarding
+    /// its textures, and dropping a [`Queue`] or a [`Surface`]. A callback can therefore run inside
+    /// any of them, on any thread, whichever device it belongs to, so it must not take a lock that
+    /// the application holds across them. The calls that a callback makes deliver callbacks too.
+    ///
+    /// A callback that panics unwinds out of the call that delivers it, once that call's own work
+    /// is done: retrying the call after catching the panic repeats that work. The next call that
+    /// delivers callbacks delivers the rest.
+    ///
     /// (Note that, unless access to the [`Queue`] is coordinated somehow,
     /// the returned [`PollStatus`] could be out of date by the time the caller
     /// receives it. `Queue`s can be shared between threads, so other threads
@@ -675,6 +691,11 @@ impl Device {
     ///
     /// Detailed shader creation errors will not be provided to handler;
     /// they can be inspected via [`ShaderModule::get_compilation_info`].
+    ///
+    /// On native, the handler is called inside the call that reported the error, on its thread,
+    /// with no wgpu lock held, so it can call wgpu; it can be called on several threads at once.
+    /// The calls it makes deliver callbacks as any other call does (see [`Device::poll`]). Setting
+    /// a handler drops the one it replaces.
     pub fn on_uncaptured_error(&self, handler: Arc<dyn UncapturedErrorHandler>) {
         self.inner.on_uncaptured_error(handler)
     }
@@ -857,7 +878,14 @@ impl Device {
         self.inner.destroy()
     }
 
-    /// Set a DeviceLostCallback on this device.
+    /// Set a DeviceLostCallback on this device, dropping the one it replaces.
+    ///
+    /// On native, the callback is called at the end of the call that finds the device lost, if
+    /// that call delivers callbacks (see [`Device::poll`]), or else at the end of the next call
+    /// that does, on any thread and for any device of the same instance. After [`Device::destroy`],
+    /// it is called with [`DeviceLostReason::Destroyed`] by a later poll, once the queue is idle.
+    /// It is not called if the device is dropped first, or if the instance is dropped while the
+    /// callback waits to be called.
     pub fn set_device_lost_callback(
         &self,
         callback: impl Fn(DeviceLostReason, String) + Send + 'static,

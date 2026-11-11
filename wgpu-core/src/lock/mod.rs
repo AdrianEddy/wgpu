@@ -62,4 +62,5 @@ use observing as chosen;
 #[cfg(not(any(wgpu_validate_locks, feature = "observe_locks")))]
 use vanilla as chosen;
 
+pub(crate) use chosen::assert_no_locks_held;
 pub use chosen::{Mutex, MutexGuard, RankData, RwLock, RwLockReadGuard, RwLockWriteGuard};

@@ -334,10 +334,13 @@ impl Blas {
     /// will need to be prepared again.
     ///
     /// ### Interaction with other functions
-    /// On native, `queue.submit(..)` and polling devices (that is calling `instance.poll_all` or
-    /// `device.poll`) with [`PollType::Poll`] may call the callback. On native, polling devices with
-    /// [`PollType::Wait`] (optionally with a submission index greater
-    /// than the last submit the BLAS was used in) will guarantee callback is called.
+    /// On native, a call that delivers callbacks, such as `queue.submit(..)` or polling devices
+    /// (that is calling `instance.poll_all` or `device.poll`) with [`PollType::Poll`], may call the
+    /// callback; [`Device::poll`] lists the calls that deliver callbacks. On native, polling
+    /// devices with [`PollType::Wait`] (optionally with a submission index greater than the last
+    /// submit the BLAS was used in) will guarantee callback is called.
+    ///
+    /// [`Device::poll`]: crate::Device::poll
     ///
     /// [`PollType::Poll`]: wgpu_types::PollType::Poll
     /// [`PollType::Wait`]: wgpu_types::PollType::Wait

@@ -11,7 +11,7 @@
 
 use std::{
     ops::Deref,
-    sync::{mpsc, Arc},
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -20,7 +20,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WebDisplayHandle, Web
 use wgpu::CurrentSurfaceTexture;
 use wgpu_hal::{
     api::Noop,
-    noop::{self, SurfaceViolation},
+    noop::{self, DeviceOperation, SurfaceCall, SurfaceViolation},
 };
 use wgpu_test::fail;
 
@@ -223,4 +223,108 @@ fn dropping_a_surface_while_the_gpu_does_not_finish() {
     drop(Arc::into_inner(surface).expect("the test holds the only reference"));
     // SAFETY: The noop device is only told to resume.
     unsafe { device.as_hal::<Noop>() }.unwrap().resume_gpu();
+}
+
+// Device lost callbacks.
+
+/// How long acquiring on another thread is given to finish when it must not block. Generous, as a
+/// loaded machine can be slow to schedule it: it is waited for only until it finishes.
+const FINISH_WITHIN: Duration = Duration::from_secs(10);
+
+/// Runs `probe` on another thread, and returns whether it finished, or panicked, within
+/// [`FINISH_WITHIN`].
+fn finishes_in_time(probe: impl FnOnce() + Send + 'static) -> bool {
+    let (sender, receiver) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        // Dropped when `probe` returns or unwinds.
+        let _sender = sender;
+        probe();
+    });
+    match receiver.recv_timeout(FINISH_WITHIN) {
+        Err(mpsc::RecvTimeoutError::Disconnected) => true,
+        Err(mpsc::RecvTimeoutError::Timeout) => false,
+        Ok(()) => unreachable!("nothing is sent"),
+    }
+}
+
+/// Sets a device lost callback that records whether acquiring from the surface on another thread
+/// finished in time, which it can't while the callback is called with the surface locked. Returns
+/// the record: `None` until the callback is called.
+fn probe_the_surface_when_lost(s: &Setup) -> Arc<Mutex<Option<bool>>> {
+    let surface = Arc::clone(&s.surface);
+    let device = s.device.clone();
+    let finished = Arc::new(Mutex::new(None));
+    let recorded = Arc::clone(&finished);
+    s.device.set_device_lost_callback(move |_reason, _message| {
+        let surface = Arc::clone(&surface);
+        let device = device.clone();
+        let finished = finishes_in_time(move || {
+            let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let _ = surface.get_current_texture();
+            let _ = pollster::block_on(scope.pop());
+        });
+        *recorded.lock().unwrap() = Some(finished);
+    });
+    finished
+}
+
+/// Losing the device while configuring waits for the GPU calls the callback once configuring has
+/// unlocked the surface, before it returns.
+#[test]
+fn the_device_lost_callback_of_the_configure_wait_is_called_unlocked() {
+    let s = setup();
+    let finished = probe_the_surface_when_lost(&s);
+    s.noop_device()
+        .fail_next(DeviceOperation::Wait, wgpu_hal::DeviceError::Lost);
+    s.surface.configure(&s.device, &s.resized(1));
+    assert_eq!(*finished.lock().unwrap(), Some(true));
+    s.assert_no_violations();
+}
+
+/// A HAL configuration that loses the device calls the callback once configuring has unlocked the
+/// surface, before it returns.
+#[test]
+fn the_device_lost_callback_of_a_failed_configuration_is_called_unlocked() {
+    let s = setup();
+    let finished = probe_the_surface_when_lost(&s);
+    s.noop_surface().fail_next(
+        SurfaceCall::Configure,
+        wgpu_hal::SurfaceError::Device(wgpu_hal::DeviceError::Lost),
+    );
+    let error_scope = s.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    s.surface.configure(&s.device, &s.resized(1));
+    let _ = pollster::block_on(error_scope.pop());
+    assert_eq!(*finished.lock().unwrap(), Some(true));
+    s.assert_no_violations();
+}
+
+/// An acquisition that loses the device calls the callback before it returns, with the surface
+/// unlocked.
+#[test]
+fn the_device_lost_callback_of_a_failed_acquisition_is_called_before_it_returns() {
+    let s = setup();
+    let finished = probe_the_surface_when_lost(&s);
+    s.noop_surface().fail_next(
+        SurfaceCall::Acquire,
+        wgpu_hal::SurfaceError::Device(wgpu_hal::DeviceError::Lost),
+    );
+    let _ = s.surface.get_current_texture();
+    assert_eq!(*finished.lock().unwrap(), Some(true));
+    s.assert_no_violations();
+}
+
+/// A presentation that loses the device calls the callback before it returns, with the surface
+/// unlocked.
+#[test]
+fn the_device_lost_callback_of_a_failed_presentation_is_called_before_it_returns() {
+    let s = setup();
+    let finished = probe_the_surface_when_lost(&s);
+    let frame = s.acquire();
+    s.noop_surface().fail_next(
+        SurfaceCall::Present,
+        wgpu_hal::SurfaceError::Device(wgpu_hal::DeviceError::Lost),
+    );
+    s.queue.present(frame);
+    assert_eq!(*finished.lock().unwrap(), Some(true));
+    s.assert_no_violations();
 }

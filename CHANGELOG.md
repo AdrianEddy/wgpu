@@ -194,6 +194,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 
 #### General
 
+- `wgpu_core::device::resource::Device::get_queue` is no longer public: the queue it returned could be dropped where wgpu holds locks. By @AdrianEddy.
 - Allow `set_immediates` before `set_pipeline` by deferring actual setting of immediates to draw/dispatch call time. By @beicause in [#9597](https://github.com/gfx-rs/wgpu/pull/9597).
 - Validate pipeline layout `immediate_size` and fix its calculation when there are multiple immediate variables. Now it must be >= required size of the shader entry point. By @beicause in [#9711](https://github.com/gfx-rs/wgpu/pull/9711).
 - [`immediate_address_space`](https://www.w3.org/TR/WGSL/#language_extension-immediate_address_space) WGSL language extension is implemented. By @beicause in [#9711](https://github.com/gfx-rs/wgpu/pull/9711).
@@ -248,6 +249,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Fix `Surface::configure` and dropping a `Surface` or `Queue` racing with queue operations on other threads, which could crash on Vulkan. By @AdrianEddy in [#10675](https://github.com/gfx-rs/wgpu/pull/10675).
 - Fix two `unfulfilled_lint_expectations` warnings from `wgpu-core` in builds without lock validation, such as release builds, with Rust 1.98 and later. By @AdrianEddy.
 - The noop backend now reports the device type that `NoopBackendOptions::device_type` asks for, instead of always `DeviceType::Cpu`, which stays the default. By @AdrianEddy.
+- Call the application's callbacks only when wgpu holds no lock, so that they can call wgpu: a device lost callback, and the mapping callbacks that losing the device aborts, could be called with wgpu's locks held, and one that called wgpu deadlocked. Callbacks are now queued where they arise, and called when a call that delivers them returns: `Device::poll`, `Queue::submit`, `Instance::poll_all`, buffer mapping, unmapping and destruction, surface configuration, acquisition, presentation and discarding, and dropping a queue or a surface. By @AdrianEddy.
 - Make `TextureBlitter` respect the `sample_type` when performing downsampling. Previously, `FilterMode::Nearest` was always used when copying a larger texture to a smaller one. By @DouglasDwyer in [#10657](https://github.com/gfx-rs/wgpu/pull/10657)
 - Set the bind groups after a group that a new pipeline layout leaves without a layout, or with an empty one, again. GL and DX12, and probably Metal, number their bindings without that group, so a draw or dispatch used the resources of another group, and on Vulkan the later groups were incompatible. By @AdrianEddy.
 - Fix `wgpu-core` failing to build without its `std` feature in debug builds with `--cfg wgpu_validate_locks_debug`, as in wgpu's own tree. Lock validation now requires `std`. By @AdrianEddy.

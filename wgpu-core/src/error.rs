@@ -12,7 +12,7 @@ use wgpu_sync::Mutex;
 use wgt::error::{Error, ErrorFilter, ErrorSource, ErrorType, UncapturedErrorHandler, WebGpuError};
 use wgt::WasmNotSendSync;
 
-use crate::device::Device;
+use crate::device::{callbacks::PendingCallbacks, Device};
 
 /// Implementation of thread IDs for error scope tracking.
 ///
@@ -73,7 +73,11 @@ impl ErrorSink {
         source: ErrorSource,
         label: Option<&str>,
         fn_ident: &'static str,
+        callbacks: Option<&PendingCallbacks>,
     ) {
+        // Errors are reported where wgpu-core holds no lock, so that the uncaptured error handler
+        // can call wgpu-core.
+        crate::lock::assert_no_locks_held();
         let source: ErrorSource = Box::new(ContextError {
             fn_ident,
             source,
@@ -105,8 +109,12 @@ impl ErrorSink {
         if let Some(f) = final_error_handling {
             // If the user has provided their own `uncaptured_handler` callback, invoke it now,
             // having released our lock on `sink_mutex`. See the comments on
-            // `handle_error_or_return_handler` for details.
-            f();
+            // `handle_error_or_return_handler` for details. It runs outside the scopes of the
+            // device's callbacks, so that the wgpu calls it makes deliver them.
+            match callbacks {
+                Some(callbacks) => callbacks.outside_scopes(f),
+                None => f(),
+            }
         }
     }
 
@@ -119,7 +127,7 @@ impl ErrorSink {
         fn_ident: &'static str,
     ) {
         let error_type = source.webgpu_error_type();
-        self.handle_error_inner(error_type, Box::new(source), label, fn_ident)
+        self.handle_error_inner(error_type, Box::new(source), label, fn_ident, None)
     }
 
     #[inline]
@@ -130,7 +138,7 @@ impl ErrorSink {
         fn_ident: &'static str,
     ) {
         let error_type = source.webgpu_error_type();
-        self.handle_error_inner(error_type, Box::new(source), None, fn_ident)
+        self.handle_error_inner(error_type, Box::new(source), None, fn_ident, None)
     }
 }
 
@@ -285,7 +293,14 @@ impl Device {
         label: Option<&str>,
         fn_ident: &'static str,
     ) {
-        self.error_sink.handle_error(source, label, fn_ident);
+        let error_type = source.webgpu_error_type();
+        self.error_sink.handle_error_inner(
+            error_type,
+            Box::new(source),
+            label,
+            fn_ident,
+            Some(self.pending_callbacks()),
+        );
     }
 
     #[inline]
@@ -295,7 +310,14 @@ impl Device {
         source: impl WebGpuError + WasmNotSendSync + 'static,
         fn_ident: &'static str,
     ) {
-        self.error_sink.handle_error_nolabel(source, fn_ident);
+        let error_type = source.webgpu_error_type();
+        self.error_sink.handle_error_inner(
+            error_type,
+            Box::new(source),
+            None,
+            fn_ident,
+            Some(self.pending_callbacks()),
+        );
     }
 }
 

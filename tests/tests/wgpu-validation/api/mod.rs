@@ -18,3 +18,5 @@ mod render_pipeline;
 #[cfg(not(target_family = "wasm"))] // tests share wgpu objects across threads
 mod surface;
 mod texture;
+#[cfg(not(target_family = "wasm"))] // the callbacks need `wgpu` objects to be `Send`
+mod user_callbacks;

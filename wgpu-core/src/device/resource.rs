@@ -33,7 +33,12 @@ use crate::{
     },
     command, conv,
     device::{
-        bgl, create_validator, life::WaitIdleError, map_buffer, stage_compiler::StageCompiler,
+        bgl,
+        callbacks::{CallbackScope, InternalRef, PendingCallback, PendingCallbacks},
+        create_validator,
+        life::WaitIdleError,
+        map_buffer,
+        stage_compiler::StageCompiler,
         AttachmentData, BufferMapPendingClosure, DeviceLostInvocation, MapMode,
         MissingDownlevelFlags, MissingFeatures, RenderPassContext,
     },
@@ -275,10 +280,12 @@ pub struct Device {
     /// using ref-counted references for internal access.
     pub(crate) valid: AtomicBool,
 
-    /// Closure to be called on "lose the device". This is invoked directly by
-    /// device.lose or by the UserCallbacks returned from maintain when the device
-    /// has been destroyed and its queues are empty.
-    pub(crate) device_lost_closure: Mutex<Option<DeviceLostClosure>>,
+    /// Closure to be called on "lose the device". [`Device::lose`] queues it for delivery, and
+    /// so does `maintain` once the device has been destroyed and its queue is empty.
+    ///
+    /// Unranked, like `ErrorSink`'s mutex: it is only held to take or replace the closure, never
+    /// while calling or dropping it, so it can be locked under any lock.
+    pub(crate) device_lost_closure: wgpu_sync::Mutex<Option<DeviceLostClosure>>,
 
     pub(crate) error_sink: ErrorSink,
 
@@ -429,6 +436,12 @@ impl Drop for Device {
         profiling::scope!("Device::drop");
         api_log!("Device::drop {:?}", self as *const _);
         resource_log!("Drop {}", self.error_ident());
+
+        // Dropping the device drops the application's state that it holds: its device lost
+        // closure, which is never called now, its uncaptured error handler, and the callbacks of
+        // mappings it aborted. wgpu-core releases its own references to a device with no lock
+        // held.
+        crate::lock::assert_no_locks_held();
 
         // SAFETY: We are in the Drop impl and we don't use self.zero_buffer anymore after this
         // point.
@@ -711,7 +724,7 @@ impl Device {
                 fence: ManuallyDrop::new(fence),
                 snatchable_lock: unsafe { SnatchLock::new(rank::DEVICE_SNATCHABLE_LOCK) },
                 valid: AtomicBool::new(true),
-                device_lost_closure: Mutex::new(rank::DEVICE_LOST_CLOSURE, None),
+                device_lost_closure: wgpu_sync::Mutex::new(None),
                 error_sink: ErrorSink::new(),
                 trackers: Mutex::new(
                     rank::DEVICE_TRACKERS,
@@ -966,8 +979,18 @@ impl Device {
         }
     }
 
-    pub fn get_queue(&self) -> Option<Arc<Queue>> {
-        self.queue.get().as_ref()?.upgrade()
+    /// The callbacks of this device's instance, waiting to be delivered.
+    pub(crate) fn pending_callbacks(&self) -> &PendingCallbacks {
+        &self.adapter.instance.pending_callbacks
+    }
+
+    /// Returns a reference to this device's queue, if it still exists.
+    ///
+    /// If the application drops its queue meanwhile, dropping this reference drops the queue,
+    /// whose callbacks then wait for the next delivery.
+    pub(crate) fn get_queue(&self) -> Option<InternalRef<'_, Queue>> {
+        let queue = self.queue.get().as_ref()?.upgrade()?;
+        Some(InternalRef::new(queue, self.pending_callbacks()))
     }
 
     pub fn set_queue(&self, queue: &Arc<Queue>) {
@@ -980,17 +1003,17 @@ impl Device {
         poll_type: wgt::PollType<crate::SubmissionIndex>,
     ) -> Result<wgt::PollStatus, WaitIdleError> {
         api_log!("Device::poll {poll_type:?}");
+        let _scope = CallbackScope::new(self.pending_callbacks());
         let (user_closures, result) = self.poll_and_return_closures(poll_type);
-        user_closures.fire();
+        self.pending_callbacks().defer(user_closures);
         result
     }
 
     /// Poll the device, returning any `UserClosures` that need to be executed.
     ///
-    /// The caller must invoke the `UserClosures` even if this function returns
+    /// The caller must queue the `UserClosures` for delivery even if this function returns
     /// an error. This is an internal helper, used by [`Device::poll`] and
-    /// [`Instance::poll_all_devices`], so that `poll_all_devices` can invoke
-    /// closures once after all devices have been polled.
+    /// [`Instance::poll_all_devices`].
     ///
     /// [`Instance::poll_all_devices`]: crate::instance::Instance::poll_all_devices
     pub(crate) fn poll_and_return_closures(
@@ -5619,9 +5642,16 @@ impl Device {
         // places to prevent new work from being submitted.
         self.valid.store(false, Ordering::Release);
 
-        // 1) Resolve the GPUDevice device.lost promise.
-        if let Some(device_lost_closure) = self.device_lost_closure.lock().take() {
-            device_lost_closure(DeviceLostReason::Unknown, message.to_string());
+        // 1) Resolve the GPUDevice device.lost promise. This can run under any lock, so the
+        // closure is only queued.
+        let device_lost_closure = self.device_lost_closure.lock().take();
+        if let Some(closure) = device_lost_closure {
+            self.pending_callbacks()
+                .defer_one(PendingCallback::DeviceLost(DeviceLostInvocation {
+                    closure,
+                    reason: DeviceLostReason::Unknown,
+                    message: message.to_string(),
+                }));
         }
 
         // 2) Complete any outstanding mapAsync() steps.

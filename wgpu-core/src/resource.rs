@@ -27,8 +27,11 @@ use crate::{
     api_log,
     binding_model::{BindGroup, BindingError},
     device::{
-        queue, resource::DeferredDestroy, BufferMapPendingClosure, Device, DeviceError,
-        DeviceMismatch, MissingDownlevelFlags, MissingFeatures,
+        callbacks::{CallbackScope, PendingCallback},
+        queue,
+        resource::DeferredDestroy,
+        BufferMapPendingClosure, Device, DeviceError, DeviceMismatch, MissingDownlevelFlags,
+        MissingFeatures,
     },
     hal_label,
     init_tracker::{BufferInitTracker, TextureInitTracker},
@@ -807,7 +810,8 @@ impl Buffer {
 
     /// Schedule buffer mapping.
     ///
-    /// `op.callback` is guaranteed to be called, regardless of the outcome.
+    /// `op.callback` is called whatever the outcome, unless the instance is dropped first, with
+    /// the callback still queued for delivery.
     pub fn map_async<M>(
         self: &Arc<Self>,
         mode: M,
@@ -824,14 +828,15 @@ impl Buffer {
             "Buffer::map_async {:?} mode {mode:?} offset {offset:?} size {size:?}",
             Arc::as_ptr(self)
         );
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
 
         self.try_map_async(mode, offset, size, callback)
-            .map_err(|(mut callback, err)| {
+            .map_err(|(callback, err)| {
                 self.device
                     .handle_error(err.clone(), Some(&self.label), "Buffer::map_async");
-                if let Some(callback) = callback.take() {
-                    callback(Err(err));
-                }
+                self.device
+                    .pending_callbacks()
+                    .defer_one(PendingCallback::Mapping((callback, Err(err))));
             })
             .ok()
     }
@@ -1006,10 +1011,10 @@ impl Buffer {
         } else {
             // We don't have a queue, so go ahead and map the buffer.
             // We can safely unwrap below since we just set the `map_state` to `BufferMapState::Waiting`.
-            let (mut callback, status) = self.map(&device.snatchable_lock.read()).unwrap();
-            if let Some(callback) = callback.take() {
-                callback(status);
-            }
+            let mapped = self.map(&device.snatchable_lock.read()).unwrap();
+            device
+                .pending_callbacks()
+                .defer_one(PendingCallback::Mapping(mapped));
             Ok(0)
         }
     }
@@ -1173,14 +1178,14 @@ impl Buffer {
         Some((pending_mapping.callback, status))
     }
 
-    // Note: This must not be called while holding a lock.
     pub fn unmap(self: &Arc<Self>) {
         profiling::scope!("unmap", "Buffer");
         api_log!("Buffer::unmap {:?}", Arc::as_ptr(self));
-        if let Some((mut callback, status)) = self.unmap_inner() {
-            if let Some(callback) = callback.take() {
-                callback(status);
-            }
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
+        if let Some(aborted) = self.unmap_inner() {
+            self.device
+                .pending_callbacks()
+                .defer_one(PendingCallback::Mapping(aborted));
         }
     }
 
@@ -1300,6 +1305,7 @@ impl Buffer {
         api_log!("Buffer::destroy {:?}", Arc::as_ptr(self));
 
         let device = &self.device;
+        let _scope = CallbackScope::new(device.pending_callbacks());
 
         #[cfg(feature = "trace")]
         if let Some(trace) = device.trace.lock().as_mut() {
@@ -3589,15 +3595,19 @@ impl Blas {
     ) -> Result<SubmissionIndex, BlasPrepareCompactError> {
         profiling::scope!("Blas::prepare_compact_async");
         api_log!("Blas::prepare_compact_async {:?}", Arc::as_ptr(self));
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
 
         let compact_result = self.prepare_compact_async_inner(callback);
 
         match compact_result {
             Ok(submission_index) => Ok(submission_index),
-            Err((mut callback, err)) => {
-                if let Some(callback) = callback.take() {
-                    callback(Err(err.clone()));
-                }
+            Err((callback, err)) => {
+                self.device
+                    .pending_callbacks()
+                    .defer_one(PendingCallback::BlasCompactReady((
+                        callback,
+                        Err(err.clone()),
+                    )));
                 Err(err)
             }
         }
@@ -3649,10 +3659,10 @@ impl Blas {
             queue.lock_life().prepare_compact(self).unwrap_or(0) // '0' means no wait is necessary
         } else {
             // We can safely unwrap below since we just set the `compacted_state` to `BlasCompactState::Waiting`.
-            let (mut callback, status) = self.read_back_compact_size(state).unwrap();
-            if let Some(callback) = callback.take() {
-                callback(status);
-            }
+            let read_back = self.read_back_compact_size(state).unwrap();
+            device
+                .pending_callbacks()
+                .defer_one(PendingCallback::BlasCompactReady(read_back));
             0
         };
 

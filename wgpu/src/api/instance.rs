@@ -298,6 +298,9 @@ impl Instance {
     /// it. `Queue`s can be shared between threads, and other threads could
     /// submit new work at any time.)
     ///
+    /// On native, it delivers the callbacks that are ready, of every device of this instance, as
+    /// [`Device::poll`] does.
+    ///
     /// On the web, this is a no-op. `Device`s are automatically polled.
     ///
     /// [`Queue`s]: Queue

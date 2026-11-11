@@ -130,6 +130,23 @@ impl Drop for LockStateGuard {
     }
 }
 
+/// Panics if this thread holds a lock, naming the one it acquired last.
+///
+/// Code that calls the application, which may call wgpu-core again, checks this first: wgpu-core's
+/// locks are not reentrant.
+#[track_caller]
+pub fn assert_no_locks_held() {
+    let _ = LOCK_STATE.try_with(|cell| {
+        let state = cell.get();
+        if let Some((rank, location)) = state.last_acquired {
+            panic!(
+                "{} is locked, at {location}, where no lock may be held",
+                rank.bit.member_name(),
+            );
+        }
+    });
+}
+
 /// Check and record the acquisition of a lock with `new_rank`.
 ///
 /// Check that acquiring a lock with `new_rank` is permitted at this point, and

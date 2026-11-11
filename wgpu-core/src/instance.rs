@@ -10,7 +10,10 @@ use thiserror::Error;
 use crate::{
     api_log, api_log_debug,
     device::{
-        queue::Queue, resource::Device, DeviceDescriptor, DeviceError, UserClosures, WaitIdleError,
+        callbacks::{CallbackScope, PendingCallbacks},
+        queue::Queue,
+        resource::Device,
+        DeviceDescriptor, DeviceError, UserClosures, WaitIdleError,
     },
     id::markers,
     limits::{self, check_limits, FailedLimit},
@@ -43,7 +46,7 @@ impl InstanceDevices {
         self.0.lock().push(Arc::downgrade(device));
     }
 
-    /// Poll all devices stored in this instance.
+    /// Poll all devices stored in this instance, and queue their callbacks on `callbacks`.
     ///
     /// If `force_wait` is true, block until all buffer mappings are done.
     ///
@@ -52,28 +55,33 @@ impl InstanceDevices {
     fn poll_all_devices(
         &self,
         force_wait: bool,
-        closure_list: &mut UserClosures,
+        callbacks: &PendingCallbacks,
     ) -> Result<bool, WaitIdleError> {
+        // Poll the devices with the list unlocked: polling can lose a device, and this can hold
+        // the last reference to one.
+        let devices = self
+            .0
+            .lock()
+            .iter()
+            .filter_map(|device| device.upgrade())
+            .collect::<Vec<_>>();
+
         let mut all_queue_empty = true;
-        {
-            let device_guard = self.0.lock();
+        for device in devices {
+            let poll_type = if force_wait {
+                // TODO(#8286): Should expose timeout to poll_all.
+                wgt::PollType::wait_indefinitely()
+            } else {
+                wgt::PollType::Poll
+            };
 
-            for device in device_guard.iter().filter_map(|device| device.upgrade()) {
-                let poll_type = if force_wait {
-                    // TODO(#8286): Should expose timeout to poll_all.
-                    wgt::PollType::wait_indefinitely()
-                } else {
-                    wgt::PollType::Poll
-                };
+            let (closures, result) = device.poll_and_return_closures(poll_type);
 
-                let (closures, result) = device.poll_and_return_closures(poll_type);
+            let is_queue_empty = matches!(result, Ok(wgt::PollStatus::QueueEmpty));
 
-                let is_queue_empty = matches!(result, Ok(wgt::PollStatus::QueueEmpty));
+            all_queue_empty &= is_queue_empty;
 
-                all_queue_empty &= is_queue_empty;
-
-                closure_list.extend(closures);
-            }
+            callbacks.defer(closures);
         }
 
         Ok(all_queue_empty)
@@ -112,6 +120,9 @@ pub struct Instance {
 
     /// Keeps track of all devices created from this instance, so that they can be polled.
     devices: InstanceDevices,
+
+    /// The callbacks of this instance's devices, waiting to be delivered. Its surfaces share it.
+    pub(crate) pending_callbacks: Arc<PendingCallbacks>,
 }
 
 impl Instance {
@@ -148,6 +159,7 @@ impl Instance {
             flags: InstanceFlags::default(),
             display: None, // TODO: Extract display from HAL instance if available?
             devices: InstanceDevices::new(),
+            pending_callbacks: Arc::default(),
         })
     }
 
@@ -239,6 +251,7 @@ impl Instance {
         } else {
             let surface = Arc::new(Surface {
                 presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
+                pending_callbacks: Arc::clone(&self.pending_callbacks),
                 surface_per_backend,
             });
 
@@ -306,6 +319,7 @@ impl Instance {
         } else {
             let surface = Arc::new(Surface {
                 presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
+                pending_callbacks: Arc::clone(&self.pending_callbacks),
                 surface_per_backend,
             });
 
@@ -344,6 +358,7 @@ impl Instance {
 
         let surface = Arc::new(Surface {
             presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
+            pending_callbacks: Arc::clone(&self.pending_callbacks),
             surface_per_backend: core::iter::once((Backend::Metal, raw_surface)).collect(),
         });
 
@@ -361,6 +376,7 @@ impl Instance {
 
         let surface = Arc::new(Surface {
             presentation: Mutex::new(rank::SURFACE_PRESENTATION, None),
+            pending_callbacks: Arc::clone(&self.pending_callbacks),
             surface_per_backend: core::iter::once((Backend::Dx12, surface)).collect(),
         });
 
@@ -664,12 +680,9 @@ impl Instance {
     /// submissions still in flight.
     pub fn poll_all_devices(&self, force_wait: bool) -> Result<bool, WaitIdleError> {
         api_log!("poll_all_devices");
-        let mut closures = UserClosures::default();
-        let all_queue_empty = self.devices.poll_all_devices(force_wait, &mut closures)?;
-
-        closures.fire();
-
-        Ok(all_queue_empty)
+        let _scope = CallbackScope::new(&self.pending_callbacks);
+        self.devices
+            .poll_all_devices(force_wait, &self.pending_callbacks)
     }
 }
 
@@ -697,6 +710,7 @@ impl InstanceBuilder {
                 // borrows the handle from `this.display` instead.
                 display: desc.display.take(),
                 devices: InstanceDevices::new(),
+                pending_callbacks: Arc::default(),
             },
             instance_desc: desc,
             telemetry,
@@ -768,6 +782,9 @@ impl InstanceBuilder {
 pub struct Surface {
     pub(crate) presentation: Mutex<Option<Presentation>>,
     pub surface_per_backend: HashMap<Backend, Box<dyn hal::DynSurface>>,
+    /// The pending callbacks of the instance that created the surface, so that it can open a
+    /// [`CallbackScope`] before it locks `presentation`.
+    pub(crate) pending_callbacks: Arc<PendingCallbacks>,
 }
 
 impl ResourceType for Surface {
@@ -922,30 +939,30 @@ impl Surface {
         }
     }
 
+    /// Unconfigures the surface. Returns the device it was configured for, which the caller must
+    /// release once the surface is unlocked: it may be the last reference to the device.
     fn unconfigure_inner<'a>(
         &self,
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
-    ) -> UserClosures {
+    ) -> (Option<Arc<Device>>, UserClosures) {
         let (taken, user_callbacks) = self.take_presentation(presentation);
         let device = taken.unwrap_or_else(|error| {
             // Unconfiguring cannot fail, and dropping a surface must release it.
             log::error!("Failed to wait for the GPU before unconfiguring the surface: {error}");
             presentation.take().map(|present| present.device)
         });
-        if let Some(device) = device {
-            unsafe { self.unconfigure_raw(&device) };
+        if let Some(device) = &device {
+            unsafe { self.unconfigure_raw(device) };
         }
-        user_callbacks
+        (device, user_callbacks)
     }
 
     pub fn unconfigure(self: &Arc<Self>) {
         profiling::scope!("Surface::unconfigure");
-        let user_callbacks;
-        {
-            let mut presentation = self.presentation.lock();
-            user_callbacks = self.unconfigure_inner(&mut presentation);
-        }
-        user_callbacks.fire();
+        let _scope = CallbackScope::new(&self.pending_callbacks);
+        let (device, user_callbacks) = self.unconfigure_inner(&mut self.presentation.lock());
+        drop(device);
+        self.pending_callbacks.defer(user_callbacks);
     }
 
     pub fn configure(
@@ -955,6 +972,7 @@ impl Surface {
     ) -> Result<(), ConfigureSurfaceError> {
         use ConfigureSurfaceError as E;
         profiling::scope!("Surface::configure");
+        let _scope = CallbackScope::new(&self.pending_callbacks);
 
         #[cfg(feature = "trace")]
         if let Some(ref mut trace) = *device.trace.lock() {
@@ -1024,6 +1042,8 @@ impl Surface {
         device.check_is_valid()?;
 
         let user_callbacks;
+        // Released once the surface is unlocked: it may be the last reference to the device.
+        let previous_device;
         let result = 'configure: {
             // we keep presentation locked for the entire duration of the configure call,
             // so that no change can happen in the middle of it.
@@ -1031,20 +1051,24 @@ impl Surface {
 
             let taken;
             (taken, user_callbacks) = self.take_presentation(&mut presentation);
-            let previous_device = match taken {
-                Ok(previous_device) => previous_device,
+            let previous = match taken {
+                Ok(previous) => previous,
                 // The surface stays configured, without the texture it had acquired.
-                Err(error) => break 'configure Err(E::from(error)),
+                Err(error) => {
+                    previous_device = None;
+                    break 'configure Err(E::from(error));
+                }
             };
+            previous_device = previous;
 
             let surface_raw = self.raw(device.backend()).unwrap();
             // `command_indices` serializes these calls with other queue
             // operations. For the same device, hold it across both calls.
             let result = {
-                let same_device = match previous_device {
-                    Some(previous_device) if Arc::ptr_eq(&previous_device, device) => true,
+                let same_device = match &previous_device {
+                    Some(previous_device) if Arc::ptr_eq(previous_device, device) => true,
                     Some(previous_device) => {
-                        unsafe { self.unconfigure_raw(&previous_device) };
+                        unsafe { self.unconfigure_raw(previous_device) };
                         false
                     }
                     None => false,
@@ -1077,7 +1101,8 @@ impl Surface {
                 }),
             }
         };
-        user_callbacks.fire();
+        drop(previous_device);
+        self.pending_callbacks.defer(user_callbacks);
 
         result
     }
@@ -1089,12 +1114,10 @@ impl Drop for Surface {
         profiling::scope!("Surface::drop");
 
         api_log!("Surface::drop {:?}", self as *const _);
-        let user_closures;
-        {
-            let mut presentation = self.presentation.lock();
-            user_closures = self.unconfigure_inner(&mut presentation);
-        }
-        user_closures.fire();
+        let _scope = CallbackScope::new(&self.pending_callbacks);
+        let (device, user_closures) = self.unconfigure_inner(&mut self.presentation.lock());
+        drop(device);
+        self.pending_callbacks.defer(user_closures);
     }
 }
 

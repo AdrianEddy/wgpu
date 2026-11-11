@@ -16,7 +16,10 @@ use core::mem::ManuallyDrop;
 use crate::device::trace::{Action, IntoTrace};
 use crate::{
     conv,
-    device::{queue::Queue, Device, DeviceError, MissingDownlevelFlags, WaitIdleError},
+    device::{
+        callbacks::CallbackScope, queue::Queue, Device, DeviceError, MissingDownlevelFlags,
+        WaitIdleError,
+    },
     hal_label,
     instance::Surface,
     resource::{self, Labeled},
@@ -160,6 +163,8 @@ pub struct SurfaceOutput<T = Arc<resource::Texture>> {
 
 impl Surface {
     pub fn get_current_texture(self: &Arc<Self>) -> Result<SurfaceOutput, SurfaceError> {
+        // A lost device is often detected here: its callback is delivered when this returns.
+        let _scope = CallbackScope::new(&self.pending_callbacks);
         let output = self.get_current_texture_inner();
         #[cfg(feature = "trace")]
         if let Some(present) = self.presentation.lock().as_ref() {
@@ -294,6 +299,8 @@ impl Surface {
     }
 
     pub fn present(self: &Arc<Self>) -> Result<Status, SurfaceError> {
+        // A lost device is often detected here: its callback is delivered when this returns.
+        let _scope = CallbackScope::new(&self.pending_callbacks);
         #[cfg(feature = "trace")]
         if let Some(present) = self.presentation.lock().as_ref() {
             if let Some(ref mut trace) = *present.device.trace.lock() {
@@ -306,18 +313,15 @@ impl Surface {
     pub(crate) fn present_inner(&self) -> Result<Status, SurfaceError> {
         profiling::scope!("Surface::present");
 
-        let presentation = self.presentation.lock();
-        let present = match presentation.as_ref() {
-            Some(present) => present,
+        let device = match self.presentation.lock().as_ref() {
+            Some(present) => Arc::clone(&present.device),
             None => return Err(SurfaceError::NotConfigured),
         };
 
-        present.device.check_is_valid()?;
-        let queue = present
-            .device
+        device.check_is_valid()?;
+        let queue = device
             .get_queue()
             .ok_or(SurfaceError::Device(DeviceError::Lost))?;
-        drop(presentation);
 
         queue.present(self)
     }
@@ -428,6 +432,7 @@ impl Queue {
 
 impl Surface {
     pub fn discard(self: &Arc<Self>) -> Result<(), SurfaceError> {
+        let _scope = CallbackScope::new(&self.pending_callbacks);
         #[cfg(feature = "trace")]
         if let Some(present) = self.presentation.lock().as_ref() {
             if let Some(ref mut trace) = *present.device.trace.lock() {

@@ -40,6 +40,10 @@ use crate::FastHashSet;
 
 pub type RankData = Option<HeldLock>;
 
+/// Lock observation records locks, but checks no rule, so this checks nothing.
+#[inline]
+pub fn assert_no_locks_held() {}
+
 /// A `Mutex` instrumented for lock acquisition order observation.
 ///
 /// This is just a wrapper around a [`wgpu_sync::Mutex`], along with

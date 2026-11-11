@@ -69,14 +69,16 @@ macro_rules! impl_deferred_command_buffer_actions {
         /// [`Buffer::map_async()`] or [`BufferSlice::map_async()`] and letting you start
         /// the mapping from a more convenient place.
         ///
-        /// For the callback to run, either [`queue.submit(..)`][q::s], [`instance.poll_all(..)`][i::p_a],
-        /// or [`device.poll(..)`][d::p] must be called elsewhere in the runtime, possibly integrated
-        /// into an event loop or run on a separate thread.
+        /// For the callback to run, a call that delivers callbacks, such as
+        /// [`device.poll(..)`][d::p], [`instance.poll_all(..)`][i::p_a] or
+        /// [`queue.submit(..)`][q::s], must be made after the GPU work completes, possibly
+        /// integrated into an event loop or run on a separate thread.
         ///
-        /// The callback runs on the thread that first calls one of the above functions
-        /// after the GPU work completes. There are no restrictions on the code you can run
-        /// in the callback; however, on native the polling call will not return until the
-        /// callback finishes, so keep callbacks short (set flags, send messages, etc.).
+        /// On native, the callback runs at the end of the first such call, on the thread that
+        /// makes it, which can be any thread; [`device.poll(..)`][d::p] lists the calls that
+        /// deliver callbacks. There are no restrictions on the code you can run in the callback,
+        /// but the call that runs it does not return until it finishes, so keep callbacks short
+        /// (set flags, send messages, etc.).
         ///
         /// While a buffer is mapped, it cannot be used by other commands; at any time,
         /// either the GPU or the CPU has exclusive access to the buffer’s contents.
@@ -123,14 +125,16 @@ macro_rules! impl_deferred_command_buffer_actions {
         /// executing on the GPU. When this callback runs, all mapped-buffer callbacks
         /// registered for the same submission are guaranteed to have been called.
         ///
-        /// For the callback to run, either [`queue.submit(..)`][q::s], [`instance.poll_all(..)`][i::p_a],
-        /// or [`device.poll(..)`][d::p] must be called elsewhere in the runtime, possibly integrated
-        /// into an event loop or run on a separate thread.
+        /// For the callback to run, a call that delivers callbacks, such as
+        /// [`device.poll(..)`][d::p], [`instance.poll_all(..)`][i::p_a] or
+        /// [`queue.submit(..)`][q::s], must be made after the GPU work completes, possibly
+        /// integrated into an event loop or run on a separate thread.
         ///
-        /// The callback runs on the thread that first calls one of the above functions
-        /// after the GPU work completes. There are no restrictions on the code you can run
-        /// in the callback; however, on native the polling call will not return until the
-        /// callback finishes, so keep callbacks short (set flags, send messages, etc.).
+        /// On native, the callback runs at the end of the first such call, on the thread that
+        /// makes it, which can be any thread; [`device.poll(..)`][d::p] lists the calls that
+        /// deliver callbacks. There are no restrictions on the code you can run in the callback,
+        /// but the call that runs it does not return until it finishes, so keep callbacks short
+        /// (set flags, send messages, etc.).
         ///
         /// [q::s]: Queue::submit
         /// [i::p_a]: Instance::poll_all
