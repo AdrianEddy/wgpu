@@ -26,7 +26,6 @@ impl<T> Snatchable<T> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn empty() -> Self {
         SnatchableInner {
             value: UnsafeCell::new(None),
@@ -41,6 +40,11 @@ impl<T> Snatchable<T> {
     /// Take the value. Requires a the snatchable lock's write guard.
     pub fn snatch(&self, _guard: &mut ExclusiveSnatchGuard) -> Option<T> {
         unsafe { (*self.value.get()).take() }
+    }
+
+    /// Set the value, returning the previous one. Requires a the snatchable lock's write guard.
+    pub fn put(&self, value: T, _guard: &mut ExclusiveSnatchGuard) -> Option<T> {
+        unsafe { (*self.value.get()).replace(value) }
     }
 
     /// Take the value without a guard. This can only be used with exclusive access

@@ -784,3 +784,76 @@ fn a_failed_presentation_drops_the_last_reference_to_a_written_buffer() {
     s.queue.present(frame);
     s.assert_no_violations();
 }
+
+// Images given back on every path that ends a texture.
+
+/// The message of `SurfaceError::TextureDestroyed`.
+const TEXTURE_DESTROYED: &str = "Texture has been destroyed";
+
+/// `Texture::destroy` of an acquired texture keeps its image acquired from the HAL. Discarding
+/// the texture gives it back, though the texture is destroyed.
+#[test]
+fn discarding_a_destroyed_texture_gives_its_image_back() {
+    let s = setup();
+    let frame = s.acquire();
+    frame.texture.destroy();
+    assert_eq!(s.noop_surface().acquired_images(), 1);
+    fail(&s.device, || drop(frame), Some(TEXTURE_DESTROYED));
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    s.assert_no_violations();
+}
+
+/// Presenting a destroyed texture fails, and gives its image back.
+#[test]
+fn presenting_a_destroyed_texture_gives_its_image_back() {
+    let s = setup();
+    let frame = s.acquire();
+    frame.texture.destroy();
+    fail(
+        &s.device,
+        || s.queue.present(frame),
+        Some(TEXTURE_DESTROYED),
+    );
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    let frame = s.acquire();
+    s.queue.present(frame);
+    s.assert_no_violations();
+}
+
+/// A `SurfaceTexture` dropped while unwinding gives its image back.
+#[test]
+fn a_released_texture_gives_its_image_back() {
+    let s = setup();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _frame = s.acquire();
+        panic!("dropping the frame while unwinding");
+    }));
+    assert!(unwound.is_err());
+    assert_eq!(s.noop_surface().acquired_images(), 0);
+    s.assert_no_violations();
+}
+
+/// A texture released while another thread held the snatch lock keeps its image until the next
+/// acquisition, which gives it back before it acquires.
+#[test]
+fn the_next_acquisition_gives_back_the_image_of_a_texture_released_under_the_snatch_lock() {
+    let s = setup();
+    let texture = release_while_the_snatch_lock_is_held(&s);
+    assert_eq!(s.noop_surface().acquired_images(), 1);
+    let frame = s.acquire();
+    assert_eq!(s.noop_surface().acquired_images(), 1);
+    fail(
+        &s.device,
+        || {
+            s.queue.write_texture(
+                texture.as_image_copy(),
+                &[0; 4],
+                wgpu::TexelCopyBufferLayout::default(),
+                wgpu::Extent3d::default(),
+            )
+        },
+        Some("has been destroyed"),
+    );
+    s.queue.present(frame);
+    s.assert_no_violations();
+}

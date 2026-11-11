@@ -42,6 +42,10 @@ pub(crate) struct Presentation {
     /// The textures acquired with this configuration, which the application can keep
     /// referencing after they are presented or discarded. See [`Self::destroy_texture_views`].
     pub(crate) textures: WeakVec<resource::Texture>,
+    /// A texture released while the snatch lock was held, whose image is still acquired from the
+    /// HAL: the next acquisition or configuration gives it back first. See
+    /// [`Surface::release`].
+    pub(crate) released_texture: Option<Arc<resource::Texture>>,
 }
 
 impl Presentation {
@@ -54,6 +58,7 @@ impl Presentation {
             config,
             acquired_texture: None,
             textures: WeakVec::new(),
+            released_texture: None,
         }
     }
 
@@ -243,6 +248,9 @@ impl Surface {
             return Err(SurfaceError::AlreadyAcquired);
         }
         let device = Arc::clone(&present.device);
+        if let Some(released) = present.released_texture.take() {
+            self.discard_raw(&device, &released);
+        }
 
         let suf = self.raw(device.backend()).unwrap();
         let ast = match unsafe {
@@ -396,27 +404,25 @@ impl Surface {
 }
 
 impl Surface {
-    /// Gives `texture`, acquired from this surface on `device`, back to the HAL without
-    /// presenting it. Returns `false` if the texture was destroyed.
+    /// Gives the image of `texture`, acquired from this surface on `device`, back to the HAL
+    /// without presenting it, and destroys `texture`. Returns `false` if `texture` was destroyed
+    /// already: its image is given back all the same, if `destroy` kept it.
     ///
     /// The caller must have taken `texture` out of the surface's locked [`Presentation`].
     pub(crate) fn discard_raw(&self, device: &Device, texture: &resource::Texture) -> bool {
-        let Ok(state) = texture.state() else {
+        let taken = texture.take_surface_texture(&mut device.snatchable_lock.write());
+        let Some(taken) = taken else {
             return false;
         };
-        let mut snatch_guard = device.snatchable_lock.write();
-        let inner = state.inner.snatch(&mut snatch_guard);
-        drop(snatch_guard);
+        self.discard_taken(device, taken.raw);
+        !taken.destroyed
+    }
 
-        match inner {
-            None => false,
-            Some(resource::TextureInner::Surface { raw }) => {
-                let raw_surface = self.raw(device.backend()).unwrap();
-                unsafe { raw_surface.discard_texture(raw) };
-                true
-            }
-            Some(resource::TextureInner::Native { .. }) => unreachable!(),
-        }
+    /// Gives `raw`, the HAL texture of a texture acquired from this surface on `device`, back to
+    /// the HAL without presenting it.
+    fn discard_taken(&self, device: &Device, raw: Box<dyn hal::DynSurfaceTexture>) {
+        let raw_surface = self.raw(device.backend()).unwrap();
+        unsafe { raw_surface.discard_texture(raw) };
     }
 }
 
@@ -481,23 +487,23 @@ impl Queue {
             return Err(error);
         }
 
-        let inner = texture.state().ok().and_then(|state| {
-            let mut snatch_guard = device.snatchable_lock.write();
-            state.inner.snatch(&mut snatch_guard)
-        });
-
-        let result = match inner {
+        let taken = texture.take_surface_texture(&mut device.snatchable_lock.write());
+        let result = match taken {
             None => return Err(SurfaceError::TextureDestroyed),
-            Some(resource::TextureInner::Surface { raw }) => {
+            // Destroyed since it was prepared, by `Texture::destroy` on another thread.
+            Some(taken) if taken.destroyed => {
+                surface.discard_taken(device, taken.raw);
+                return Err(SurfaceError::TextureDestroyed);
+            }
+            Some(taken) => {
                 let raw_surface = surface.raw(device.backend()).unwrap();
                 let raw_queue = self.raw();
                 // [`wgpu_hal::Queue::present`] requires the queue to be synchronized with submit calls and
                 // other present calls. Locking command indices prevents submits which must increment the
                 // submission index, and by `write`ing prevents other present calls.
                 let _command_indices = device.command_indices.write();
-                unsafe { raw_queue.present(raw_surface, raw, &damage_rects) }
+                unsafe { raw_queue.present(raw_surface, taken.raw, &damage_rects) }
             }
-            Some(resource::TextureInner::Native { .. }) => unreachable!(),
         };
 
         match result {
@@ -549,20 +555,8 @@ impl Surface {
             .take()
             .ok_or(SurfaceError::NothingToPresent)?;
 
-        let mut exclusive_snatch_guard = device.snatchable_lock.write();
-        let inner = texture
-            .state()
-            .ok()
-            .and_then(|state| state.inner.snatch(&mut exclusive_snatch_guard));
-        drop(exclusive_snatch_guard);
-
-        match inner {
-            None => return Err(SurfaceError::TextureDestroyed),
-            Some(resource::TextureInner::Surface { raw }) => {
-                let raw_surface = self.raw(device.backend()).unwrap();
-                unsafe { raw_surface.discard_texture(raw) };
-            }
-            _ => unreachable!(),
+        if !self.discard_raw(device, &texture) {
+            return Err(SurfaceError::TextureDestroyed);
         }
 
         Ok(())
@@ -578,8 +572,8 @@ impl Surface {
         self.release_inner()
     }
 
-    /// Like `discard`, destroys the acquired texture, but skips the HAL
-    /// `discard_texture` call. Safe to call during unwinding.
+    /// Like `discard`, destroys the acquired texture and gives its image back to the HAL, but
+    /// never waits for the snatch lock: safe to call while unwinding.
     pub(crate) fn release_inner(&self) -> Result<(), SurfaceError> {
         profiling::scope!("Surface::release");
 
@@ -592,18 +586,19 @@ impl Surface {
             .acquired_texture
             .take()
             .ok_or(SurfaceError::NothingToPresent)?;
-        // Destroy the texture, as presenting and discarding do: its raw texture is dropped here
-        // even if the application still references the texture. On Vulkan, that drops the
-        // texture's `Arc<SwapchainAcquireSemaphore>`, which the swapchain's teardown checks.
-        //
         // This runs while the thread unwinds, which may hold the snatch lock itself, through an
-        // `as_hal` guard, so it never waits for the lock. If the lock is held, configuring,
-        // unconfiguring or dropping the surface drops the raw texture instead, in
-        // `Texture::destroy_surface_texture_views`.
-        if let Ok(state) = texture.state() {
-            if let Some(mut snatch_guard) = present.device.snatchable_lock.try_write() {
-                drop(state.inner.snatch(&mut snatch_guard));
+        // `as_hal` guard, so it never waits for the lock. If the lock is held, the texture is
+        // given back by the next acquisition or configuration, which can wait.
+        let taken = match present.device.snatchable_lock.try_write() {
+            Some(mut snatch_guard) => texture.take_surface_texture(&mut snatch_guard),
+            None => {
+                present.released_texture = Some(texture);
+                return Ok(());
             }
+        };
+        if let Some(taken) = taken {
+            let device = Arc::clone(&present.device);
+            self.discard_taken(&device, taken.raw);
         }
 
         Ok(())
