@@ -11,6 +11,11 @@ mod buffer;
 pub use buffer::Buffer;
 mod command;
 pub use command::CommandBuffer;
+mod lock;
+mod surface;
+#[cfg(test)]
+mod tests;
+pub use surface::{Surface, SurfaceTexture};
 
 #[derive(Clone, Debug)]
 pub struct Api;
@@ -24,6 +29,12 @@ pub struct Encoder;
 #[derive(Debug)]
 pub struct Resource;
 
+/// A texture of the noop backend. A texture of a surface's swapchain has the image.
+#[derive(Debug)]
+pub struct Texture {
+    image: Option<Arc<surface::Image>>,
+}
+
 #[derive(Debug)]
 pub struct Fence {
     value: AtomicU64,
@@ -35,7 +46,7 @@ impl crate::Api for Api {
     const VARIANT: wgt::Backend = wgt::Backend::Noop;
 
     type Instance = Context;
-    type Surface = Context;
+    type Surface = Surface;
     type Adapter = Context;
     type Device = Context;
 
@@ -44,8 +55,8 @@ impl crate::Api for Api {
     type CommandBuffer = CommandBuffer;
 
     type Buffer = Buffer;
-    type Texture = Resource;
-    type SurfaceTexture = Resource;
+    type Texture = Texture;
+    type SurfaceTexture = SurfaceTexture;
     type TextureView = Resource;
     type Sampler = Resource;
     type QuerySet = Resource;
@@ -62,7 +73,16 @@ impl crate::Api for Api {
     type ComputePipeline = Resource;
 }
 
-crate::impl_dyn_resource!(Buffer, CommandBuffer, Context, Fence, Resource);
+crate::impl_dyn_resource!(
+    Buffer,
+    CommandBuffer,
+    Context,
+    Fence,
+    Resource,
+    Surface,
+    SurfaceTexture,
+    Texture
+);
 
 impl crate::DynAccelerationStructure for Resource {}
 impl crate::DynBindGroup for Resource {}
@@ -78,11 +98,11 @@ impl crate::DynRenderPipeline for Resource {}
 impl crate::DynRayTracingPipeline for Resource {}
 impl crate::DynSampler for Resource {}
 impl crate::DynShaderModule for Resource {}
-impl crate::DynSurfaceTexture for Resource {}
-impl crate::DynTexture for Resource {}
+impl crate::DynSurfaceTexture for SurfaceTexture {}
+impl crate::DynTexture for Texture {}
 impl crate::DynTextureView for Resource {}
 
-impl core::borrow::Borrow<dyn crate::DynTexture> for Resource {
+impl core::borrow::Borrow<dyn crate::DynTexture> for Texture {
     fn borrow(&self) -> &dyn crate::DynTexture {
         self
     }
@@ -105,14 +125,12 @@ impl crate::Instance for Context {
         &self,
         _display_handle: raw_window_handle::RawDisplayHandle,
         _window_handle: raw_window_handle::RawWindowHandle,
-    ) -> Result<Context, crate::InstanceError> {
-        Ok(Context {
-            options: Arc::clone(&self.options),
-        })
+    ) -> Result<Surface, crate::InstanceError> {
+        Ok(Surface::new())
     }
     unsafe fn enumerate_adapters(
         &self,
-        _surface_hint: Option<&Context>,
+        _surface_hint: Option<&Surface>,
     ) -> Vec<crate::ExposedAdapter<Api>> {
         let subgroup_min_size = self
             .options
@@ -192,29 +210,6 @@ pub const CAPABILITIES: crate::Capabilities = {
     }
 };
 
-impl crate::Surface for Context {
-    type A = Api;
-
-    unsafe fn configure(
-        &self,
-        device: &Context,
-        config: &crate::SurfaceConfiguration,
-    ) -> Result<(), crate::SurfaceError> {
-        Ok(())
-    }
-
-    unsafe fn unconfigure(&self, device: &Context) {}
-
-    unsafe fn acquire_texture(
-        &self,
-        _timeout: Option<Duration>,
-        _fence: &Fence,
-    ) -> Result<crate::AcquiredSurfaceTexture<Api>, crate::SurfaceError> {
-        Err(crate::SurfaceError::Timeout)
-    }
-    unsafe fn discard_texture(&self, texture: Resource) {}
-}
-
 impl crate::Adapter for Context {
     type A = Api;
 
@@ -240,8 +235,33 @@ impl crate::Adapter for Context {
         crate::TextureFormatCapabilities::empty()
     }
 
-    unsafe fn surface_capabilities(&self, surface: &Context) -> Option<crate::SurfaceCapabilities> {
-        None
+    unsafe fn surface_capabilities(&self, surface: &Surface) -> Option<crate::SurfaceCapabilities> {
+        Some(crate::SurfaceCapabilities {
+            formats: [
+                wgt::TextureFormat::Bgra8Unorm,
+                wgt::TextureFormat::Bgra8UnormSrgb,
+                wgt::TextureFormat::Rgba8Unorm,
+                wgt::TextureFormat::Rgba8UnormSrgb,
+            ]
+            .into_iter()
+            .map(|format| wgt::SurfaceFormatCapabilities {
+                format,
+                color_spaces: wgt::SurfaceColorSpaces::SRGB,
+            })
+            .collect(),
+            maximum_frame_latency: 1..=3,
+            current_extent: None,
+            usage: wgt::TextureUses::COLOR_TARGET
+                | wgt::TextureUses::RESOURCE
+                | wgt::TextureUses::COPY_SRC
+                | wgt::TextureUses::COPY_DST,
+            present_modes: vec![
+                wgt::PresentMode::Fifo,
+                wgt::PresentMode::Mailbox,
+                wgt::PresentMode::Immediate,
+            ],
+            composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
+        })
     }
 
     unsafe fn get_presentation_timestamp(&self) -> wgt::PresentationTimestamp {
@@ -266,7 +286,7 @@ impl crate::Queue for Context {
     unsafe fn submit(
         &self,
         command_buffers: &[&CommandBuffer],
-        surface_textures: &[&Resource],
+        surface_textures: &[&SurfaceTexture],
         (fence, fence_value): (&Fence, crate::FenceValue),
     ) -> DeviceResult<()> {
         // All commands are executed synchronously.
@@ -282,10 +302,10 @@ impl crate::Queue for Context {
     }
     unsafe fn present(
         &self,
-        surface: &Context,
-        texture: Resource,
+        surface: &Surface,
+        texture: SurfaceTexture,
     ) -> Result<(), crate::SurfaceError> {
-        Ok(())
+        surface.present(texture)
     }
 
     unsafe fn get_timestamp_period(&self) -> f32 {
@@ -327,15 +347,15 @@ impl crate::Device for Context {
     unsafe fn flush_mapped_ranges<I>(&self, buffer: &Buffer, ranges: I) {}
     unsafe fn invalidate_mapped_ranges<I>(&self, buffer: &Buffer, ranges: I) {}
 
-    unsafe fn create_texture(&self, desc: &crate::TextureDescriptor) -> DeviceResult<Resource> {
-        Ok(Resource)
+    unsafe fn create_texture(&self, desc: &crate::TextureDescriptor) -> DeviceResult<Texture> {
+        Ok(Texture { image: None })
     }
-    unsafe fn destroy_texture(&self, texture: Resource) {}
-    unsafe fn add_raw_texture(&self, _texture: &Resource) {}
+    unsafe fn destroy_texture(&self, texture: Texture) {}
+    unsafe fn add_raw_texture(&self, _texture: &Texture) {}
 
     unsafe fn create_texture_view(
         &self,
-        texture: &Resource,
+        texture: &Texture,
         desc: &crate::TextureViewDescriptor,
     ) -> DeviceResult<Resource> {
         Ok(Resource)
