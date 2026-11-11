@@ -33,14 +33,20 @@
 //!   acquisitions and submissions pass the same fence, and a submission lists each surface
 //!   texture once.
 //!
+//! With the `noop_test_hooks` feature, tests can run code inside a call on the surface
+//! ([`Surface::run_during_next`]), to interleave another thread's call with it
+//! deterministically, and make a call fail ([`Surface::fail_next`]).
+//!
 //! [`SurfaceError::Timeout`]: crate::SurfaceError::Timeout
 
+#[cfg(feature = "noop_test_hooks")]
+use alloc::boxed::Box;
 use alloc::{
     sync::{Arc, Weak},
     vec,
     vec::Vec,
 };
-use core::{borrow::Borrow, mem, ptr, time::Duration};
+use core::{borrow::Borrow, fmt, mem, ptr, time::Duration};
 
 use super::{lock::SpinLock, Api, Context, Fence, Texture};
 
@@ -224,6 +230,60 @@ struct State {
     violations: Vec<SurfaceViolation>,
     /// The violations recorded under the current lock, to log once it is released.
     unlogged: Vec<SurfaceViolation>,
+    hooks: Hooks,
+}
+
+/// Code to run inside the next call of a kind, as [`Surface::run_during_next`] asks.
+#[cfg(feature = "noop_test_hooks")]
+type Hook = Box<dyn FnOnce() + Send>;
+
+/// The test hooks of a surface: none without the `noop_test_hooks` feature.
+#[derive(Default)]
+struct Hooks {
+    #[cfg(feature = "noop_test_hooks")]
+    during: Vec<(SurfaceCall, Hook)>,
+    #[cfg(feature = "noop_test_hooks")]
+    failures: Vec<(SurfaceCall, crate::SurfaceError)>,
+}
+
+impl fmt::Debug for Hooks {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hooks").finish_non_exhaustive()
+    }
+}
+
+/// What the test hooks of a surface ask of a call: code to run inside it, and an error to fail
+/// with.
+struct CallHooks {
+    #[cfg(feature = "noop_test_hooks")]
+    during: Option<Hook>,
+    failure: Option<crate::SurfaceError>,
+}
+
+impl Hooks {
+    /// Takes the hooks of `call`: hooks for the same kind of call apply one per call, in the
+    /// order they were added.
+    fn take(&mut self, call: SurfaceCall) -> CallHooks {
+        #[cfg(feature = "noop_test_hooks")]
+        {
+            let during = self
+                .during
+                .iter()
+                .position(|&(hook, _)| hook == call)
+                .map(|index| self.during.remove(index).1);
+            let failure = self
+                .failures
+                .iter()
+                .position(|&(failing, _)| failing == call)
+                .map(|index| self.failures.remove(index).1);
+            CallHooks { during, failure }
+        }
+        #[cfg(not(feature = "noop_test_hooks"))]
+        {
+            let _ = call;
+            CallHooks { failure: None }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -290,10 +350,55 @@ impl Surface {
             .with_state(|state| mem::take(&mut state.violations))
     }
 
-    /// Records the start of `call`, and checks that it does not overlap a call it must not.
-    /// Returns a guard that records its end.
-    fn enter(&self, call: SurfaceCall) -> CallGuard<'_> {
+    /// Returns how many images of the current swapchain are acquired: handed out, and neither
+    /// presented nor discarded since.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn acquired_images(&self) -> usize {
         self.shared.with_state(|state| {
+            state.swapchain.as_ref().map_or(0, |swapchain| {
+                swapchain
+                    .acquired
+                    .iter()
+                    .filter(|&&acquired| acquired)
+                    .count()
+            })
+        })
+    }
+
+    /// Runs `f` inside the next `call` on this surface, on the thread making the call, while the
+    /// call is in progress. Hooks for the same call run one per call, in the order they were
+    /// added.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn run_during_next(&self, call: SurfaceCall, f: impl FnOnce() + Send + 'static) {
+        self.shared
+            .with_state(|state| state.hooks.during.push((call, Box::new(f))));
+    }
+
+    /// Makes the next `call` on this surface fail with `error`. Only [`SurfaceCall::Configure`],
+    /// [`SurfaceCall::Acquire`] and [`SurfaceCall::Present`] can fail. Failures of the same
+    /// call apply one per call, in the order they were added.
+    ///
+    /// A failed configuration leaves the surface unconfigured, like a backend that released the
+    /// previous swapchain before failing to create the next one. A failed acquisition acquires
+    /// no image, and a failed presentation gives no image back.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn fail_next(&self, call: SurfaceCall, error: crate::SurfaceError) {
+        assert!(
+            matches!(
+                call,
+                SurfaceCall::Configure | SurfaceCall::Acquire | SurfaceCall::Present
+            ),
+            "{call:?} cannot fail"
+        );
+        self.shared
+            .with_state(|state| state.hooks.failures.push((call, error)));
+    }
+
+    /// Records the start of `call`, checks that it does not overlap a call it must not, then
+    /// runs its test hook, if any. Returns a guard that records its end, and the error the call
+    /// must fail with, if any.
+    fn enter(&self, call: SurfaceCall) -> (CallGuard<'_>, Option<crate::SurfaceError>) {
+        let hooks = self.shared.with_state(|state| {
             let overlapped = state
                 .in_progress
                 .iter()
@@ -303,11 +408,18 @@ impl Surface {
                 state.violation(SurfaceViolation::Overlap { in_progress, call });
             }
             state.in_progress.push(call);
+            state.hooks.take(call)
         });
-        CallGuard {
+        // Created before the hook runs, so that a hook that panics still records the call's end.
+        let guard = CallGuard {
             shared: &self.shared,
             call,
+        };
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(during) = hooks.during {
+            during();
         }
+        (guard, hooks.failure)
     }
 
     /// Gives the image of `texture` back to the swapchain, after presenting or discarding it.
@@ -343,7 +455,10 @@ impl Surface {
     }
 
     pub(super) fn present(&self, texture: SurfaceTexture) -> Result<(), crate::SurfaceError> {
-        let _call = self.enter(SurfaceCall::Present);
+        let (_call, failure) = self.enter(SurfaceCall::Present);
+        if let Some(error) = failure {
+            return Err(error);
+        }
         self.give_back(texture, SurfaceCall::Present);
         Ok(())
     }
@@ -357,9 +472,13 @@ impl crate::Surface for Surface {
         _device: &Context,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
-        let _call = self.enter(SurfaceCall::Configure);
+        let (_call, failure) = self.enter(SurfaceCall::Configure);
         self.shared.with_state(|state| {
             state.check_images_released(SurfaceCall::Configure);
+            if let Some(error) = failure {
+                state.swapchain = None;
+                return Err(error);
+            }
             let id = state.swapchains_created;
             state.swapchains_created += 1;
             let image_count = config.maximum_frame_latency as usize + 1;
@@ -377,12 +496,12 @@ impl crate::Surface for Surface {
                 acquired: vec![false; image_count],
                 next: 0,
             });
-        });
-        Ok(())
+            Ok(())
+        })
     }
 
     unsafe fn unconfigure(&self, _device: &Context) {
-        let _call = self.enter(SurfaceCall::Unconfigure);
+        let (_call, _) = self.enter(SurfaceCall::Unconfigure);
         self.shared.with_state(|state| {
             if state.swapchain.is_none() {
                 state.violation(SurfaceViolation::NotConfigured(SurfaceCall::Unconfigure));
@@ -397,7 +516,10 @@ impl crate::Surface for Surface {
         _timeout: Option<Duration>,
         _fence: &Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<Api>, crate::SurfaceError> {
-        let _call = self.enter(SurfaceCall::Acquire);
+        let (_call, failure) = self.enter(SurfaceCall::Acquire);
+        if let Some(error) = failure {
+            return Err(error);
+        }
         self.shared.with_state(|state| {
             let Some(swapchain) = &mut state.swapchain else {
                 state.violation(SurfaceViolation::NotConfigured(SurfaceCall::Acquire));
@@ -424,7 +546,7 @@ impl crate::Surface for Surface {
     }
 
     unsafe fn discard_texture(&self, texture: SurfaceTexture) {
-        let _call = self.enter(SurfaceCall::Discard);
+        let (_call, _) = self.enter(SurfaceCall::Discard);
         self.give_back(texture, SurfaceCall::Discard);
     }
 }

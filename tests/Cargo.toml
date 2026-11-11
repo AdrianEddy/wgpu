@@ -50,7 +50,10 @@ test-build-with-profiling = ["profiling/type-check"]
 # These are all enabled for any testing on CI anyway, and won't do anything if no devices are detected.
 wgpu = { workspace = true, features = ["noop", "gles", "webgl", "angle", "counters"] }
 wgpu-core = { workspace = true, default-features = true, features = ["trace"] }
-wgpu-hal = { workspace = true, default-features = true, features = ["validation_canary"] }
+wgpu-hal = { workspace = true, default-features = true, features = [
+    "validation_canary",
+    "noop_test_hooks",
+] }
 wgpu-sync.workspace = true
 wgpu-types.workspace = true
 naga = { workspace = true, features = [
