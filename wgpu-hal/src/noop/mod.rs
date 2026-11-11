@@ -114,7 +114,6 @@ impl crate::Instance for Context {
         &self,
         _surface_hint: Option<&Context>,
     ) -> Vec<crate::ExposedAdapter<Api>> {
-        let device_type = self.options.device_type.unwrap_or(wgt::DeviceType::Other);
         let subgroup_min_size = self
             .options
             .subgroup_min_size
@@ -130,10 +129,12 @@ impl crate::Instance for Context {
             .clone()
             .unwrap_or(CAPABILITIES.limits.clone());
 
+        let default_info = adapter_info();
         let info = wgt::AdapterInfo {
+            device_type: self.options.device_type.unwrap_or(default_info.device_type),
             subgroup_min_size,
             subgroup_max_size,
-            ..adapter_info()
+            ..default_info
         };
 
         let capabilities = crate::Capabilities {
@@ -152,7 +153,7 @@ impl crate::Instance for Context {
     }
 }
 
-/// Returns the adapter info for the noop backend.
+/// Returns the adapter info for the noop backend with the default [`wgt::NoopBackendOptions`].
 ///
 /// This is used in the test harness to construct info about
 /// the noop backend adapter without actually initializing wgpu.

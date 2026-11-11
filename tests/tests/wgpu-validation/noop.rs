@@ -30,6 +30,34 @@ fn device_is_available_when_requested() {
 }
 
 #[test]
+fn adapter_reports_the_requested_device_type() {
+    for (requested, reported) in [
+        (None, wgpu::DeviceType::Cpu),
+        (
+            Some(wgpu::DeviceType::DiscreteGpu),
+            wgpu::DeviceType::DiscreteGpu,
+        ),
+        (Some(wgpu::DeviceType::Other), wgpu::DeviceType::Other),
+    ] {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                noop: wgpu::NoopBackendOptions {
+                    device_type: requested,
+                    ..wgpu::NoopBackendOptions::enabled()
+                },
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .unwrap();
+        assert_eq!(adapter.get_info().device_type, reported, "{requested:?}");
+    }
+}
+
+#[test]
 fn device_and_buffers() {
     let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
 
