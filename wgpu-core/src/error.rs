@@ -12,7 +12,10 @@ use wgpu_sync::Mutex;
 use wgt::error::{Error, ErrorFilter, ErrorSource, ErrorType, UncapturedErrorHandler, WebGpuError};
 use wgt::WasmNotSendSync;
 
-use crate::device::{callbacks::PendingCallbacks, Device};
+use crate::device::{
+    callbacks::{CallbackScope, PendingCallbacks},
+    Device,
+};
 
 /// Implementation of thread IDs for error scope tracking.
 ///
@@ -301,6 +304,9 @@ impl Device {
             fn_ident,
             Some(self.pending_callbacks()),
         );
+        // A call that finds the device lost reports an error, so its device lost callback is
+        // called before the call returns, even if the call delivers no callbacks otherwise.
+        drop(CallbackScope::new(self.pending_callbacks()));
     }
 
     #[inline]
@@ -318,6 +324,7 @@ impl Device {
             fn_ident,
             Some(self.pending_callbacks()),
         );
+        drop(CallbackScope::new(self.pending_callbacks()));
     }
 }
 

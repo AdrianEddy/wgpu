@@ -2164,13 +2164,17 @@ impl Queue {
         closure: SubmittedWorkDoneClosure,
     ) -> Option<SubmissionIndex> {
         api_log!("Queue::on_submitted_work_done");
+        // Flushing the pending writes can lose the device.
+        let _scope = CallbackScope::new(self.device.pending_callbacks());
 
         // A `DeviceError` means we're losing the device anyways, so we can ignore it here
         // (mostly to avoid a breaking change to the `on_submitted_work_done` signature
         // for an error case that it is unlikely the caller will be able to handle).
         let _: Result<_, DeviceError> = self.flush_pending_writes();
 
-        self.lock_life().add_work_done_closure(closure)
+        // Bound, so that the life tracker is unlocked before the scope delivers callbacks.
+        let submission_index = self.lock_life().add_work_done_closure(closure);
+        submission_index
     }
 
     #[allow(trivial_casts)]

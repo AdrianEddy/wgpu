@@ -107,11 +107,13 @@ impl Device {
     /// and the call returns once they finish.
     ///
     /// On native, these calls deliver callbacks in the same way: [`Queue::submit`],
-    /// [`Instance::poll_all`], mapping, unmapping and destroying a [`Buffer`], preparing a
-    /// [`Blas`] for compaction, configuring a [`Surface`], acquiring, presenting and discarding
-    /// its textures, and dropping a [`Queue`] or a [`Surface`]. A callback can therefore run inside
-    /// any of them, on any thread, whichever device it belongs to, so it must not take a lock that
-    /// the application holds across them. The calls that a callback makes deliver callbacks too.
+    /// [`Queue::on_submitted_work_done`], [`Instance::poll_all`], mapping, unmapping and destroying
+    /// a [`Buffer`], preparing a [`Blas`] for compaction, configuring a [`Surface`], acquiring,
+    /// presenting and discarding its textures, dropping a [`Queue`] or a [`Surface`], and any call
+    /// that reports an error. A callback can therefore run inside any of them, on any thread,
+    /// whichever device it belongs to, so it must not take a lock that the application holds
+    /// across them. The calls that a callback makes deliver callbacks too, the rest of the
+    /// callback's own batch first, so that callbacks keep their order.
     ///
     /// A callback that panics unwinds out of the call that delivers it, once that call's own work
     /// is done: retrying the call after catching the panic repeats that work. The next call that
@@ -880,12 +882,13 @@ impl Device {
 
     /// Set a DeviceLostCallback on this device, dropping the one it replaces.
     ///
-    /// On native, the callback is called at the end of the call that finds the device lost, if
-    /// that call delivers callbacks (see [`Device::poll`]), or else at the end of the next call
-    /// that does, on any thread and for any device of the same instance. After [`Device::destroy`],
-    /// it is called with [`DeviceLostReason::Destroyed`] by a later poll, once the queue is idle.
-    /// It is not called if the device is dropped first, or if the instance is dropped while the
-    /// callback waits to be called.
+    /// On native, the callback is called at the end of the call that finds the device lost, which
+    /// reports an error and so delivers callbacks (see [`Device::poll`]). A call that finds it
+    /// without reporting an error, such as recording a pass, leaves it to the next call that
+    /// delivers callbacks, on any thread and for any device of the same instance. After
+    /// [`Device::destroy`], it is called with [`DeviceLostReason::Destroyed`] by a later poll,
+    /// once the queue is idle. It is not called if the device is dropped first, or if the
+    /// instance is dropped while the callback waits to be called.
     pub fn set_device_lost_callback(
         &self,
         callback: impl Fn(DeviceLostReason, String) + Send + 'static,
