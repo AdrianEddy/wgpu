@@ -15,7 +15,7 @@ mod lock;
 mod surface;
 #[cfg(test)]
 mod tests;
-pub use surface::{Surface, SurfaceTexture};
+pub use surface::{Surface, SurfaceCall, SurfaceTexture, SurfaceViolation};
 
 #[derive(Clone, Debug)]
 pub struct Api;
@@ -32,6 +32,12 @@ pub struct Resource;
 /// A texture of the noop backend. A texture of a surface's swapchain has the image.
 #[derive(Debug)]
 pub struct Texture {
+    image: Option<Arc<surface::Image>>,
+}
+
+/// A texture view of the noop backend. A view of a surface's texture has the image.
+#[derive(Debug)]
+pub struct TextureView {
     image: Option<Arc<surface::Image>>,
 }
 
@@ -57,7 +63,7 @@ impl crate::Api for Api {
     type Buffer = Buffer;
     type Texture = Texture;
     type SurfaceTexture = SurfaceTexture;
-    type TextureView = Resource;
+    type TextureView = TextureView;
     type Sampler = Resource;
     type QuerySet = Resource;
     type Fence = Fence;
@@ -81,7 +87,8 @@ crate::impl_dyn_resource!(
     Resource,
     Surface,
     SurfaceTexture,
-    Texture
+    Texture,
+    TextureView
 );
 
 impl crate::DynAccelerationStructure for Resource {}
@@ -100,7 +107,7 @@ impl crate::DynSampler for Resource {}
 impl crate::DynShaderModule for Resource {}
 impl crate::DynSurfaceTexture for SurfaceTexture {}
 impl crate::DynTexture for Texture {}
-impl crate::DynTextureView for Resource {}
+impl crate::DynTextureView for TextureView {}
 
 impl core::borrow::Borrow<dyn crate::DynTexture> for Texture {
     fn borrow(&self) -> &dyn crate::DynTexture {
@@ -289,6 +296,9 @@ impl crate::Queue for Context {
         surface_textures: &[&SurfaceTexture],
         (fence, fence_value): (&Fence, crate::FenceValue),
     ) -> DeviceResult<()> {
+        for cb in command_buffers {
+            cb.check_surface_images(surface_textures);
+        }
         // All commands are executed synchronously.
         for cb in command_buffers {
             // SAFETY: Caller is responsible for ensuring synchronization between commands and
@@ -357,10 +367,12 @@ impl crate::Device for Context {
         &self,
         texture: &Texture,
         desc: &crate::TextureViewDescriptor,
-    ) -> DeviceResult<Resource> {
-        Ok(Resource)
+    ) -> DeviceResult<TextureView> {
+        Ok(TextureView {
+            image: texture.image.clone(),
+        })
     }
-    unsafe fn destroy_texture_view(&self, view: Resource) {}
+    unsafe fn destroy_texture_view(&self, view: TextureView) {}
     unsafe fn create_sampler(&self, desc: &crate::SamplerDescriptor) -> DeviceResult<Resource> {
         Ok(Resource)
     }
@@ -389,7 +401,7 @@ impl crate::Device for Context {
     unsafe fn destroy_pipeline_layout(&self, pipeline_layout: Resource) {}
     unsafe fn create_bind_group(
         &self,
-        desc: &crate::BindGroupDescriptor<Resource, Buffer, Resource, Resource, Resource>,
+        desc: &crate::BindGroupDescriptor<Resource, Buffer, Resource, TextureView, Resource>,
     ) -> DeviceResult<Resource> {
         Ok(Resource)
     }
