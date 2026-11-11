@@ -1,5 +1,6 @@
 use alloc::{
     borrow::{Cow, ToOwned},
+    boxed::Box,
     format,
     string::String,
     string::ToString as _,
@@ -66,8 +67,132 @@ type ShaderStage<'a> = (
 );
 type NameBindingMap = FastHashMap<String, (super::BindingRegister, u8)>;
 
+/// The bindings of a pipeline layout, numbered by [`number_bindings`].
+pub(super) struct NumberedBindings {
+    pub(super) group_infos: Box<[Option<super::BindGroupLayoutInfo>]>,
+    /// For each pass kind, naga's map of the slots.
+    pub(super) binding_maps: super::PerPassKind<naga::back::glsl::BindingMap>,
+}
+
+/// Numbers the bindings of a pipeline layout of `bind_group_layouts`, once for each pass kind.
+///
+/// In each pass kind, each type of resource has a numbering of its own: texture units, sampler
+/// slots, image units, and uniform and storage buffer binding points. An entry takes a slot only
+/// in the pass kinds that have a stage it is visible to, so an entry visible to no stage takes
+/// none.
+///
+/// The entries are numbered in the order of their bind groups, so the slots of a bind group
+/// depend only on its own layout and those of the bind groups before it. wgpu-core relies on
+/// that: when a pass changes to a pipeline of another layout, it sets the bind groups again only
+/// from the first one whose layout differs, a layout replaced by none included.
+///
+/// wgpu-core checks each stage against `max_sampled_textures_per_shader_stage`
+/// (`MAX_TEXTURE_SLOTS_PER_STAGE`), `max_samplers_per_shader_stage` (`MAX_SAMPLERS_PER_STAGE`),
+/// and the per-stage limits of the other types, which this backend reports as at most
+/// `MAX_BINDING_SLOTS_PER_STAGE`. A pass kind has at most two stages, so within those limits its
+/// slots fit the binding tables of `command.rs` and `u8`.
+pub(super) fn number_bindings(
+    bind_group_layouts: &[Option<&super::BindGroupLayout>],
+) -> NumberedBindings {
+    #[derive(Clone, Copy, Default)]
+    struct Counters {
+        samplers: u32,
+        textures: u32,
+        images: u32,
+        uniform_buffers: u32,
+        storage_buffers: u32,
+    }
+
+    let mut counters = super::PerPassKind::from_fn(|_| Counters::default());
+    let mut binding_maps = super::PerPassKind::from_fn(|_| naga::back::glsl::BindingMap::default());
+    let group_infos = bind_group_layouts
+        .iter()
+        .zip(0..)
+        .map(|(&bg_layout, group)| {
+            let bg_layout = bg_layout?;
+            let binding_count = bg_layout
+                .entries
+                .iter()
+                .map(|b| b.binding)
+                .max()
+                .map_or(0, |idx| idx as usize + 1);
+            let binding_to_slot = super::PerPassKind::from_fn(|kind| {
+                let mut binding_to_slot = vec![None; binding_count].into_boxed_slice();
+                for entry in bg_layout.entries.iter() {
+                    if !entry.visibility.intersects(kind.stages()) {
+                        continue;
+                    }
+                    let counters = &mut counters[kind];
+                    let counter = match entry.ty {
+                        wgt::BindingType::Sampler { .. } => &mut counters.samplers,
+                        wgt::BindingType::Texture { .. } => &mut counters.textures,
+                        wgt::BindingType::StorageTexture { .. } => &mut counters.images,
+                        wgt::BindingType::Buffer {
+                            ty: wgt::BufferBindingType::Uniform,
+                            ..
+                        } => &mut counters.uniform_buffers,
+                        wgt::BindingType::Buffer {
+                            ty: wgt::BufferBindingType::Storage { .. },
+                            ..
+                        } => &mut counters.storage_buffers,
+                        wgt::BindingType::AccelerationStructure { .. } => unimplemented!(),
+                        wgt::BindingType::ExternalTexture => unimplemented!(),
+                    };
+                    let slot = u8::try_from(*counter)
+                        .expect("wgpu-core's per-stage limits keep the slots within `u8`");
+                    *counter += entry.count.map_or(1, NonZeroU32::get);
+                    binding_to_slot[entry.binding as usize] = Some(slot);
+                    let br = naga::ResourceBinding {
+                        group,
+                        binding: entry.binding,
+                    };
+                    binding_maps[kind].insert(br, slot);
+                }
+                binding_to_slot
+            });
+            Some(super::BindGroupLayoutInfo {
+                entries: Arc::clone(&bg_layout.entries),
+                binding_to_slot,
+            })
+        })
+        .collect();
+
+    for kind in super::PassKind::ALL {
+        let Counters {
+            samplers,
+            textures,
+            images,
+            uniform_buffers,
+            storage_buffers,
+        } = counters[kind];
+        // wgpu-core's per-stage limits keep every pass kind of a pipeline layout within these,
+        // so this backend never needs to refuse a pipeline layout.
+        debug_assert!(
+            textures as usize <= super::MAX_TEXTURE_SLOTS
+                && samplers as usize <= super::MAX_SAMPLERS,
+            "{kind:?} passes of a pipeline layout take {textures} texture units and {samplers} \
+             sampler slots, but the backend has {} and {}",
+            super::MAX_TEXTURE_SLOTS,
+            super::MAX_SAMPLERS,
+        );
+        debug_assert!(
+            [images, uniform_buffers, storage_buffers]
+                .into_iter()
+                .all(|count| count <= 2 * super::MAX_BINDING_SLOTS_PER_STAGE),
+            "{kind:?} passes of a pipeline layout take {images} image units, \
+             {uniform_buffers} uniform buffer and {storage_buffers} storage buffer bindings",
+        );
+    }
+
+    NumberedBindings {
+        group_infos,
+        binding_maps,
+    }
+}
+
 struct CompilationContext<'a> {
     layout: &'a super::PipelineLayout,
+    kind: super::PassKind,
     sampler_map: &'a mut super::SamplerBindMap,
     name_binding_map: &'a mut NameBindingMap,
     immediates_items: &'a mut Vec<naga::back::glsl::ImmediateItem>,
@@ -96,7 +221,7 @@ impl CompilationContext<'_> {
             };
 
             let br = var.binding.as_ref().unwrap();
-            let slot = self.layout.get_slot(br);
+            let slot = self.layout.get_slot(self.kind, br);
 
             let name = match reflection_info.uniforms.get(&handle) {
                 Some(name) => name.clone(),
@@ -123,7 +248,7 @@ impl CompilationContext<'_> {
             };
 
             let tex_br = var.binding.as_ref().unwrap();
-            let texture_linear_index = self.layout.get_slot(tex_br);
+            let texture_linear_index = self.layout.get_slot(self.kind, tex_br);
 
             self.name_binding_map
                 .insert(name, (register, texture_linear_index));
@@ -132,7 +257,7 @@ impl CompilationContext<'_> {
                     .binding
                     .as_ref()
                     .unwrap();
-                let sampler_linear_index = self.layout.get_slot(sam_br);
+                let sampler_linear_index = self.layout.get_slot(self.kind, sam_br);
                 self.sampler_map[texture_linear_index as usize] = Some(sampler_linear_index);
             }
         }
@@ -707,18 +832,19 @@ impl super::Device {
             };
 
             let mut output = String::new();
+            let layout_options = &context.layout.naga_options[context.kind];
             let needs_temp_options = stage.zero_initialize_workgroup_memory
-                != context.layout.naga_options.zero_initialize_workgroup_memory;
+                != layout_options.zero_initialize_workgroup_memory;
             let mut temp_options;
             let naga_options = if needs_temp_options {
                 // We use a conditional here, as cloning the naga_options could be expensive
                 // That is, we want to avoid doing that unless we cannot avoid it
-                temp_options = context.layout.naga_options.clone();
+                temp_options = layout_options.clone();
                 temp_options.zero_initialize_workgroup_memory =
                     stage.zero_initialize_workgroup_memory;
                 &temp_options
             } else {
-                &context.layout.naga_options
+                layout_options
             };
             let mut writer = glsl::Writer::new(
                 &mut output,
@@ -757,6 +883,7 @@ impl super::Device {
     unsafe fn create_pipeline<'a>(
         &self,
         gl: &glow::Context,
+        kind: super::PassKind,
         shaders: ArrayVec<ShaderStage<'a>, { crate::MAX_CONCURRENT_SHADER_STAGES }>,
         layout: &super::PipelineLayout,
         #[cfg_attr(target_family = "wasm", allow(unused))] label: Option<&str>,
@@ -766,7 +893,11 @@ impl super::Device {
         let group_to_binding_to_slot = layout
             .group_infos
             .iter()
-            .map(|group| group.as_ref().map(|group| group.binding_to_slot.clone()))
+            .map(|group| {
+                group
+                    .as_ref()
+                    .map(|group| group.binding_to_slot[kind].clone())
+            })
             .collect::<Vec<_>>();
         for &(naga_stage, stage) in &shaders {
             program_stages.push(super::ProgramStage {
@@ -792,6 +923,7 @@ impl super::Device {
             .or_insert_with(|| unsafe {
                 Self::create_program(
                     gl,
+                    kind,
                     shaders,
                     layout,
                     label,
@@ -817,8 +949,10 @@ impl super::Device {
         buf
     }
 
+    #[allow(clippy::too_many_arguments)]
     unsafe fn create_program<'a>(
         gl: &glow::Context,
+        kind: super::PassKind,
         shaders: ArrayVec<ShaderStage<'a>, { crate::MAX_CONCURRENT_SHADER_STAGES }>,
         layout: &super::PipelineLayout,
         #[cfg_attr(target_family = "wasm", allow(unused))] label: Option<&str>,
@@ -854,6 +988,7 @@ impl super::Device {
             };
             let context = CompilationContext {
                 layout,
+                kind,
                 sampler_map: &mut sampler_map,
                 name_binding_map: &mut name_binding_map,
                 immediates_items: pc_item,
@@ -1664,13 +1799,6 @@ impl crate::Device for super::Device {
     ) -> Result<super::PipelineLayout, crate::DeviceError> {
         use naga::back::glsl;
 
-        let mut group_infos = Vec::with_capacity(desc.bind_group_layouts.len());
-        let mut num_samplers = 0u8;
-        let mut num_textures = 0u8;
-        let mut num_images = 0u8;
-        let mut num_uniform_buffers = 0u8;
-        let mut num_storage_buffers = 0u8;
-
         let mut writer_flags = glsl::WriterFlags::ADJUST_COORDINATE_SPACE;
         writer_flags.set(
             glsl::WriterFlags::TEXTURE_SHADOW_LOD,
@@ -1687,68 +1815,22 @@ impl crate::Device for super::Device {
         // We always force point size to be written and it will be ignored by the driver if it's not a point list primitive.
         // https://github.com/gfx-rs/wgpu/pull/3440/files#r1095726950
         writer_flags.set(glsl::WriterFlags::FORCE_POINT_SIZE, true);
-        let mut binding_map = glsl::BindingMap::default();
 
-        for (group_index, bg_layout) in desc.bind_group_layouts.iter().enumerate() {
-            let Some(bg_layout) = bg_layout else {
-                group_infos.push(None);
-                continue;
-            };
-
-            // create a vector with the size enough to hold all the bindings, filled with `!0`
-            let mut binding_to_slot = vec![
-                !0;
-                bg_layout
-                    .entries
-                    .iter()
-                    .map(|b| b.binding)
-                    .max()
-                    .map_or(0, |idx| idx as usize + 1)
-            ]
-            .into_boxed_slice();
-
-            for entry in bg_layout.entries.iter() {
-                let counter = match entry.ty {
-                    wgt::BindingType::Sampler { .. } => &mut num_samplers,
-                    wgt::BindingType::Texture { .. } => &mut num_textures,
-                    wgt::BindingType::StorageTexture { .. } => &mut num_images,
-                    wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Uniform,
-                        ..
-                    } => &mut num_uniform_buffers,
-                    wgt::BindingType::Buffer {
-                        ty: wgt::BufferBindingType::Storage { .. },
-                        ..
-                    } => &mut num_storage_buffers,
-                    wgt::BindingType::AccelerationStructure { .. } => unimplemented!(),
-                    wgt::BindingType::ExternalTexture => unimplemented!(),
-                };
-
-                binding_to_slot[entry.binding as usize] = *counter;
-                let br = naga::ResourceBinding {
-                    group: group_index as u32,
-                    binding: entry.binding,
-                };
-                binding_map.insert(br, *counter);
-                *counter += entry.count.map_or(1, |c| c.get() as u8);
-            }
-
-            group_infos.push(Some(super::BindGroupLayoutInfo {
-                entries: Arc::clone(&bg_layout.entries),
-                binding_to_slot,
-            }));
-        }
+        let NumberedBindings {
+            group_infos,
+            binding_maps,
+        } = number_bindings(desc.bind_group_layouts);
 
         self.counters.pipeline_layouts.add(1);
 
         Ok(super::PipelineLayout {
-            group_infos: group_infos.into_boxed_slice(),
-            naga_options: glsl::Options {
+            group_infos,
+            naga_options: binding_maps.map(|binding_map| glsl::Options {
                 version: self.shared.shading_language_version,
                 writer_flags,
                 binding_map,
                 zero_initialize_workgroup_memory: true,
-            },
+            }),
         })
     }
 
@@ -1903,7 +1985,14 @@ impl crate::Device for super::Device {
             shaders.push((naga::ShaderStage::Fragment, fs));
         }
         let inner = unsafe {
-            self.create_pipeline(gl, shaders, desc.layout, desc.label, desc.multiview_mask)
+            self.create_pipeline(
+                gl,
+                super::PassKind::Render,
+                shaders,
+                desc.layout,
+                desc.label,
+                desc.multiview_mask,
+            )
         }?;
 
         let (vertex_buffers, vertex_attributes) = {
@@ -1999,7 +2088,16 @@ impl crate::Device for super::Device {
         let gl = &self.shared.context.lock();
         let mut shaders = ArrayVec::new();
         shaders.push((naga::ShaderStage::Compute, &desc.stage));
-        let inner = unsafe { self.create_pipeline(gl, shaders, desc.layout, desc.label, None) }?;
+        let inner = unsafe {
+            self.create_pipeline(
+                gl,
+                super::PassKind::Compute,
+                shaders,
+                desc.layout,
+                desc.label,
+                None,
+            )
+        }?;
 
         self.counters.compute_pipelines.add(1);
 

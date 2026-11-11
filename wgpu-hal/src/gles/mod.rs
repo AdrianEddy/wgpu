@@ -19,7 +19,10 @@ Each sampled texture is exposed to the shader as a combined texture-sampler bind
 
 When building the pipeline layout, we linearize binding entries based on the groups
 (uniform/storage buffers, uniform/storage textures), and record the mapping into
-`BindGroupLayoutInfo`.
+`BindGroupLayoutInfo`. The layout is linearized once per `PassKind`: a render pass
+binds only the entries visible to the vertex or fragment stage, and a compute pass
+only those visible to the compute stage, so an entry visible to no stage of a pass
+kind takes no slot in it.
 When a pipeline gets created, and we track all the texture-sampler associations
 from the static use in the shader.
 We only support at most one sampler used with each texture so far. The linear index
@@ -100,6 +103,8 @@ mod emscripten;
 
 mod fence;
 mod queue;
+#[cfg(test)]
+mod tests;
 
 #[cfg(webgl)]
 mod web;
@@ -129,10 +134,22 @@ use crate::{CopyExtent, TextureDescriptor};
 #[derive(Clone, Debug)]
 pub struct Api;
 
-//Note: we can support more samplers if not every one of them is used at a time,
-// but it probably doesn't worth it.
-const MAX_TEXTURE_SLOTS: usize = 16;
-const MAX_SAMPLERS: usize = 16;
+// The per-stage limits reported to wgpu-core. GLES 3.0 and WebGL2 guarantee 16 texture image
+// units in the vertex stage (`MAX_VERTEX_TEXTURE_IMAGE_UNITS`) and in the fragment stage
+// (`MAX_TEXTURE_IMAGE_UNITS`), and GLES 3.1 16 in the compute stage
+// (`MAX_COMPUTE_TEXTURE_IMAGE_UNITS`).
+const MAX_TEXTURE_SLOTS_PER_STAGE: usize = 16;
+const MAX_SAMPLERS_PER_STAGE: usize = 16;
+// The texture units and sampler slots of a pass. A pipeline layout numbers them per pass kind,
+// so a render pass needs at most those of its two stages and a compute pass those of its one
+// stage. GLES 3.0 and WebGL2 guarantee 32 combined texture image units
+// (`MAX_COMBINED_TEXTURE_IMAGE_UNITS`), and the dirty masks of `command.rs` are `u32`s.
+const MAX_TEXTURE_SLOTS: usize = 2 * MAX_TEXTURE_SLOTS_PER_STAGE;
+const MAX_SAMPLERS: usize = 2 * MAX_SAMPLERS_PER_STAGE;
+// The most uniform buffers, storage buffers or storage textures that this backend reports per
+// stage. A pipeline layout gives each binding a `u8` slot (naga's `glsl::BindingMap` holds `u8`s),
+// and a render pass numbers the bindings of two stages.
+const MAX_BINDING_SLOTS_PER_STAGE: u32 = (1 << u8::BITS) / 2;
 const MAX_VERTEX_ATTRIBUTES: usize = 16;
 const ZERO_BUFFER_SIZE: usize = 256 << 10;
 const MAX_IMMEDIATES: usize = 64;
@@ -569,21 +586,81 @@ pub struct BindGroupLayout {
 
 impl crate::DynBindGroupLayout for BindGroupLayout {}
 
+/// The kind of pass that a pipeline runs in.
+///
+/// A pipeline layout numbers its bindings once per pass kind, and a pass binds only the bindings
+/// that its kind numbers. This is sound because a shader can only use bindings visible to its
+/// stage, and because each pass starts with no bind group set: wgpu-core sets every bind group
+/// that a pass uses in that pass, so the numberings of the two kinds need not agree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PassKind {
+    Render,
+    Compute,
+}
+
+impl PassKind {
+    const ALL: [Self; 2] = [Self::Render, Self::Compute];
+
+    /// The stages of the pipelines of this kind.
+    ///
+    /// This backend has no task, mesh or ray-tracing stages: wgpu-core rejects bind group layout
+    /// entries visible to them without features that this backend does not expose.
+    fn stages(self) -> wgt::ShaderStages {
+        match self {
+            Self::Render => wgt::ShaderStages::VERTEX_FRAGMENT,
+            Self::Compute => wgt::ShaderStages::COMPUTE,
+        }
+    }
+}
+
+/// A value for each [`PassKind`].
+#[derive(Debug)]
+struct PerPassKind<T>([T; 2]);
+
+impl<T> PerPassKind<T> {
+    fn from_fn(f: impl FnMut(PassKind) -> T) -> Self {
+        Self(PassKind::ALL.map(f))
+    }
+
+    fn map<U>(self, f: impl FnMut(T) -> U) -> PerPassKind<U> {
+        PerPassKind(self.0.map(f))
+    }
+}
+
+impl<T> core::ops::Index<PassKind> for PerPassKind<T> {
+    type Output = T;
+
+    fn index(&self, kind: PassKind) -> &T {
+        &self.0[kind as usize]
+    }
+}
+
+impl<T> core::ops::IndexMut<PassKind> for PerPassKind<T> {
+    fn index_mut(&mut self, kind: PassKind) -> &mut T {
+        &mut self.0[kind as usize]
+    }
+}
+
+/// The mapping of a bind group's resources in one pass kind, indexed by `binding`, into the whole
+/// layout space.
+/// For texture resources, the value is the texture slot index.
+/// For sampler resources, the value is the index of the sampler in the whole layout.
+/// For storage textures, the value is the image unit.
+/// For buffers, the value is the uniform or storage slot index.
+/// For bindings that no stage of the pass kind can see, and for unused binding numbers, the value
+/// is `None`.
+type BindingSlots = Box<[Option<u8>]>;
+
 #[derive(Debug)]
 struct BindGroupLayoutInfo {
     entries: Arc<[wgt::BindGroupLayoutEntry]>,
-    /// Mapping of resources, indexed by `binding`, into the whole layout space.
-    /// For texture resources, the value is the texture slot index.
-    /// For sampler resources, the value is the index of the sampler in the whole layout.
-    /// For buffers, the value is the uniform or storage slot index.
-    /// For unused bindings, the value is `!0`
-    binding_to_slot: Box<[u8]>,
+    binding_to_slot: PerPassKind<BindingSlots>,
 }
 
 #[derive(Debug)]
 pub struct PipelineLayout {
     group_infos: Box<[Option<BindGroupLayoutInfo>]>,
-    naga_options: naga::back::glsl::Options,
+    naga_options: PerPassKind<naga::back::glsl::Options>,
 }
 
 impl crate::DynPipelineLayout for PipelineLayout {}
@@ -591,10 +668,11 @@ impl crate::DynPipelineLayout for PipelineLayout {}
 impl PipelineLayout {
     /// # Panics
     /// If the pipeline layout does not contain a bind group layout used by
-    /// the resource binding.
-    fn get_slot(&self, br: &naga::ResourceBinding) -> u8 {
+    /// the resource binding, or if no stage of `kind` can see the binding.
+    fn get_slot(&self, kind: PassKind, br: &naga::ResourceBinding) -> u8 {
         let group_info = self.group_infos[br.group as usize].as_ref().unwrap();
-        group_info.binding_to_slot[br.binding as usize]
+        group_info.binding_to_slot[kind][br.binding as usize]
+            .expect("a shader uses a binding that its stage cannot see")
     }
 }
 
@@ -697,8 +775,8 @@ unsafe impl Sync for ImmediateDesc {}
 #[cfg(send_sync)]
 unsafe impl Send for ImmediateDesc {}
 
-/// For each texture in the pipeline layout, store the index of the only
-/// sampler (in this layout) that the texture is used with.
+/// For each texture unit of the pipeline's pass kind, store the index of the only
+/// sampler (in this layout and pass kind) that the texture is used with.
 type SamplerBindMap = [Option<u8>; MAX_TEXTURE_SLOTS];
 
 #[derive(Debug)]
@@ -752,7 +830,8 @@ struct ProgramStage {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct ProgramCacheKey {
     stages: ArrayVec<ProgramStage, 3>,
-    group_to_binding_to_slot: Box<[Option<Box<[u8]>>]>,
+    /// The slots of the program's pass kind, which its stages determine.
+    group_to_binding_to_slot: Box<[Option<BindingSlots>]>,
 }
 
 type ProgramCache = FastHashMap<ProgramCacheKey, Result<Arc<PipelineInner>, crate::PipelineError>>;

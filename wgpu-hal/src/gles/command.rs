@@ -40,6 +40,8 @@ pub(super) struct State {
     current_immediates_data: [u32; super::MAX_IMMEDIATES],
     end_of_pass_timestamp: Option<glow::Query>,
     clip_distance_count: u32,
+    /// The kind of the current pass, if the encoder is in one.
+    pass_kind: Option<super::PassKind>,
 }
 
 impl Default for State {
@@ -69,6 +71,7 @@ impl Default for State {
             current_immediates_data: [0; super::MAX_IMMEDIATES],
             end_of_pass_timestamp: Default::default(),
             clip_distance_count: Default::default(),
+            pass_kind: Default::default(),
         }
     }
 }
@@ -500,6 +503,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         desc: &crate::RenderPassDescriptor<super::QuerySet, super::TextureView>,
     ) -> Result<(), crate::DeviceError> {
         debug_assert!(self.state.end_of_pass_timestamp.is_none());
+        self.state.pass_kind = Some(super::PassKind::Render);
         if let Some(ref t) = desc.timestamp_writes {
             if let Some(index) = t.beginning_of_pass_write_index {
                 unsafe { self.write_timestamp(t.query_set, index) }
@@ -729,6 +733,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         if let Some(query) = self.state.end_of_pass_timestamp.take() {
             self.cmd_buffer.commands.push(C::TimestampQuery(query));
         }
+        self.state.pass_kind = None;
     }
 
     unsafe fn set_bind_group(
@@ -742,33 +747,46 @@ impl crate::CommandEncoder for super::CommandEncoder {
         let mut dirty_textures = 0u32;
         let mut dirty_samplers = 0u32;
         let group_info = layout.group_infos[index as usize].as_ref().unwrap();
+        let kind = self
+            .state
+            .pass_kind
+            .expect("`set_bind_group` outside of a pass");
+        let binding_to_slot = &group_info.binding_to_slot[kind];
 
         for (binding_layout, raw_binding) in group_info.entries.iter().zip(group.contents.iter()) {
-            let slot = group_info.binding_to_slot[binding_layout.binding as usize] as u32;
+            // Every buffer binding with a dynamic offset has one, whether this pass binds it or not.
+            let dynamic_offset = match binding_layout.ty {
+                wgt::BindingType::Buffer {
+                    has_dynamic_offset: true,
+                    ..
+                } => {
+                    let offset = dynamic_offsets[do_index];
+                    do_index += 1;
+                    offset as i32
+                }
+                _ => 0,
+            };
+            // A binding that no stage of this pass kind can see has no slot in it.
+            let Some(slot) = binding_to_slot[binding_layout.binding as usize] else {
+                continue;
+            };
+            let slot = u32::from(slot);
             match *raw_binding {
                 super::RawBinding::Buffer {
                     raw,
                     offset: base_offset,
                     size,
                 } => {
-                    let mut offset = base_offset;
+                    let offset = base_offset + dynamic_offset;
                     let target = match binding_layout.ty {
                         wgt::BindingType::Buffer {
-                            ty,
-                            has_dynamic_offset,
-                            min_binding_size: _,
-                        } => {
-                            if has_dynamic_offset {
-                                offset += dynamic_offsets[do_index] as i32;
-                                do_index += 1;
-                            }
-                            match ty {
-                                wgt::BufferBindingType::Uniform => glow::UNIFORM_BUFFER,
-                                wgt::BufferBindingType::Storage { .. } => {
-                                    glow::SHADER_STORAGE_BUFFER
-                                }
-                            }
-                        }
+                            ty: wgt::BufferBindingType::Uniform,
+                            ..
+                        } => glow::UNIFORM_BUFFER,
+                        wgt::BindingType::Buffer {
+                            ty: wgt::BufferBindingType::Storage { .. },
+                            ..
+                        } => glow::SHADER_STORAGE_BUFFER,
                         _ => unreachable!(),
                     };
                     self.cmd_buffer.commands.push(C::BindBuffer {
@@ -1222,6 +1240,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
 
     unsafe fn begin_compute_pass(&mut self, desc: &crate::ComputePassDescriptor<super::QuerySet>) {
         debug_assert!(self.state.end_of_pass_timestamp.is_none());
+        self.state.pass_kind = Some(super::PassKind::Compute);
         if let Some(ref t) = desc.timestamp_writes {
             if let Some(index) = t.beginning_of_pass_write_index {
                 unsafe { self.write_timestamp(t.query_set, index) }
@@ -1246,6 +1265,7 @@ impl crate::CommandEncoder for super::CommandEncoder {
         if let Some(query) = self.state.end_of_pass_timestamp.take() {
             self.cmd_buffer.commands.push(C::TimestampQuery(query));
         }
+        self.state.pass_kind = None;
     }
 
     unsafe fn set_compute_pipeline(&mut self, pipeline: &super::ComputePipeline) {

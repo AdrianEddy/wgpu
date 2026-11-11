@@ -436,6 +436,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Fix negative argument for `atomicSub` yielding incorrect GLSL. By @ErichDonGubler in [#9924](https://github.com/gfx-rs/wgpu/pull/9924).
 - Fixed `copy_texture_to_texture()` copying only the first depth slice when the copy extent had a depth greater than 1, so copies between 3D textures silently lost every slice after the first. Copies with a nonzero source z also read the wrong slice. By @AlexEgger2Build in [#10004](https://github.com/gfx-rs/wgpu/pull/10004).
 - Set a sampler's maximum anisotropy with `glSamplerParameterf` instead of `glSamplerParameteri`. Chromium's validating command decoder, which Android WebView still uses, rejects the integer call with `GL_INVALID_ENUM`, so anisotropic filtering was silently disabled under WebGL2 there. By @Jaltaire in [#10874](https://github.com/gfx-rs/wgpu/pull/10874).
+- Fix a panic in `set_bind_group` with pipeline layouts that hold more than 16 textures or samplers across their stages. Bindings are now numbered separately for render and compute passes, and a binding that no stage of the pass can see takes none. The reported per-stage limits of uniform buffers, storage buffers and storage textures are now capped at 128. By @AdrianEddy.
 
 #### WebGPU
 
