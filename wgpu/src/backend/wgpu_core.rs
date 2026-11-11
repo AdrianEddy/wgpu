@@ -3129,11 +3129,11 @@ impl dispatch::SurfaceOutputDetailInterface for CoreSurfaceOutputDetail {
     }
 
     fn texture_release(&self) {
-        match self.wgpu_surface.release() {
-            Ok(_status) => (),
-            Err(err) => self
-                .error_sink
-                .handle_error_nolabel(err, "Surface::release_texture"),
+        // Called only while the thread unwinds, from `SurfaceTexture`'s drop. The error sink
+        // would call the uncaptured error handler, whose default panics, and a panic while
+        // unwinding aborts the process, so the error is only logged.
+        if let Err(err) = self.wgpu_surface.release() {
+            log::error!("Surface::release_texture: {err}");
         }
     }
 }

@@ -683,7 +683,11 @@ pub trait SurfaceInterface: CommonTraits {
 }
 
 pub trait SurfaceOutputDetailInterface: CommonTraits {
+    /// Discards the texture: called when a `SurfaceTexture` is dropped unpresented.
     fn texture_discard(&self);
+    /// Releases the texture: called instead of [`Self::texture_discard`] when a `SurfaceTexture`
+    /// is dropped while its thread unwinds. It must not panic, which would abort the process,
+    /// nor wait for anything that the unwinding thread may hold.
     fn texture_release(&self);
 }
 

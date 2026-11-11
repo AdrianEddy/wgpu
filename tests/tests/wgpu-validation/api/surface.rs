@@ -189,6 +189,21 @@ fn configure_destroys_the_acquired_texture() {
     s.assert_no_violations();
 }
 
+/// A `SurfaceTexture` dropped while unwinding, after configuring destroyed its texture, logs the
+/// error of its release: the error sink's default handler panics, and a panic while unwinding
+/// aborts the process.
+#[test]
+fn releasing_a_texture_that_configuring_destroyed_does_not_abort() {
+    let s = setup();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _frame = s.acquire();
+        s.surface.configure(&s.device, &s.resized(1));
+        panic!("dropping the frame while unwinding");
+    }));
+    assert!(unwound.is_err());
+    s.assert_no_violations();
+}
+
 /// A `SurfaceTexture` dropped while unwinding does not wait for an `as_hal` guard that another
 /// thread holds, which would hold up the unwinding thread for as long as the guard lives.
 /// Configuring the surface destroys the texture instead.
