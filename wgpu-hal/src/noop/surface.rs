@@ -7,6 +7,32 @@
 //! as [`crate::Surface::discard_texture`] promises. A texture dropped instead keeps its image
 //! acquired until the surface is configured again.
 //!
+//! It also checks requirements that [`crate::Surface`] and [`crate::Queue`] place on their
+//! callers, and records each one it finds broken as a [`SurfaceViolation`] (see
+//! [`Surface::take_violations`]), which it also logs as an error. It checks that:
+//!
+//! - no texture of the swapchain's images, or view of one, is left when the surface is
+//!   configured or unconfigured;
+//! - no call on the surface overlaps its configuration or unconfiguration;
+//! - the surface is configured when it is unconfigured, acquired from, presented or discarded;
+//! - only an acquired image of the surface's current swapchain is presented or discarded, and on
+//!   the surface it was acquired from;
+//! - a submission uses only acquired images, and lists the surface texture of each one it uses.
+//!   This is stricter than [`crate::Queue::submit`], which requires the list for the images that
+//!   the submission writes to; wgpu-core lists every image a submission uses.
+//!
+//! It does not check, so a test that finds no violation proves nothing about, that:
+//!
+//! - configuring or unconfiguring does not overlap queue operations, or the configuration of the
+//!   device's other surfaces;
+//! - the surface is configured for one device at a time, and presented through that device's
+//!   queue;
+//! - only one texture is acquired at a time;
+//! - the GPU work on the images is complete when the surface is configured again (noop runs every
+//!   submission when it is made), an image is in the `PRESENT` state when it is presented,
+//!   acquisitions and submissions pass the same fence, and a submission lists each surface
+//!   texture once.
+//!
 //! [`SurfaceError::Timeout`]: crate::SurfaceError::Timeout
 
 use alloc::{
@@ -14,9 +40,62 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use core::{borrow::Borrow, ptr, time::Duration};
+use core::{borrow::Borrow, mem, ptr, time::Duration};
 
 use super::{lock::SpinLock, Api, Context, Fence, Texture};
+
+/// A call on a [`Surface`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SurfaceCall {
+    /// [`crate::Surface::configure`].
+    Configure,
+    /// [`crate::Surface::unconfigure`].
+    Unconfigure,
+    /// [`crate::Surface::acquire_texture`].
+    Acquire,
+    /// [`crate::Queue::present`].
+    Present,
+    /// [`crate::Surface::discard_texture`].
+    Discard,
+}
+
+impl SurfaceCall {
+    fn configures(self) -> bool {
+        matches!(self, Self::Configure | Self::Unconfigure)
+    }
+}
+
+/// A requirement of [`crate::Surface`] or [`crate::Queue`] that a caller broke.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SurfaceViolation {
+    /// `call` (configuring or unconfiguring) while textures or texture views of `images` still
+    /// existed.
+    ImagesInUse {
+        call: SurfaceCall,
+        images: Vec<usize>,
+    },
+    /// `call` started while `in_progress` was in progress on the surface, and one of them
+    /// (un)configures it.
+    Overlap {
+        in_progress: SurfaceCall,
+        call: SurfaceCall,
+    },
+    /// `call` on a surface that is not configured.
+    NotConfigured(SurfaceCall),
+    /// `call` (presenting or discarding) gave back `image`, which is not acquired.
+    NotAcquired { call: SurfaceCall, image: usize },
+    /// `call` (presenting or discarding) gave back `image` of a swapchain that the surface has
+    /// replaced since.
+    ReplacedSwapchain { call: SurfaceCall, image: usize },
+    /// `call` (presenting or discarding) gave back `image` of another surface.
+    OtherSurface { call: SurfaceCall, image: usize },
+    /// A submission used `image` without listing its surface texture in `surface_textures`.
+    Unlisted { image: usize },
+    /// A submission used `image` while it was not acquired, or after its swapchain was replaced.
+    NotAcquiredInSubmission { image: usize },
+}
 
 /// A surface of the noop backend.
 #[derive(Debug)]
@@ -52,6 +131,9 @@ impl Borrow<dyn crate::DynTexture> for SurfaceTexture {
 }
 
 /// An image of a noop [`Surface`]'s swapchain.
+///
+/// The swapchain holds a strong reference to each of its images, and so does every texture and
+/// texture view of one, so the surface can tell whether any is left when it is reconfigured.
 #[derive(Debug)]
 pub(super) struct Image {
     surface: Weak<Shared>,
@@ -59,15 +141,89 @@ pub(super) struct Image {
     index: usize,
 }
 
+/// A command's use of an [`Image`], which does not keep the image alive.
+#[derive(Debug, Clone)]
+pub(super) struct ImageUse {
+    surface: Weak<Shared>,
+    swapchain: u64,
+    index: usize,
+}
+
+impl ImageUse {
+    pub(super) fn new(image: &Image) -> Self {
+        Self {
+            surface: image.surface.clone(),
+            swapchain: image.swapchain,
+            index: image.index,
+        }
+    }
+
+    fn is_of(&self, image: &Image) -> bool {
+        Weak::ptr_eq(&self.surface, &image.surface)
+            && self.swapchain == image.swapchain
+            && self.index == image.index
+    }
+
+    pub(super) fn same(&self, other: &Self) -> bool {
+        Weak::ptr_eq(&self.surface, &other.surface)
+            && self.swapchain == other.swapchain
+            && self.index == other.index
+    }
+
+    /// Checks a submission's use of the image: it must be acquired, and its surface texture must
+    /// be among the submission's `surface_textures`.
+    pub(super) fn check_submitted(&self, surface_textures: &[&SurfaceTexture]) {
+        // A surface that no longer exists has nothing left to check against.
+        let Some(shared) = self.surface.upgrade() else {
+            return;
+        };
+        let listed = surface_textures
+            .iter()
+            .any(|texture| self.is_of(texture.image()));
+        shared.with_state(|state| {
+            if !listed {
+                state.violation(SurfaceViolation::Unlisted { image: self.index });
+            }
+            let acquired = state.swapchain.as_ref().is_some_and(|swapchain| {
+                swapchain.id == self.swapchain && swapchain.acquired[self.index]
+            });
+            if !acquired {
+                state.violation(SurfaceViolation::NotAcquiredInSubmission { image: self.index });
+            }
+        });
+    }
+}
+
 #[derive(Debug, Default)]
 struct Shared {
+    /// Only [`Shared::with_state`] locks it.
     state: SpinLock<State>,
+}
+
+impl Shared {
+    /// Runs `f` on the locked state, then logs the violations that `f` recorded, once the state
+    /// is unlocked: no code from outside the backend runs under the lock.
+    fn with_state<R>(&self, f: impl FnOnce(&mut State) -> R) -> R {
+        let (result, unlogged) = {
+            let mut state = self.state.lock();
+            let result = f(&mut state);
+            (result, mem::take(&mut state.unlogged))
+        };
+        for violation in unlogged {
+            log::error!("noop surface: {violation:?}");
+        }
+        result
+    }
 }
 
 #[derive(Debug, Default)]
 struct State {
     swapchain: Option<Swapchain>,
     swapchains_created: u64,
+    in_progress: Vec<SurfaceCall>,
+    violations: Vec<SurfaceViolation>,
+    /// The violations recorded under the current lock, to log once it is released.
+    unlogged: Vec<SurfaceViolation>,
 }
 
 #[derive(Debug)]
@@ -78,6 +234,48 @@ struct Swapchain {
     next: usize,
 }
 
+impl State {
+    fn violation(&mut self, violation: SurfaceViolation) {
+        self.unlogged.push(violation.clone());
+        self.violations.push(violation);
+    }
+
+    /// Checks that no texture or texture view of the current swapchain's images is left.
+    fn check_images_released(&mut self, call: SurfaceCall) {
+        let Some(swapchain) = &self.swapchain else {
+            return;
+        };
+        let images = swapchain
+            .images
+            .iter()
+            .filter(|image| Arc::strong_count(image) > 1)
+            .map(|image| image.index)
+            .collect::<Vec<_>>();
+        if !images.is_empty() {
+            self.violation(SurfaceViolation::ImagesInUse { call, images });
+        }
+    }
+}
+
+/// Records that a call is in progress on a [`Surface`], until dropped.
+struct CallGuard<'a> {
+    shared: &'a Shared,
+    call: SurfaceCall,
+}
+
+impl Drop for CallGuard<'_> {
+    fn drop(&mut self) {
+        self.shared.with_state(|state| {
+            let index = state
+                .in_progress
+                .iter()
+                .position(|&call| call == self.call)
+                .expect("a call in progress is recorded");
+            state.in_progress.remove(index);
+        });
+    }
+}
+
 impl Surface {
     pub(super) fn new() -> Self {
         Self {
@@ -85,25 +283,68 @@ impl Surface {
         }
     }
 
+    /// Returns the violations of the HAL's requirements found since the last call, and forgets
+    /// them.
+    pub fn take_violations(&self) -> Vec<SurfaceViolation> {
+        self.shared
+            .with_state(|state| mem::take(&mut state.violations))
+    }
+
+    /// Records the start of `call`, and checks that it does not overlap a call it must not.
+    /// Returns a guard that records its end.
+    fn enter(&self, call: SurfaceCall) -> CallGuard<'_> {
+        self.shared.with_state(|state| {
+            let overlapped = state
+                .in_progress
+                .iter()
+                .copied()
+                .find(|&in_progress| in_progress.configures() || call.configures());
+            if let Some(in_progress) = overlapped {
+                state.violation(SurfaceViolation::Overlap { in_progress, call });
+            }
+            state.in_progress.push(call);
+        });
+        CallGuard {
+            shared: &self.shared,
+            call,
+        }
+    }
+
     /// Gives the image of `texture` back to the swapchain, after presenting or discarding it.
     ///
     /// An image of another surface, or of a swapchain that this surface has replaced since,
     /// gives nothing back.
-    fn give_back(&self, texture: SurfaceTexture) {
+    fn give_back(&self, texture: SurfaceTexture, call: SurfaceCall) {
         let image = texture.image();
-        if !ptr::eq(image.surface.as_ptr(), Arc::as_ptr(&self.shared)) {
-            return;
-        }
-        let mut state = self.shared.state.lock();
-        if let Some(swapchain) = &mut state.swapchain {
-            if swapchain.id == image.swapchain {
-                swapchain.acquired[image.index] = false;
+        let of_this_surface = ptr::eq(image.surface.as_ptr(), Arc::as_ptr(&self.shared));
+        self.shared.with_state(|state| {
+            let violation = match &mut state.swapchain {
+                _ if !of_this_surface => Some(SurfaceViolation::OtherSurface {
+                    call,
+                    image: image.index,
+                }),
+                None => Some(SurfaceViolation::NotConfigured(call)),
+                Some(swapchain) if swapchain.id != image.swapchain => {
+                    Some(SurfaceViolation::ReplacedSwapchain {
+                        call,
+                        image: image.index,
+                    })
+                }
+                Some(swapchain) => (!mem::replace(&mut swapchain.acquired[image.index], false))
+                    .then_some(SurfaceViolation::NotAcquired {
+                        call,
+                        image: image.index,
+                    }),
+            };
+            if let Some(violation) = violation {
+                state.violation(violation);
             }
-        }
+        });
     }
 
     pub(super) fn present(&self, texture: SurfaceTexture) -> Result<(), crate::SurfaceError> {
-        self.give_back(texture);
+        let _call = self.enter(SurfaceCall::Present);
+        self.give_back(texture, SurfaceCall::Present);
         Ok(())
     }
 }
@@ -116,29 +357,39 @@ impl crate::Surface for Surface {
         _device: &Context,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
-        let mut state = self.shared.state.lock();
-        let id = state.swapchains_created;
-        state.swapchains_created += 1;
-        let image_count = config.maximum_frame_latency as usize + 1;
-        state.swapchain = Some(Swapchain {
-            id,
-            images: (0..image_count)
-                .map(|index| {
-                    Arc::new(Image {
-                        surface: Arc::downgrade(&self.shared),
-                        swapchain: id,
-                        index,
+        let _call = self.enter(SurfaceCall::Configure);
+        self.shared.with_state(|state| {
+            state.check_images_released(SurfaceCall::Configure);
+            let id = state.swapchains_created;
+            state.swapchains_created += 1;
+            let image_count = config.maximum_frame_latency as usize + 1;
+            state.swapchain = Some(Swapchain {
+                id,
+                images: (0..image_count)
+                    .map(|index| {
+                        Arc::new(Image {
+                            surface: Arc::downgrade(&self.shared),
+                            swapchain: id,
+                            index,
+                        })
                     })
-                })
-                .collect(),
-            acquired: vec![false; image_count],
-            next: 0,
+                    .collect(),
+                acquired: vec![false; image_count],
+                next: 0,
+            });
         });
         Ok(())
     }
 
     unsafe fn unconfigure(&self, _device: &Context) {
-        self.shared.state.lock().swapchain = None;
+        let _call = self.enter(SurfaceCall::Unconfigure);
+        self.shared.with_state(|state| {
+            if state.swapchain.is_none() {
+                state.violation(SurfaceViolation::NotConfigured(SurfaceCall::Unconfigure));
+            }
+            state.check_images_released(SurfaceCall::Unconfigure);
+            state.swapchain = None;
+        });
     }
 
     unsafe fn acquire_texture(
@@ -146,30 +397,34 @@ impl crate::Surface for Surface {
         _timeout: Option<Duration>,
         _fence: &Fence,
     ) -> Result<crate::AcquiredSurfaceTexture<Api>, crate::SurfaceError> {
-        let mut state = self.shared.state.lock();
-        let Some(swapchain) = &mut state.swapchain else {
-            return Err(crate::SurfaceError::Outdated);
-        };
-        let image_count = swapchain.images.len();
-        let Some(index) = (0..image_count)
-            .map(|offset| (swapchain.next + offset) % image_count)
-            .find(|&index| !swapchain.acquired[index])
-        else {
-            return Err(crate::SurfaceError::Timeout);
-        };
-        swapchain.acquired[index] = true;
-        swapchain.next = (index + 1) % image_count;
-        Ok(crate::AcquiredSurfaceTexture {
-            texture: SurfaceTexture {
-                texture: Texture {
-                    image: Some(Arc::clone(&swapchain.images[index])),
+        let _call = self.enter(SurfaceCall::Acquire);
+        self.shared.with_state(|state| {
+            let Some(swapchain) = &mut state.swapchain else {
+                state.violation(SurfaceViolation::NotConfigured(SurfaceCall::Acquire));
+                return Err(crate::SurfaceError::Outdated);
+            };
+            let image_count = swapchain.images.len();
+            let Some(index) = (0..image_count)
+                .map(|offset| (swapchain.next + offset) % image_count)
+                .find(|&index| !swapchain.acquired[index])
+            else {
+                return Err(crate::SurfaceError::Timeout);
+            };
+            swapchain.acquired[index] = true;
+            swapchain.next = (index + 1) % image_count;
+            Ok(crate::AcquiredSurfaceTexture {
+                texture: SurfaceTexture {
+                    texture: Texture {
+                        image: Some(Arc::clone(&swapchain.images[index])),
+                    },
                 },
-            },
-            suboptimal: false,
+                suboptimal: false,
+            })
         })
     }
 
     unsafe fn discard_texture(&self, texture: SurfaceTexture) {
-        self.give_back(texture);
+        let _call = self.enter(SurfaceCall::Discard);
+        self.give_back(texture, SurfaceCall::Discard);
     }
 }
