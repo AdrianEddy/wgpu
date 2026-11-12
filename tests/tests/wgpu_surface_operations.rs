@@ -29,6 +29,11 @@
 //! Each adapter gets windows of its own: a window that one API presented to is not reused with
 //! another. Like `wgpu_surface`, this binary owns the main thread, which `winit` requires, and runs
 //! its trials on it, sharing one event loop.
+//!
+//! Every trial prints the adapters it runs on, and fails if it ran on none. Setting
+//! `WGPU_SURFACE_TEST_ADAPTER` limits the trials to the adapters whose `"{backend:?} {name}"` contains
+//! its value, ignoring case. A failure names the adapter, the phase and the round, with the errors
+//! and validation messages collected so far; a lost device counts as an error.
 
 #[cfg(any(
     target_arch = "wasm32",
@@ -80,6 +85,8 @@ mod native {
     const FRAMES: u32 = 5;
     /// The most submissions `configure_race`'s submitting thread makes, should it not be stopped.
     const MAX_SUBMISSIONS: u32 = 2000;
+    /// Limits the trials to the adapters whose [`adapter_name`] contains its value, ignoring case.
+    const ADAPTER_FILTER: &str = "WGPU_SURFACE_TEST_ADAPTER";
 
     type Scenario = fn(&ActiveEventLoop, &wgpu::Instance) -> Result<(), String>;
 
@@ -151,7 +158,7 @@ mod native {
 
     type Errors = Arc<Mutex<Vec<String>>>;
 
-    /// A device of `adapter`, whose uncaptured errors are collected in the returned list.
+    /// A device of `adapter`, whose uncaptured errors, and loss, are collected in the returned list.
     fn device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue, Errors) {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
@@ -160,13 +167,33 @@ mod native {
         device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
             sink.lock().unwrap().push(error.to_string());
         }));
+        // A lost device reports no uncaptured error. Dropping the device reports `Destroyed`.
+        let sink = Arc::clone(&errors);
+        device.set_device_lost_callback(move |reason, message| {
+            if !matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+                sink.lock()
+                    .unwrap()
+                    .push(format!("device lost: {reason:?}: {message}"));
+            }
+        });
         (device, queue, errors)
     }
 
-    /// Fails if a device of `backend` reported an uncaptured error, or a validation layer reported a
-    /// message. Call it once the devices, queues and surfaces it checks are dropped, so that the
-    /// messages of their teardown count too.
-    fn check(backend: wgpu::Backend, errors: &[Errors]) -> Result<(), String> {
+    /// The errors collected in `errors` so far and the validation layers' messages, for a failure
+    /// message.
+    fn dump(errors: &[&Errors]) -> String {
+        let collected = errors
+            .iter()
+            .flat_map(|errors| errors.lock().unwrap().clone())
+            .collect::<Vec<_>>();
+        let messages = wgpu_hal::VALIDATION_CANARY.get_and_reset();
+        format!("errors {collected:#?}, validation messages {messages:#?}")
+    }
+
+    /// Fails if a device of `adapter` reported an uncaptured error or was lost, or a validation layer
+    /// reported a message. Call it once the devices, queues and surfaces it checks are dropped, so
+    /// that the messages of their teardown count too.
+    fn check(adapter: &str, errors: &[Errors]) -> Result<(), String> {
         let errors = errors
             .iter()
             .flat_map(|errors| core::mem::take(&mut *errors.lock().unwrap()))
@@ -176,7 +203,7 @@ mod native {
             Ok(())
         } else {
             Err(format!(
-                "{backend:?}: errors {errors:?}, validation messages {messages:?}"
+                "{adapter}: errors {errors:?}, validation messages {messages:?}"
             ))
         }
     }
@@ -196,28 +223,56 @@ mod native {
     /// An adapter, with windows of its own and their surfaces.
     type AdapterWithSurfaces = (wgpu::Adapter, Vec<(Arc<Window>, wgpu::Surface<'static>)>);
 
-    /// Each adapter whose surfaces `windows` new windows of its own support, with the windows and
-    /// their surfaces.
+    /// Each adapter that [`ADAPTER_FILTER`] selects and whose surfaces `windows` new windows of its
+    /// own support, with the windows and their surfaces. Prints each adapter it returns, and fails
+    /// if there is none: a trial that runs on no adapter checks nothing.
     fn adapters(
         event_loop: &ActiveEventLoop,
         instance: &wgpu::Instance,
         windows: usize,
-    ) -> Vec<AdapterWithSurfaces> {
-        pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
-            .into_iter()
-            .filter_map(|adapter| {
-                let surfaces = (0..windows)
-                    .map(|_| {
-                        let window = window(event_loop);
-                        let surface = instance.create_surface(Arc::clone(&window)).ok()?;
-                        adapter
-                            .is_surface_supported(&surface)
-                            .then_some((window, surface))
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some((adapter, surfaces))
-            })
-            .collect()
+    ) -> Result<Vec<AdapterWithSurfaces>, String> {
+        let filter = std::env::var(ADAPTER_FILTER)
+            .ok()
+            .map(|filter| filter.to_lowercase());
+        let mut skipped = Vec::new();
+        let mut selected = Vec::new();
+        for adapter in pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all())) {
+            let name = adapter_name(&adapter);
+            if filter
+                .as_ref()
+                .is_some_and(|filter| !name.to_lowercase().contains(filter))
+            {
+                skipped.push(format!("{name}: not selected by {ADAPTER_FILTER}"));
+                continue;
+            }
+            let surfaces = (0..windows)
+                .map(|_| {
+                    let window = window(event_loop);
+                    let surface = instance.create_surface(Arc::clone(&window)).ok()?;
+                    adapter
+                        .is_surface_supported(&surface)
+                        .then_some((window, surface))
+                })
+                .collect::<Option<Vec<_>>>();
+            match surfaces {
+                Some(surfaces) => {
+                    println!("adapter: {:?}", adapter.get_info());
+                    selected.push((adapter, surfaces));
+                }
+                None => skipped.push(format!("{name}: does not support the window's surface")),
+            }
+        }
+        if selected.is_empty() {
+            Err(format!("ran on no adapter: {skipped:#?}"))
+        } else {
+            Ok(selected)
+        }
+    }
+
+    /// `"{backend:?} {name}"`: how failures and [`ADAPTER_FILTER`] name an adapter.
+    fn adapter_name(adapter: &wgpu::Adapter) -> String {
+        let info = adapter.get_info();
+        format!("{:?} {}", info.backend, info.name)
     }
 
     /// The default configuration of `surface`, at the windows' size, with every usage it offers
@@ -229,11 +284,28 @@ mod native {
         config
     }
 
-    fn acquire(surface: &wgpu::Surface<'_>) -> wgpu::SurfaceTexture {
+    /// Configures `surface`, or panics with `at` (the adapter, phase and round), the configuration
+    /// error and [`dump`]: a failed configuration otherwise surfaces only at the next acquisition.
+    fn configure(
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+        at: &str,
+        errors: &[&Errors],
+    ) {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(device, config);
+        if let Some(error) = pollster::block_on(scope.pop()) {
+            panic!("{at}: configuring failed: {error}; {}", dump(errors));
+        }
+    }
+
+    /// Acquires a texture of `surface`, or panics with `at` and [`dump`].
+    fn acquire(surface: &wgpu::Surface<'_>, at: &str, errors: &[&Errors]) -> wgpu::SurfaceTexture {
         match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            other => panic!("no texture acquired: {other:?}"),
+            other => panic!("{at}: no texture acquired: {other:?}; {}", dump(errors)),
         }
     }
 
@@ -255,8 +327,14 @@ mod native {
     }
 
     /// Acquires a texture of `surface`, renders to it and presents it.
-    fn present_frame(surface: &wgpu::Surface<'_>, device: &wgpu::Device, queue: &wgpu::Queue) {
-        let frame = acquire(surface);
+    fn present_frame(
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        at: &str,
+        errors: &[&Errors],
+    ) {
+        let frame = acquire(surface, at, errors);
         render(
             device,
             queue,
@@ -266,13 +344,16 @@ mod native {
     }
 
     fn held_views(event_loop: &ActiveEventLoop, instance: &wgpu::Instance) -> Result<(), String> {
-        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+        for (adapter, surfaces) in adapters(event_loop, instance, 1)? {
+            let name = adapter_name(&adapter);
             let errors = {
                 let (_, surface) = &surfaces[0];
                 let (device, queue, errors) = device(&adapter);
+                let errs = [&errors];
                 let config = config(surface, &adapter);
-                surface.configure(&device, &config);
-                let frame = acquire(surface);
+                let at = format!("{name}: configuring");
+                configure(surface, &device, &config, &at, &errs);
+                let frame = acquire(surface, &format!("{name}: first frame"), &errs);
                 let texture = frame.texture.clone();
                 let view = frame.texture.create_view(&Default::default());
                 let bind_group = config
@@ -282,13 +363,14 @@ mod native {
                 render(&device, &queue, &view);
                 queue.present(frame);
 
-                surface.configure(&device, &config);
-                present_frame(surface, &device, &queue);
+                let at = format!("{name}: configuring with the views held");
+                configure(surface, &device, &config, &at, &errs);
+                present_frame(surface, &device, &queue, &at, &errs);
                 drop((texture, view, bind_group));
                 errors
             };
             drop(surfaces);
-            check(adapter.get_info().backend, &[errors])?;
+            check(&name, &[errors])?;
         }
         Ok(())
     }
@@ -322,27 +404,31 @@ mod native {
         event_loop: &ActiveEventLoop,
         instance: &wgpu::Instance,
     ) -> Result<(), String> {
-        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+        for (adapter, surfaces) in adapters(event_loop, instance, 1)? {
+            let name = adapter_name(&adapter);
             let errors = {
                 let (_, surface) = &surfaces[0];
                 let (device, queue, errors) = device(&adapter);
+                let errs = [&errors];
                 let config = config(surface, &adapter);
-                surface.configure(&device, &config);
+                let at = format!("{name}: configuring");
+                configure(surface, &device, &config, &at, &errs);
                 let held = Mutex::new(None);
                 let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    let frame = acquire(surface);
+                    let frame = acquire(surface, &format!("{name}: the frame to unwind"), &errs);
                     *held.lock().unwrap() = Some(frame.texture.clone());
                     std::panic::resume_unwind(Box::new("dropping the frame while unwinding"));
                 }));
                 assert!(unwound.is_err());
 
-                surface.configure(&device, &config);
-                present_frame(surface, &device, &queue);
+                let at = format!("{name}: configuring with the released texture held");
+                configure(surface, &device, &config, &at, &errs);
+                present_frame(surface, &device, &queue, &at, &errs);
                 drop(held);
                 errors
             };
             drop(surfaces);
-            check(adapter.get_info().backend, &[errors])?;
+            check(&name, &[errors])?;
         }
         Ok(())
     }
@@ -352,16 +438,19 @@ mod native {
         instance: &wgpu::Instance,
     ) -> Result<(), String> {
         report_validation_layer(instance);
-        for (adapter, surfaces) in adapters(event_loop, instance, 1) {
+        for (adapter, surfaces) in adapters(event_loop, instance, 1)? {
+            let name = adapter_name(&adapter);
             let errors = {
                 let (_, surface) = &surfaces[0];
                 let (device, queue, errors) = device(&adapter);
+                let errs = [&errors];
                 let config = config(surface, &adapter);
-                surface.configure(&device, &config);
+                let at = format!("{name}: configuring");
+                configure(surface, &device, &config, &at, &errs);
                 // More than a swapchain of this configuration has images, on usual drivers.
                 let frames = 2 * (config.desired_maximum_frame_latency + 1) + 1;
-                for _ in 0..frames {
-                    let frame = acquire(surface);
+                for i in 0..frames {
+                    let frame = acquire(surface, &format!("{name}: rendered discard {i}"), &errs);
                     render(
                         &device,
                         &queue,
@@ -370,28 +459,32 @@ mod native {
                     // Dropped unpresented: the swapchain gets the image back.
                     drop(frame);
                 }
-                for _ in 0..frames {
+                for i in 0..frames {
                     // Dropped without being rendered to.
-                    drop(acquire(surface));
+                    let at = format!("{name}: bare discard {i}");
+                    drop(acquire(surface, &at, &errs));
                 }
                 // Enough presentations for Vulkan's ring of acquire semaphores to wrap.
-                for _ in 0..frames {
-                    present_frame(surface, &device, &queue);
+                for i in 0..frames {
+                    let at = format!("{name}: presentation {i}");
+                    present_frame(surface, &device, &queue, &at, &errs);
                 }
                 // Configured again while Vulkan keeps a discarded image for the next acquisition.
-                let frame = acquire(surface);
+                let at = format!("{name}: discard before configuring");
+                let frame = acquire(surface, &at, &errs);
                 render(
                     &device,
                     &queue,
                     &frame.texture.create_view(&Default::default()),
                 );
                 drop(frame);
-                surface.configure(&device, &config);
-                present_frame(surface, &device, &queue);
+                let at = format!("{name}: configuring with a discarded image kept");
+                configure(surface, &device, &config, &at, &errs);
+                present_frame(surface, &device, &queue, &at, &errs);
                 errors
             };
             drop(surfaces);
-            check(adapter.get_info().backend, &[errors])?;
+            check(&name, &[errors])?;
         }
         Ok(())
     }
@@ -423,17 +516,20 @@ mod native {
     }
 
     fn two_surfaces(event_loop: &ActiveEventLoop, instance: &wgpu::Instance) -> Result<(), String> {
-        for (adapter, surfaces) in adapters(event_loop, instance, 2) {
+        for (adapter, surfaces) in adapters(event_loop, instance, 2)? {
+            let name = adapter_name(&adapter);
             let errors = {
                 let (device, queue, errors) = device(&adapter);
                 thread::scope(|scope| {
-                    for (_, surface) in &surfaces {
+                    for (index, (_, surface)) in surfaces.iter().enumerate() {
                         let config = config(surface, &adapter);
-                        let (device, queue) = (&device, &queue);
+                        let (device, queue, errors, name) = (&device, &queue, &errors, &name);
                         scope.spawn(move || {
-                            for _ in 0..TWO_SURFACES_ROUNDS {
-                                surface.configure(device, &config);
-                                present_frame(surface, device, queue);
+                            let errs = [errors];
+                            for round in 0..TWO_SURFACES_ROUNDS {
+                                let at = format!("{name}: surface {index} round {round}");
+                                configure(surface, device, &config, &at, &errs);
+                                present_frame(surface, device, queue, &at, &errs);
                             }
                         });
                     }
@@ -441,7 +537,7 @@ mod native {
                 errors
             };
             drop(surfaces);
-            check(adapter.get_info().backend, &[errors])?;
+            check(&name, &[errors])?;
         }
         Ok(())
     }
@@ -480,9 +576,12 @@ mod native {
         event_loop: &ActiveEventLoop,
         instance: &wgpu::Instance,
     ) -> Result<(), String> {
-        for (adapter, mut surfaces) in adapters(event_loop, instance, 1) {
+        for (adapter, mut surfaces) in adapters(event_loop, instance, 1)? {
+            let name = adapter_name(&adapter);
             let (window, surface) = surfaces.pop().unwrap();
             let (device, queue, errors) = device(&adapter);
+            let (other_device, other_queue, other_errors) = self::device(&adapter);
+            let errs = [&errors, &other_errors];
             let config = config(&surface, &adapter);
             let present_modes = surface.get_capabilities(&adapter).present_modes;
 
@@ -498,20 +597,24 @@ mod native {
                         desired_maximum_frame_latency: 1 + round % 3,
                         ..config.clone()
                     };
-                    surface.configure(&device, &config);
-                    present_frame(&surface, &device, &queue);
+                    let at = format!("{name}: race round {round}");
+                    configure(&surface, &device, &config, &at, &errs);
+                    present_frame(&surface, &device, &queue, &at, &errs);
                 }
             });
 
             // Configured for another device, and back.
-            let (other_device, other_queue, other_errors) = self::device(&adapter);
-            surface.configure(&other_device, &config);
-            for _ in 0..FRAMES {
-                present_frame(&surface, &other_device, &other_queue);
+            let at = format!("{name}: configuring for another device");
+            configure(&surface, &other_device, &config, &at, &errs);
+            for i in 0..FRAMES {
+                let at = format!("{name}: other device frame {i}");
+                present_frame(&surface, &other_device, &other_queue, &at, &errs);
             }
-            surface.configure(&device, &config);
-            for _ in 0..FRAMES {
-                present_frame(&surface, &device, &queue);
+            let at = format!("{name}: configuring back");
+            configure(&surface, &device, &config, &at, &errs);
+            for i in 0..FRAMES {
+                let at = format!("{name}: back frame {i}");
+                present_frame(&surface, &device, &queue, &at, &errs);
             }
 
             // Dropped, and created again for the same window.
@@ -519,14 +622,16 @@ mod native {
             let surface = instance
                 .create_surface(Arc::clone(&window))
                 .map_err(|error| error.to_string())?;
-            surface.configure(&device, &config);
-            for _ in 0..FRAMES {
-                present_frame(&surface, &device, &queue);
+            let at = format!("{name}: configuring the recreated surface");
+            configure(&surface, &device, &config, &at, &errs);
+            for i in 0..FRAMES {
+                let at = format!("{name}: recreated frame {i}");
+                present_frame(&surface, &device, &queue, &at, &errs);
             }
 
             drop(surface);
             drop((device, queue, other_device, other_queue));
-            check(adapter.get_info().backend, &[errors, other_errors])?;
+            check(&name, &[errors, other_errors])?;
         }
         Ok(())
     }
