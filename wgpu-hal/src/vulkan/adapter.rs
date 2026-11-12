@@ -244,6 +244,13 @@ pub struct PhysicalDeviceFeatures {
     shader_draw_parameters: Option<vk::PhysicalDeviceShaderDrawParametersFeatures<'static>>,
 }
 
+/// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which `ash` 0.38 does not define.
+pub(super) const DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR: vk::DeviceQueueCreateFlags =
+    vk::DeviceQueueCreateFlags::from_raw(1 << 2);
+
+/// `VK_KHR_internally_synchronized_queues`, which `ash` 0.38 does not define.
+const INTERNALLY_SYNCHRONIZED_QUEUES: &CStr = c"VK_KHR_internally_synchronized_queues";
+
 impl PhysicalDeviceFeatures {
     pub fn get_core(&self) -> vk::PhysicalDeviceFeatures {
         self.core
@@ -2835,10 +2842,18 @@ impl super::Adapter {
     /// # Safety
     ///
     /// - `raw_device` must be created from this adapter.
-    /// - `raw_device` must be created using `family_index`, `enabled_extensions` and `physical_device_features()`
+    /// - `raw_device` must be created with `queue`, `enabled_extensions` and `physical_device_features()`.
     /// - `enabled_extensions` must be a superset of `required_device_extensions()`.
     /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of `raw_device`. If
     ///   `drop_callback` is [`Some`], `raw_device` must be valid until the callback is called.
+    /// - Destroying the device requires that no other code uses the device or its queues, and
+    ///   that code outside wgpu-hal has destroyed every object it created on it.
+    ///
+    /// # Panics
+    ///
+    /// If `queue`'s flags include `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` and
+    /// `enabled_extensions` lacks `VK_KHR_internally_synchronized_queues`, or if `queue` has flags
+    /// and the device lacks `vkGetDeviceQueue2` (Vulkan 1.1).
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn device_from_raw(
         &self,
@@ -2848,9 +2863,21 @@ impl super::Adapter {
         features: wgt::Features,
         limits: &wgt::Limits,
         memory_hints: &wgt::MemoryHints,
-        family_index: u32,
-        queue_index: u32,
+        queue: super::DeviceQueue,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
+        let super::DeviceQueue {
+            family_index,
+            queue_index,
+            create_flags,
+        } = queue;
+        let internally_synchronized =
+            create_flags.contains(DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR);
+        if internally_synchronized && !enabled_extensions.contains(&INTERNALLY_SYNCHRONIZED_QUEUES)
+        {
+            crate::hal_usage_error(
+                "an internally synchronized queue needs VK_KHR_internally_synchronized_queues",
+            );
+        }
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -3193,8 +3220,30 @@ impl super::Adapter {
 
         let raw_queue = {
             profiling::scope!("vkGetDeviceQueue");
-            unsafe { raw_device.get_device_queue(family_index, queue_index) }
+            if create_flags.is_empty() {
+                unsafe { raw_device.get_device_queue(family_index, queue_index) }
+            } else {
+                // A queue created with flags is retrieved with them (VUID-vkGetDeviceQueue-flags-01841).
+                let get_device_queue2 = unsafe {
+                    self.instance
+                        .raw
+                        .get_device_proc_addr(raw_device.handle(), c"vkGetDeviceQueue2".as_ptr())
+                };
+                if get_device_queue2.is_none() {
+                    crate::hal_usage_error("a queue created with flags needs vkGetDeviceQueue2");
+                }
+                let info = vk::DeviceQueueInfo2::default()
+                    .flags(create_flags)
+                    .queue_family_index(family_index)
+                    .queue_index(queue_index);
+                unsafe { raw_device.get_device_queue2(&info) }
+            }
         };
+        // Retrieval flags that differ from the creation flags give no queue, on Mesa.
+        if raw_queue == vk::Queue::null() {
+            log::error!("vkGetDeviceQueue2 returned no queue for {queue:?}");
+            return Err(crate::DeviceError::Unexpected);
+        }
 
         let driver_version = self
             .phd_capabilities
@@ -3223,7 +3272,11 @@ impl super::Adapter {
             queue_flags,
             queue_index,
             raw_queue,
-            queue_lock: Arc::new(super::queue_lock::DeviceQueueLock::new()),
+            queue_lock: (!internally_synchronized).then(|| {
+                let lock: Arc<dyn super::QueueLock> =
+                    Arc::new(super::queue_lock::DeviceQueueLock::new());
+                lock
+            }),
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
@@ -3379,8 +3432,8 @@ impl super::Adapter {
                 features,
                 limits,
                 memory_hints,
-                family_infos[0].queue_family_index,
-                0,
+                super::DeviceQueue::new(family_infos[0].queue_family_index, 0)
+                    .create_flags(family_infos[0].flags),
             )
         }
     }

@@ -11,7 +11,9 @@ const BLOCKED_FOR: Duration = Duration::from_millis(300);
 /// Runs `call` on another thread while this one holds `queue`'s lock: `call` must not finish
 /// until the lock is released, then must.
 fn blocked_by_the_lock<R: Send>(queue: &super::super::Queue, call: impl FnOnce() -> R + Send) -> R {
-    let guard = queue.lock_queue();
+    let guard = queue
+        .lock_queue()
+        .expect("a queue created without flags takes a lock");
     thread::scope(|scope| {
         let call = scope.spawn(call);
         thread::sleep(BLOCKED_FOR);

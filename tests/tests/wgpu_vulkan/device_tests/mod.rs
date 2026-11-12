@@ -1,3 +1,4 @@
+mod internal;
 mod queue_lock;
 
 use std::{

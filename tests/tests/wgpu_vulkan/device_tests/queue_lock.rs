@@ -29,6 +29,7 @@ fn a_submission_waits_for_the_lock_handed_out() {
             // SAFETY: Only the lock is taken.
             let hal = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
             hal.queue_lock()
+                .expect("a queue created without flags takes a lock")
         };
         let guard = QueueLockGuard::new(&*lock);
         let (submitted, submission) = mpsc::channel();
@@ -69,7 +70,10 @@ fn a_raw_submitter_and_wgpu_never_use_the_queue_at_once() {
         let (raw_device, raw_queue, lock) = {
             // SAFETY: The raw submitter takes the queue lock around its queue commands.
             let hal = unsafe { queue.as_hal::<Vulkan>() }.unwrap();
-            (hal.raw_device().clone(), hal.as_raw(), hal.queue_lock())
+            let lock = hal
+                .queue_lock()
+                .expect("a queue created without flags takes a lock");
+            (hal.raw_device().clone(), hal.as_raw(), lock)
         };
         call_log::take();
         thread::scope(|scope| {
