@@ -715,6 +715,8 @@ pub trait Surface: WasmNotSendSync {
     /// # Safety
     ///
     /// - All GPU work using `self` must have been completed.
+    /// - If `self` is configured, every submission to `device`'s queue must have completed, as
+    ///   for [`Queue::wait_for_idle`], or the caller's wait for them must have failed.
     /// - All [`AcquiredSurfaceTexture`]s must have been destroyed.
     /// - All [`Api::TextureView`]s derived from the [`AcquiredSurfaceTexture`]s must have been destroyed.
     /// - The surface `self` must not currently be configured to use any other [`Device`].
@@ -738,6 +740,8 @@ pub trait Surface: WasmNotSendSync {
     /// # Safety
     ///
     /// - All GPU work that uses `surface` must have been completed.
+    /// - Every submission to `device`'s queue must have completed, as for
+    ///   [`Queue::wait_for_idle`], or the caller's wait for them must have failed.
     /// - All [`AcquiredSurfaceTexture`]s must have been destroyed.
     /// - All [`Api::TextureView`]s derived from the [`AcquiredSurfaceTexture`]s must have been destroyed.
     /// - The surface `self` must have been configured on `device`.
@@ -1234,7 +1238,8 @@ pub trait Device: WasmNotSendSync {
     /// returns immediately.
     ///
     /// If `timeout` is not provided, the function will block indefinitely or until
-    /// an error is encountered.
+    /// an error is encountered, except on GL, which gives up after about two seconds, and WebGL,
+    /// which gives up at once.
     ///
     /// Returns `Ok(true)` on success and `Ok(false)` on timeout.
     ///
@@ -1428,10 +1433,17 @@ pub trait Queue: WasmNotSendSync {
     ///
     /// # Safety
     ///
+    /// - Every [`submit`][Queue::submit] to this queue must have completed, or the caller must
+    ///   have waited for the last one's [`Fence`][f] value with [`Device::wait`] and no timeout,
+    ///   with no submission since, and that wait must have given up. Only GL and WebGL give up
+    ///   so; they have no semaphores. Otherwise a pending submission that waits on a semaphore
+    ///   signalled by code that shares the queue could keep this wait from ending.
     /// - Must be externally synchronized with all other queue operations
     ///   ([`submit`][Queue::submit], [`present`][Queue::present],
     ///   [`wait_for_idle`][Queue::wait_for_idle]) on the same queue, and with
     ///   [`Surface::configure`] and [`Surface::unconfigure`] on its device.
+    ///
+    /// [f]: Api::Fence
     unsafe fn wait_for_idle(&self) -> Result<(), DeviceError>;
     unsafe fn get_timestamp_period(&self) -> f32;
 }

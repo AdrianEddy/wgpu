@@ -287,15 +287,24 @@ impl Drop for Queue {
         // reference, its `InternalRef` keeps a scope open, so they wait for the next delivery.
         let _scope = CallbackScope::new(self.device.pending_callbacks());
 
-        // On Vulkan, pending presents are not tracked by fences.
-        // wait_for_idle covers both fence-tracked submissions and pending presents.
-        let result = {
-            // Synchronizes with surfaces being configured on other threads.
-            let _command_indices = self.device.command_indices.write();
-            unsafe { self.raw.wait_for_idle() }
-        };
+        // On Vulkan, pending presents are not tracked by fences: only waiting for the queue to
+        // become idle covers them. The submissions complete first, as `wait_for_idle` requires.
+        // No submission can follow: `Device::get_queue` cannot upgrade to a dropped queue.
+        let last_successful_submission_index = self
+            .device
+            .last_successful_submission_index
+            .load(Ordering::Acquire);
+        let result = self
+            .device
+            .wait_for_submission(last_successful_submission_index)
+            .and_then(|_| {
+                // Synchronizes with surfaces being configured on other threads.
+                let _command_indices = self.device.command_indices.write();
+                unsafe { self.raw.wait_for_idle() }
+            });
         match result {
             Ok(()) => {}
+            // A failed wait skips the idle wait, which would wait for our submissions.
             Err(hal::DeviceError::Lost) => {
                 self.device.handle_hal_error(hal::DeviceError::Lost);
             }
@@ -307,11 +316,6 @@ impl Drop for Queue {
                 panic!("Unexpected error while waiting for queue idle on drop: {e:?}");
             }
         }
-
-        let last_successful_submission_index = self
-            .device
-            .last_successful_submission_index
-            .load(Ordering::Acquire);
 
         let snatch_guard = self.device.snatchable_lock.read();
         let (submission_closures, mapping_closures, blas_compact_ready_closures, queue_empty) =
