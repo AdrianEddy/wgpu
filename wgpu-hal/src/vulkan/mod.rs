@@ -45,7 +45,9 @@ mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;
 pub(crate) use pnext_chain::PnextChain;
-pub use queue_lock::{QueueLock, QueueLockGuard};
+pub use queue_lock::{
+    queue_lock_held_by_current_thread, QueueLock, QueueLockGuard, QueueLockScope,
+};
 
 use alloc::{boxed::Box, ffi::CString, sync::Arc, vec::Vec};
 use core::{
@@ -619,9 +621,11 @@ struct DeviceShared {
     queue_flags: vk::QueueFlags,
     queue_index: u32,
     raw_queue: vk::Queue,
-    /// Serializes host access to `raw_queue` with code outside wgpu-hal: taken around each command
-    /// that accesses it ([`Self::with_queue_lock`]). `None` for an internally synchronized queue.
-    queue_lock: Option<Arc<dyn QueueLock>>,
+    /// Serializes host access to `raw_queue` with code outside wgpu-hal: taken, with
+    /// `queue_scope`, around each command that accesses it ([`Self::with_queue_lock`]). `None` for
+    /// an internally synchronized queue given no lock.
+    queue_lock: Option<Arc<queue_lock::TrackedQueueLock>>,
+    queue_scope: QueueLockScope,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
@@ -653,9 +657,26 @@ struct DeviceShared {
 
 impl DeviceShared {
     /// Runs `f`, a command that accesses `raw_queue`, holding the queue lock, if it has one.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if the calling thread holds the lock already, through wgpu-hal: it would
+    /// wait for itself.
     fn with_queue_lock<R>(&self, f: impl FnOnce() -> R) -> R {
-        let _guard = self.queue_lock.as_deref().map(QueueLockGuard::new);
+        let _guard = self.lock_queue();
         f()
+    }
+
+    /// Takes the queue lock, with the queue's scope, until the guard drops.
+    fn lock_queue(&self) -> Option<QueueLockGuard<'_>> {
+        let lock: &dyn QueueLock = self.queue_lock.as_deref()?;
+        Some(QueueLockGuard::new(lock, self.queue_scope))
+    }
+
+    /// The queue lock, as wgpu-hal hands it out.
+    fn queue_lock(&self) -> Option<Arc<dyn QueueLock>> {
+        let lock: Arc<dyn QueueLock> = self.queue_lock.clone()?;
+        Some(lock)
     }
 }
 
@@ -817,16 +838,28 @@ impl Queue {
     /// call, such as a `log` logger or a debug messenger, take it. `vkQueuePresentKHR` can block in
     /// the driver while wgpu-hal holds it.
     ///
-    /// `None` for a queue created internally synchronized (see [`DeviceQueue::create_flags`]),
-    /// which needs no lock.
+    /// It is the lock given to [`Adapter::device_from_raw`] in [`DeviceQueue::lock`], or wgpu-hal's
+    /// own, wrapped so that debug builds catch a thread that holds it and calls into wgpu-hal, or
+    /// takes it again. `None` for a queue created internally synchronized and given no lock (see
+    /// [`DeviceQueue::create_flags`]), which needs none.
     pub fn queue_lock(&self) -> Option<Arc<dyn QueueLock>> {
-        self.device.queue_lock.clone()
+        self.device.queue_lock()
     }
 
-    /// Takes [`Self::queue_lock`] until the guard drops.
+    /// Takes [`Self::queue_lock`], with this queue's scope, until the guard drops.
     pub fn lock_queue(&self) -> Option<QueueLockGuard<'_>> {
-        self.device.queue_lock.as_deref().map(QueueLockGuard::new)
+        self.device.lock_queue()
     }
+}
+
+/// Panics, in debug builds, if the calling thread holds a queue lock through wgpu-hal: a submission
+/// holds the queue's semaphore lists while it waits for the lock, so a holder that waits for them
+/// deadlocks.
+fn assert_queue_lock_not_held() {
+    debug_assert!(
+        !queue_lock_held_by_current_thread(),
+        "this thread holds the queue lock: a holder must not call into wgpu-hal"
+    );
 }
 
 impl Drop for Queue {
@@ -1713,6 +1746,7 @@ impl Queue {
     }
 
     pub fn add_signal_semaphore(&self, semaphore: vk::Semaphore, semaphore_value: Option<u64>) {
+        assert_queue_lock_not_held();
         let mut guard = self.signal_semaphores.lock();
         if let Some(value) = semaphore_value {
             guard.push_signal(SemaphoreType::Timeline(semaphore, value));
@@ -1726,6 +1760,7 @@ impl Queue {
     /// Returns `true` if the semaphore was found and removed. If the submit
     /// already consumed it, this is a harmless no-op that returns `false`.
     pub fn remove_signal_semaphore(&self, semaphore: vk::Semaphore) -> bool {
+        assert_queue_lock_not_held();
         self.signal_semaphores.lock().remove(semaphore)
     }
 
@@ -1746,6 +1781,7 @@ impl Queue {
         semaphore_value: Option<u64>,
         stage: vk::PipelineStageFlags,
     ) {
+        assert_queue_lock_not_held();
         let mut guard = self.wait_semaphores.lock();
         if let Some(value) = semaphore_value {
             guard.push_wait(SemaphoreType::Timeline(semaphore, value), stage);
@@ -1759,6 +1795,7 @@ impl Queue {
     /// Returns `true` if the semaphore was found and removed. If the submit
     /// already consumed it, this is a no-op that returns `false`.
     pub fn remove_wait_semaphore(&self, semaphore: vk::Semaphore) -> bool {
+        assert_queue_lock_not_held();
         self.wait_semaphores.lock().remove(semaphore)
     }
 
@@ -1786,6 +1823,7 @@ impl Queue {
     ///   or the queue is dropped. Don't read or write the chain during that time.
     ///   Fields the driver wrote during submission may be read afterwards.
     pub unsafe fn set_next_submit_chain(&self, chain: *mut c_void) {
+        assert_queue_lock_not_held();
         *self.next_submit_chain.lock() = Some(PnextChain::new(chain));
     }
 }
@@ -1917,7 +1955,7 @@ struct RawTlasInstance {
 }
 
 /// The queue that [`Adapter::device_from_raw`] gives wgpu-hal.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 #[non_exhaustive]
 pub struct DeviceQueue {
     /// The queue's family.
@@ -1929,8 +1967,15 @@ pub struct DeviceQueue {
     /// With `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which needs
     /// `VK_KHR_internally_synchronized_queues` and its `internallySynchronizedQueues` feature
     /// enabled, the queue synchronizes host access itself, and wgpu-hal takes no lock around its
-    /// commands ([`Queue::queue_lock`] is `None`).
+    /// commands unless given one ([`Queue::queue_lock`] is then `None`).
     pub create_flags: vk::DeviceQueueCreateFlags,
+    /// The lock that wgpu-hal takes around each command on the queue, with the queue's scope: the
+    /// one that code outside wgpu-hal that accesses the device's queues takes too. wgpu-hal
+    /// always takes a lock it is given. Without one, it takes its own, unless the queue is
+    /// internally synchronized.
+    ///
+    /// Several wgpu-hal devices made from one `VkDevice` must be given one lock.
+    pub lock: Option<Arc<dyn QueueLock>>,
 }
 
 impl DeviceQueue {
@@ -1940,13 +1985,31 @@ impl DeviceQueue {
             family_index,
             queue_index,
             create_flags: vk::DeviceQueueCreateFlags::empty(),
+            lock: None,
         }
     }
 
-    /// Sets [`Self::create_flags`].
+    /// Sets the field `create_flags`.
     pub fn create_flags(mut self, create_flags: vk::DeviceQueueCreateFlags) -> Self {
         self.create_flags = create_flags;
         self
+    }
+
+    /// Sets the field `lock`.
+    pub fn lock(mut self, lock: Arc<dyn QueueLock>) -> Self {
+        self.lock = Some(lock);
+        self
+    }
+}
+
+impl fmt::Debug for DeviceQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceQueue")
+            .field("family_index", &self.family_index)
+            .field("queue_index", &self.queue_index)
+            .field("create_flags", &self.create_flags)
+            .field("lock", &self.lock.is_some())
+            .finish()
     }
 }
 

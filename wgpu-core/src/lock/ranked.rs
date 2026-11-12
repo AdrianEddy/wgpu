@@ -136,6 +136,7 @@ impl Drop for LockStateGuard {
 /// locks are not reentrant.
 #[track_caller]
 pub fn assert_no_locks_held() {
+    assert_no_queue_lock_held();
     let _ = LOCK_STATE.try_with(|cell| {
         let state = cell.get();
         if let Some((rank, location)) = state.last_acquired {
@@ -147,6 +148,17 @@ pub fn assert_no_locks_held() {
     });
 }
 
+/// Panics if the calling thread holds a Vulkan queue lock through wgpu-hal: wgpu-hal takes it
+/// inside wgpu-core's locks, so a holder that takes one of them, or waits for a thread that holds
+/// one, deadlocks (see `wgpu_hal::vulkan::QueueLock`).
+fn assert_no_queue_lock_held() {
+    #[cfg(vulkan)]
+    assert!(
+        !hal::vulkan::queue_lock_held_by_current_thread(),
+        "this thread holds a Vulkan queue lock: a holder must not call into wgpu"
+    );
+}
+
 /// Check and record the acquisition of a lock with `new_rank`.
 ///
 /// Check that acquiring a lock with `new_rank` is permitted at this point, and
@@ -154,6 +166,7 @@ pub fn assert_no_locks_held() {
 ///
 /// Return the `LockState` that must be restored when this thread is released.
 fn acquire(new_rank: LockRank, location: &'static Location<'static>) -> LockState {
+    assert_no_queue_lock_held();
     let result = LOCK_STATE.try_with(|cell| {
         let state = cell.get();
         // Initially, it's fine to acquire any lock. So we only

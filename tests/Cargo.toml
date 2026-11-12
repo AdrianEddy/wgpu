@@ -153,4 +153,7 @@ bool_assert_comparison = "allow"
 disallowed_types = "allow"
 
 [lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(wasm_test)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(wasm_test)',
+    'cfg(wgpu_validate_locks_debug)',
+] }

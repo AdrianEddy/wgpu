@@ -4,7 +4,8 @@
 //!
 //! [`load_instance`] loads an instance whose `vkGetDeviceProcAddr` hands out these wrappers. Every
 //! device function that wgpu-hal loads goes through it: `ash::Device`'s tables, and the loaders of
-//! extensions, which resolve their functions through the instance. Each wrapper records its call.
+//! extensions, which resolve their functions through the instance. Each wrapper records its call,
+//! with whether the calling thread held a test's lock ([`set_held`]).
 //!
 //! The wrappers cover every command that `vk.xml` marks as requiring host access to its queue to
 //! be externally synchronized (`externsync="maybe"`), and `vkSetDebugUtilsObjectNameEXT` naming a
@@ -13,6 +14,7 @@
 
 use alloc::vec::Vec;
 use core::{
+    cell::Cell,
     ffi::{c_char, c_void, CStr},
     mem, ptr,
     sync::atomic::{AtomicUsize, Ordering},
@@ -43,6 +45,8 @@ pub enum Kind {
 pub struct Call {
     pub name: &'static str,
     pub kind: Kind,
+    /// Whether the calling thread held a test's lock.
+    pub locked: bool,
     /// The queue that the call accesses, or a null handle.
     pub queue: vk::Queue,
     /// How many queue commands were in progress, on any thread, when the call started.
@@ -64,6 +68,21 @@ static REAL_GET_DEVICE_PROC_ADDR: Mutex<Option<vk::PFN_vkGetDeviceProcAddr>> = M
 static IN_QUEUE_COMMAND: AtomicUsize = AtomicUsize::new(0);
 static MOST_AT_ONCE: AtomicUsize = AtomicUsize::new(0);
 
+std::thread_local! {
+    static HELD: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Records whether the calling thread holds a test's lock.
+pub fn set_held(held: bool) {
+    HELD.with(|count| {
+        count.set(if held {
+            count.get() + 1
+        } else {
+            count.get() - 1
+        })
+    });
+}
+
 /// Takes what was recorded since the last call, and starts recording afresh.
 pub fn take() -> Recorded {
     let mut calls = CALLS.lock().unwrap();
@@ -79,10 +98,12 @@ pub fn mark(name: &'static str) {
 }
 
 fn record(name: &'static str, kind: Kind, queue: vk::Queue) {
+    let locked = HELD.with(|count| count.get() > 0);
     let in_flight = IN_QUEUE_COMMAND.load(Ordering::SeqCst);
     CALLS.lock().unwrap().push(Call {
         name,
         kind,
+        locked,
         queue,
         in_flight,
     });

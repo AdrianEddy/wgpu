@@ -5,6 +5,7 @@
 //! Run them only under the GPU lock: the CPU suites leave out every test whose name contains
 //! `device_tests::`. They watch the Vulkan calls themselves, through [`call_log`].
 
+mod injected;
 mod queue_lock;
 mod teardown;
 
