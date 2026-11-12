@@ -17,6 +17,25 @@ impl PnextChain {
         Self(chain.cast())
     }
 
+    /// Whether the chain holds a structure of type `s_type`.
+    ///
+    /// # Safety
+    ///
+    /// The chain must still be valid.
+    pub(crate) unsafe fn contains(&self, s_type: vk::StructureType) -> bool {
+        let mut next = self.0;
+        while !next.is_null() {
+            // SAFETY: A valid chain, as our caller guarantees.
+            unsafe {
+                if (*next).s_type == s_type {
+                    return true;
+                }
+                next = (*next).p_next;
+            }
+        }
+        false
+    }
+
     /// Splices this chain in front of `existing`, the current `p_next` of a
     /// Vulkan info struct, and returns the new chain head.
     ///

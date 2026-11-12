@@ -885,6 +885,17 @@ impl super::Device {
         &self.shared.enabled_extensions
     }
 
+    /// Whether presents signal fences: whether the device has `swapchainMaintenance1`, from
+    /// `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1`. A swapchain's teardown
+    /// then waits on the fences of its presents, without the queue lock, and for nothing else;
+    /// otherwise it waits for the queue to become idle, holding the lock.
+    ///
+    /// For wgpu's own tests and diagnostics, not a stable API.
+    #[doc(hidden)]
+    pub fn presents_signal_fences(&self) -> bool {
+        self.shared.present_fences
+    }
+
     pub fn shared_instance(&self) -> &super::InstanceShared {
         &self.shared.instance
     }

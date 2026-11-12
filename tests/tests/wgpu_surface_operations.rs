@@ -163,6 +163,19 @@ mod native {
     fn device(adapter: &wgpu::Adapter) -> (wgpu::Device, wgpu::Queue, Errors) {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+        // Which wait a Vulkan swapchain's teardown makes: on its presents' fences, or for the queue.
+        #[cfg(any(windows, target_os = "linux"))]
+        {
+            // SAFETY: Only inspected.
+            if let Some(hal) = unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() } {
+                let path = if hal.presents_signal_fences() {
+                    "the teardown waits on present fences"
+                } else {
+                    "no present fences: the teardown waits for the queue"
+                };
+                println!("{}: {path}", adapter_name(adapter));
+            }
+        }
         let errors = Errors::default();
         let sink = Arc::clone(&errors);
         device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {

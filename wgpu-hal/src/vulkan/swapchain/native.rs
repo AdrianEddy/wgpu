@@ -1,6 +1,6 @@
 //! Vulkan Surface and Swapchain implementation using native Vulkan surfaces.
 
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::any::Any;
 
 use ash::{google, khr, vk};
@@ -324,6 +324,7 @@ impl Surface for NativeSurface {
             acquire_semaphores,
             next_acquire_index: 0,
             present_semaphores,
+            present_fences: device.shared.present_fences.then(PresentFences::default),
             discarded: None,
             acquired_suboptimal: false,
             next_present_time: None,
@@ -387,6 +388,10 @@ pub(crate) struct NativeSwapchain {
     /// [`vkAcquireNextImageKHR`]: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#vkAcquireNextImageKHR
     present_semaphores: Vec<Arc<Mutex<SwapchainPresentSemaphores>>>,
 
+    /// The fences that the presents to the swapchain signal, on which its teardown waits, where
+    /// presents signal fences ([`DeviceShared::present_fences`]).
+    present_fences: Option<PresentFences>,
+
     /// The texture last discarded, which the next [`acquire`] returns.
     ///
     /// Vulkan has no core way to give an acquired image back to the presentation engine without
@@ -426,6 +431,124 @@ impl Drop for NativeSwapchain {
     }
 }
 
+/// `VK_ERROR_PRESENT_TIMING_QUEUE_FULL_EXT` (`VK_EXT_present_timing`), which `ash` 0.38 does not
+/// define. wgpu-hal does not use the extension, but a caller's present chain may.
+const ERROR_PRESENT_TIMING_QUEUE_FULL_EXT: vk::Result = vk::Result::from_raw(-1_000_208_000);
+
+/// The fences that a swapchain's presents signal, with `swapchainMaintenance1`
+/// (`VkSwapchainPresentFenceInfoKHR`). A present's fence signals once the present's queue
+/// operations have completed and the presentation engine has taken its references, and before the
+/// fence of any later present to the swapchain on the same queue. The swapchain's teardown waits
+/// on them, and so for its presents alone, without the queue lock.
+#[derive(Debug, Default)]
+struct PresentFences {
+    /// The fences of the presents enqueued, oldest first.
+    pending: VecDeque<vk::Fence>,
+    /// Unsignaled fences that no queue operation uses, for the next presents.
+    free: Vec<vk::Fence>,
+    /// The fences of presents that failed in a way that leaves unsaid whether they were
+    /// enqueued: they may never signal.
+    unknown: Vec<vk::Fence>,
+    /// Whether a present went without a fence of the swapchain's: creating one failed, or the
+    /// caller's present chain gave its own.
+    unfenced: bool,
+}
+
+impl PresentFences {
+    /// A fence for the next present: one of a present that has completed, reset, else a free
+    /// one, else a new one. `None`, and the swapchain's teardown waits for the queue instead, if
+    /// creating one failed.
+    fn next(&mut self, device: &ash::Device) -> Option<vk::Fence> {
+        // Fences signal in the order of their presents: the oldest unsignaled one ends the search.
+        while let Some(&oldest) = self.pending.front() {
+            // SAFETY: A fence of the device.
+            if unsafe { device.get_fence_status(oldest) } != Ok(true) {
+                break;
+            }
+            // SAFETY: Signaled, so no queue operation uses it.
+            if unsafe { device.reset_fences(&[oldest]) }.is_err() {
+                break;
+            }
+            self.pending.pop_front();
+            self.free.push(oldest);
+        }
+        if let Some(fence) = self.free.pop() {
+            return Some(fence);
+        }
+        // SAFETY: A valid create info.
+        match unsafe { device.create_fence(&vk::FenceCreateInfo::default(), None) } {
+            Ok(fence) => Some(fence),
+            Err(error) => {
+                log::warn!("Presenting without a fence, as creating one failed: {error}");
+                self.unfenced = true;
+                None
+            }
+        }
+    }
+
+    /// Files `fence` after the present that it was given to returned `result`.
+    fn presented(&mut self, fence: vk::Fence, result: Result<bool, vk::Result>) {
+        match result {
+            // Enqueued: rejected by the presentation engine, the present's queue operations still
+            // are. A lost device's fence waits return.
+            Ok(_)
+            | Err(
+                vk::Result::ERROR_OUT_OF_DATE_KHR
+                | vk::Result::ERROR_SURFACE_LOST_KHR
+                | vk::Result::ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT
+                | ERROR_PRESENT_TIMING_QUEUE_FULL_EXT
+                | vk::Result::ERROR_DEVICE_LOST,
+            ) => self.pending.push_back(fence),
+            // Not enqueued, and the fence unaffected.
+            Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY) => {
+                self.free.push(fence)
+            }
+            Err(_) => self.unknown.push(fence),
+        }
+    }
+
+    /// Waits on the fences of the presents enqueued, without the queue lock. Whether that waited
+    /// for every present to the swapchain: `false` if a present went without a fence of the
+    /// swapchain's or with one of unknown fate, or the wait failed. The caller then waits for the
+    /// queue to become idle.
+    ///
+    /// # Safety
+    ///
+    /// The fences are `device`'s.
+    unsafe fn wait(&mut self, device: &ash::Device) -> bool {
+        let waited = self.pending.is_empty()
+            // SAFETY: Fences of the device, of presents enqueued.
+            || match unsafe {
+                device.wait_for_fences(self.pending.make_contiguous(), true, u64::MAX)
+            } {
+                // A lost device's fences are as good as signaled.
+                Ok(()) | Err(vk::Result::ERROR_DEVICE_LOST) => true,
+                Err(error) => {
+                    log::warn!("Waiting on the presents' fences failed: {error}");
+                    false
+                }
+            };
+        waited && !self.unfenced && self.unknown.is_empty()
+    }
+
+    /// Destroys every fence.
+    ///
+    /// # Safety
+    ///
+    /// No queue operation uses them.
+    unsafe fn destroy(&mut self, device: &ash::Device) {
+        for fence in self
+            .pending
+            .drain(..)
+            .chain(self.free.drain(..))
+            .chain(self.unknown.drain(..))
+        {
+            // SAFETY: Our caller's contract.
+            unsafe { device.destroy_fence(fence, None) };
+        }
+    }
+}
+
 /// Destroy the swapchain semaphores that are no longer referenced by a live
 /// surface texture. A still-referenced semaphore is skipped, as the texture
 /// may still submit work using it.
@@ -456,7 +579,13 @@ impl Swapchain for NativeSwapchain {
         profiling::scope!("Swapchain::release_resources");
         // Every present was made on the swapchain's device's queue.
         debug_assert!(Arc::ptr_eq(&self.device, &device.shared));
-        {
+        // The fences of the presents signal once their queue operations have completed: waiting
+        // on them takes no queue lock, and waits for nothing else.
+        let presents_done = self.present_fences.as_mut().is_some_and(|fences| {
+            profiling::scope!("vkWaitForFences");
+            unsafe { fences.wait(&self.device.raw) }
+        });
+        if !presents_done {
             profiling::scope!("vkQueueWaitIdle");
             // The queue's idle wait covers its presents' queue operations (Vulkan 1.4.324).
             let _ = self
@@ -465,6 +594,10 @@ impl Swapchain for NativeSwapchain {
                     self.device.raw.queue_wait_idle(self.device.raw_queue)
                 })
                 .map_err(map_host_device_oom_and_lost_err);
+        }
+        if let Some(fences) = self.present_fences.as_mut() {
+            // SAFETY: Every present has completed, so no queue operation uses its fence.
+            unsafe { fences.destroy(&self.device.raw) };
         }
 
         if let Some(fence) = self.fence {
@@ -690,7 +823,31 @@ impl Swapchain for NativeSwapchain {
             vk_info
         };
 
-        if let Some(chain) = self.next_present_chain.take() {
+        let next_present_chain = self.next_present_chain.take();
+        // The present signals a fence of the swapchain's, unless the caller's chain gives it one.
+        // SAFETY: The contract on `Surface::set_next_present_chain()` keeps the chain valid.
+        let present_fence = self.present_fences.as_mut().and_then(|fences| {
+            let callers_fence = next_present_chain.as_ref().is_some_and(|chain| unsafe {
+                chain.contains(vk::StructureType::SWAPCHAIN_PRESENT_FENCE_INFO_EXT)
+            });
+            if callers_fence {
+                fences.unfenced = true;
+                None
+            } else {
+                fences.next(&self.device.raw)
+            }
+        });
+        let present_fences;
+        let mut present_fence_info;
+        if let Some(fence) = present_fence {
+            present_fences = [fence];
+            // `VkSwapchainPresentFenceInfoKHR`, whose structure type has the EXT one's value.
+            present_fence_info =
+                vk::SwapchainPresentFenceInfoEXT::default().fences(&present_fences);
+            vk_info = vk_info.push_next(&mut present_fence_info);
+        }
+
+        if let Some(chain) = next_present_chain {
             // SAFETY: The contract on `Surface::set_next_present_chain()` keeps the chain
             // valid and unaliased until this present completes.
             vk_info.p_next = unsafe { chain.splice_into(vk_info.p_next) };
@@ -703,6 +860,9 @@ impl Swapchain for NativeSwapchain {
             let presented = queue
                 .device
                 .with_queue_lock(|| unsafe { self.functor.queue_present(queue.raw, &vk_info) });
+            if let (Some(fences), Some(fence)) = (self.present_fences.as_mut(), present_fence) {
+                fences.presented(fence, presented);
+            }
             presented.map_err(|error| {
                 match error {
                     vk::Result::ERROR_OUT_OF_DATE_KHR => crate::SurfaceError::Outdated,

@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use core::{
     cell::Cell,
     ffi::{c_char, c_void, CStr},
-    mem, ptr,
+    mem, ptr, slice,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use std::sync::Mutex;
@@ -51,6 +51,9 @@ pub struct Call {
     pub queue: vk::Queue,
     /// How many queue commands were in progress, on any thread, when the call started.
     pub in_flight: usize,
+    /// The fences that `vkWaitForFences` waits on, or that a present signals
+    /// (`VkSwapchainPresentFenceInfoKHR`).
+    pub fences: Vec<vk::Fence>,
 }
 
 /// What was recorded between two [`take`]s.
@@ -98,6 +101,10 @@ pub fn mark(name: &'static str) {
 }
 
 fn record(name: &'static str, kind: Kind, queue: vk::Queue) {
+    record_with_fences(name, kind, queue, Vec::new());
+}
+
+fn record_with_fences(name: &'static str, kind: Kind, queue: vk::Queue, fences: Vec<vk::Fence>) {
     let locked = HELD.with(|count| count.get() > 0);
     let in_flight = IN_QUEUE_COMMAND.load(Ordering::SeqCst);
     CALLS.lock().unwrap().push(Call {
@@ -106,6 +113,7 @@ fn record(name: &'static str, kind: Kind, queue: vk::Queue) {
         locked,
         queue,
         in_flight,
+        fences,
     });
 }
 
@@ -130,7 +138,17 @@ unsafe fn real<F: Copy>(name: &'static str) -> F {
 
 /// Runs `f`, a queue command, counting the queue commands in progress.
 fn queue_command<R>(name: &'static str, queue: vk::Queue, f: impl FnOnce() -> R) -> R {
-    record(name, Kind::Queue, queue);
+    queue_command_with_fences(name, queue, Vec::new(), f)
+}
+
+/// Runs `f`, a queue command that signals `fences`, counting the queue commands in progress.
+fn queue_command_with_fences<R>(
+    name: &'static str,
+    queue: vk::Queue,
+    fences: Vec<vk::Fence>,
+    f: impl FnOnce() -> R,
+) -> R {
+    record_with_fences(name, Kind::Queue, queue, fences);
     let now = IN_QUEUE_COMMAND.fetch_add(1, Ordering::SeqCst) + 1;
     MOST_AT_ONCE.fetch_max(now, Ordering::SeqCst);
     let result = f();
@@ -182,11 +200,36 @@ unsafe extern "system" fn queue_bind_sparse(
     })
 }
 
+/// The fences that a present's `VkSwapchainPresentFenceInfoKHR` gives, if it has one.
+///
+/// # Safety
+///
+/// `info` is valid, with a valid chain.
+unsafe fn present_fences(info: *const vk::PresentInfoKHR<'_>) -> Vec<vk::Fence> {
+    // SAFETY: A valid chain, as our caller guarantees.
+    unsafe {
+        let mut next = (*info).p_next.cast::<vk::BaseInStructure<'_>>();
+        while !next.is_null() {
+            if (*next).s_type == vk::StructureType::SWAPCHAIN_PRESENT_FENCE_INFO_EXT {
+                let fences = &*next.cast::<vk::SwapchainPresentFenceInfoEXT<'_>>();
+                if fences.swapchain_count == 0 {
+                    return Vec::new();
+                }
+                return slice::from_raw_parts(fences.p_fences, fences.swapchain_count as usize)
+                    .to_vec();
+            }
+            next = (*next).p_next;
+        }
+    }
+    Vec::new()
+}
+
 unsafe extern "system" fn queue_present(
     queue: vk::Queue,
     info: *const vk::PresentInfoKHR<'_>,
 ) -> vk::Result {
-    queue_command("vkQueuePresentKHR", queue, || unsafe {
+    let fences = unsafe { present_fences(info) };
+    queue_command_with_fences("vkQueuePresentKHR", queue, fences, || unsafe {
         real::<vk::PFN_vkQueuePresentKHR>("vkQueuePresentKHR")(queue, info)
     })
 }
@@ -280,7 +323,17 @@ unsafe extern "system" fn wait_for_fences(
     wait_all: vk::Bool32,
     timeout: u64,
 ) -> vk::Result {
-    record("vkWaitForFences", Kind::FenceWait, vk::Queue::null());
+    let waited = if count == 0 {
+        Vec::new()
+    } else {
+        unsafe { slice::from_raw_parts(fences, count as usize) }.to_vec()
+    };
+    record_with_fences(
+        "vkWaitForFences",
+        Kind::FenceWait,
+        vk::Queue::null(),
+        waited,
+    );
     unsafe {
         real::<vk::PFN_vkWaitForFences>("vkWaitForFences")(device, count, fences, wait_all, timeout)
     }
