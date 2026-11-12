@@ -25,6 +25,9 @@ Otherwise, we manage a pool of `VkFence` objects behind each `hal::Fence`.
 !*/
 
 mod adapter;
+#[cfg(any(test, feature = "vulkan_test_hooks"))]
+#[doc(hidden)]
+pub mod call_log;
 mod command;
 pub mod conv;
 mod descriptor;
@@ -35,12 +38,14 @@ mod drm;
 mod instance;
 mod memory;
 mod pnext_chain;
+mod queue_lock;
 mod sampler;
 mod semaphore_list;
 mod swapchain;
 
 pub use adapter::PhysicalDeviceFeatures;
 pub(crate) use pnext_chain::PnextChain;
+pub use queue_lock::{QueueLock, QueueLockGuard};
 
 use alloc::{boxed::Box, ffi::CString, sync::Arc, vec::Vec};
 use core::{
@@ -614,6 +619,9 @@ struct DeviceShared {
     queue_flags: vk::QueueFlags,
     queue_index: u32,
     raw_queue: vk::Queue,
+    /// Serializes host access to `raw_queue` with code outside wgpu-hal: taken around each command
+    /// that accesses it ([`Self::with_queue_lock`]).
+    queue_lock: Arc<dyn QueueLock>,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
@@ -641,6 +649,14 @@ struct DeviceShared {
     // The `drop_guard` field must be the last field of this struct so it is dropped last.
     // Do not add new fields after it.
     drop_guard: Option<crate::DropGuard>,
+}
+
+impl DeviceShared {
+    /// Runs `f`, a command that accesses `raw_queue`, holding the queue lock.
+    fn with_queue_lock<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _guard = QueueLockGuard::new(&*self.queue_lock);
+        f()
+    }
 }
 
 impl Drop for DeviceShared {
@@ -786,8 +802,27 @@ impl fmt::Debug for Queue {
 }
 
 impl Queue {
+    /// The queue. Code outside wgpu-hal that accesses it takes [`Self::queue_lock`] around each
+    /// command it makes, and only while the device exists.
     pub fn as_raw(&self) -> vk::Queue {
         self.raw
+    }
+
+    /// The lock that wgpu-hal takes around each command that accesses this queue
+    /// (`vkQueueSubmit`, `vkQueuePresentKHR`, `vkQueueWaitIdle`), for the length of that call.
+    ///
+    /// Code outside wgpu-hal that accesses the queue takes it around each of its own commands,
+    /// such as FFmpeg's `lock_queue`/`unlock_queue` callbacks. Its holder must not call into wgpu
+    /// or wgpu-hal, nor wait for a submission of theirs. Nor may code that runs inside a Vulkan
+    /// call, such as a `log` logger or a debug messenger, take it. `vkQueuePresentKHR` can block in
+    /// the driver while wgpu-hal holds it.
+    pub fn queue_lock(&self) -> Arc<dyn QueueLock> {
+        Arc::clone(&self.device.queue_lock)
+    }
+
+    /// Takes [`Self::queue_lock`] until the guard drops.
+    pub fn lock_queue(&self) -> QueueLockGuard<'_> {
+        QueueLockGuard::new(&*self.device.queue_lock)
     }
 }
 
@@ -1639,13 +1674,13 @@ impl crate::Queue for Queue {
         }
 
         profiling::scope!("vkQueueSubmit");
-        unsafe {
-            self.device
-                .raw
-                .queue_submit(self.raw, &[vk_info], fence_raw)
-                .map_err(map_host_device_oom_and_lost_err)?
-        };
-        Ok(())
+        self.device
+            .with_queue_lock(|| unsafe {
+                self.device
+                    .raw
+                    .queue_submit(self.raw, &[vk_info], fence_raw)
+            })
+            .map_err(map_host_device_oom_and_lost_err)
     }
 
     unsafe fn present(
@@ -1663,7 +1698,8 @@ impl crate::Queue for Queue {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
-        unsafe { self.device.raw.queue_wait_idle(self.raw) }
+        self.device
+            .with_queue_lock(|| unsafe { self.device.raw.queue_wait_idle(self.raw) })
             .map_err(map_host_device_oom_and_lost_err)
     }
 }

@@ -3,7 +3,7 @@
 use alloc::vec::Vec;
 use core::time::Duration;
 
-use super::calls::{self, Kind};
+use crate::vulkan::call_log::{self, Kind};
 use crate::{Device as _, Queue as _, Surface as _};
 
 /// Configures a headless surface, presents to it, configures it again, discards a frame and
@@ -23,7 +23,7 @@ fn the_teardown_waits_for_the_presenting_queue_not_the_device() {
             let config = super::config(&caps);
             // SAFETY: The device's own fence.
             let fence = unsafe { device.create_fence() }.unwrap();
-            calls::take();
+            call_log::take();
 
             // SAFETY: Each call meets wgpu-hal's requirements: every submission completes before
             // the surface is configured again or unconfigured, and before the idle wait.
@@ -31,24 +31,24 @@ fn the_teardown_waits_for_the_presenting_queue_not_the_device() {
                 surface.configure(&device, &config).unwrap();
                 super::present_frame(&device, &queue, &surface, &fence, 1);
                 super::present_frame(&device, &queue, &surface, &fence, 2);
-                calls::mark("unconfigure");
+                call_log::mark("unconfigure");
                 surface.unconfigure(&device);
-                calls::mark("unconfigured");
+                call_log::mark("unconfigured");
                 surface.configure(&device, &config).unwrap();
                 super::present_frame(&device, &queue, &surface, &fence, 3);
                 let acquired = surface
                     .acquire_texture(Some(Duration::from_secs(1)), &fence)
                     .unwrap();
                 surface.discard_texture(acquired.texture);
-                calls::mark("unconfigure");
+                call_log::mark("unconfigure");
                 surface.unconfigure(&device);
-                calls::mark("unconfigured");
+                call_log::mark("unconfigured");
                 queue.wait_for_idle().unwrap();
                 device.destroy_fence(fence);
             }
             drop((queue, device));
 
-            let calls = calls::take().calls;
+            let calls = call_log::take().calls;
             check_teardowns(&calls, raw_queue);
             super::check_destroyed(&calls);
         }
@@ -57,7 +57,7 @@ fn the_teardown_waits_for_the_presenting_queue_not_the_device() {
 
 /// Checks that each teardown in `calls`, between the marks `unconfigure` and `unconfigured`,
 /// waits for `queue` to become idle, and that nothing waits for the whole device.
-fn check_teardowns(calls: &[calls::Call], queue: ash::vk::Queue) {
+fn check_teardowns(calls: &[call_log::Call], queue: ash::vk::Queue) {
     assert!(
         !calls.iter().any(|call| call.kind == Kind::DeviceWaitIdle),
         "vkDeviceWaitIdle was called: {calls:#?}"

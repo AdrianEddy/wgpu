@@ -459,12 +459,12 @@ impl Swapchain for NativeSwapchain {
         {
             profiling::scope!("vkQueueWaitIdle");
             // The queue's idle wait covers its presents' queue operations (Vulkan 1.4.324).
-            let _ = unsafe {
-                self.device
-                    .raw
-                    .queue_wait_idle(self.device.raw_queue)
-                    .map_err(map_host_device_oom_and_lost_err)
-            };
+            let _ = self
+                .device
+                .with_queue_lock(|| unsafe {
+                    self.device.raw.queue_wait_idle(self.device.raw_queue)
+                })
+                .map_err(map_host_device_oom_and_lost_err);
         }
 
         if let Some(fence) = self.fence {
@@ -696,9 +696,14 @@ impl Swapchain for NativeSwapchain {
             vk_info.p_next = unsafe { chain.splice_into(vk_info.p_next) };
         }
 
+        // Presented with the lock of the queue it is presented on, the swapchain's device's.
+        debug_assert!(Arc::ptr_eq(&self.device, &queue.device));
         let suboptimal = {
             profiling::scope!("vkQueuePresentKHR");
-            unsafe { self.functor.queue_present(queue.raw, &vk_info) }.map_err(|error| {
+            let presented = queue
+                .device
+                .with_queue_lock(|| unsafe { self.functor.queue_present(queue.raw, &vk_info) });
+            presented.map_err(|error| {
                 match error {
                     vk::Result::ERROR_OUT_OF_DATE_KHR => crate::SurfaceError::Outdated,
                     vk::Result::ERROR_SURFACE_LOST_KHR => crate::SurfaceError::Lost,

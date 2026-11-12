@@ -864,8 +864,21 @@ impl super::Device {
         self.shared.physical_device
     }
 
+    /// The device's queue. Code outside wgpu-hal that accesses it takes [`Self::queue_lock`] around
+    /// each command it makes, and only while the device exists.
     pub fn raw_queue(&self) -> vk::Queue {
         self.shared.raw_queue
+    }
+
+    /// The lock that wgpu-hal takes around each command that accesses the device's queue (see
+    /// [`super::Queue::queue_lock`]).
+    pub fn queue_lock(&self) -> Arc<dyn super::QueueLock> {
+        Arc::clone(&self.shared.queue_lock)
+    }
+
+    /// Takes [`Self::queue_lock`] until the guard drops.
+    pub fn lock_queue(&self) -> super::QueueLockGuard<'_> {
+        super::QueueLockGuard::new(&*self.shared.queue_lock)
     }
 
     pub fn enabled_device_extensions(&self) -> &[&'static CStr] {

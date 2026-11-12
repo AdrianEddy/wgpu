@@ -161,6 +161,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - The noop backend's surfaces can now be configured, and acquire, present and discard textures from a swapchain whose books they keep. Its `Api::Surface`, `Texture` and `SurfaceTexture` are now types of their own, so code that names them through `as_hal::<Noop>` must change. An enabled noop adapter now satisfies `RequestAdapterOptions::compatible_surface`: with the default `device_type`, `request_adapter` returns it when no other adapter is compatible, where it failed with `NotFound`. By @AdrianEddy.
 - Noop surfaces check requirements that `wgpu_hal::Surface` and `wgpu_hal::Queue` place on their callers, and record each one broken as a `wgpu_hal::noop::SurfaceViolation`, returned by `Surface::take_violations`. The noop `Api::TextureView` is now a type of its own. By @AdrianEddy.
 - Add the `noop_test_hooks` feature to `wgpu-hal`, for wgpu's own tests: it lets them run code inside, and fail, calls on noop surfaces, devices and queues. By @AdrianEddy.
+- Add `wgpu_hal::vulkan::Queue::queue_lock` and `lock_queue`, the lock that wgpu-hal takes around each command on its queue, for code that submits to the same `VkQueue`, such as FFmpeg or an OpenXR runtime. By @AdrianEddy.
 
 #### DX12
 

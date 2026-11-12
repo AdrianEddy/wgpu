@@ -3,9 +3,9 @@
 //! there is no Vulkan or no headless surface, and run on CPU adapters too.
 //!
 //! Run them only under the GPU lock: the CPU suites leave out every test whose name contains
-//! `device_tests::`. They watch the Vulkan calls themselves, through [`calls`].
+//! `device_tests::`. They watch the Vulkan calls themselves, through [`call_log`].
 
-pub(super) mod calls;
+mod queue_lock;
 mod teardown;
 
 use alloc::{vec, vec::Vec};
@@ -14,12 +14,13 @@ use std::sync::Mutex;
 
 use ash::{ext, vk};
 
+use super::call_log;
 use crate::{Adapter as _, CommandEncoder as _, Device as _, Instance as _, Queue as _};
 
-/// One test at a time: the tests share [`calls`]' records.
+/// One test at a time: the tests share [`call_log`]'s records.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
-/// An instance with `flags`, whose device functions go through [`calls`], and a headless surface
+/// An instance with `flags`, whose device functions go through [`call_log`], and a headless surface
 /// of it. `None`, having printed why, without Vulkan or `VK_EXT_headless_surface`.
 fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, super::Surface)> {
     // SAFETY: Loading the Vulkan library has no requirements.
@@ -59,7 +60,7 @@ fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, supe
         .unwrap()
         .handle();
     // SAFETY: Created from `entry` just now.
-    let raw = unsafe { calls::load_instance(&entry, handle) };
+    let raw = unsafe { call_log::load_instance(&entry, handle) };
     let headless = ext::headless_surface::Instance::new(&entry, &raw);
     // SAFETY: Created from `entry` with wgpu-hal's desired extensions; wgpu-hal destroys it.
     let instance = unsafe {
@@ -160,8 +161,45 @@ fn open(adapter: &super::Adapter) -> (super::Device, super::Queue) {
     (open.device, open.queue)
 }
 
-/// Acquires a frame, moves it to the present state, submits that, presents it, and waits on
-/// `fence` for the submission.
+/// Moves `texture` to the present state, submits that, setting `fence` to `value`, and waits for
+/// it.
+///
+/// # Safety
+///
+/// `texture` was acquired from a surface configured for `device`.
+unsafe fn submit_for_present(
+    device: &super::Device,
+    queue: &super::Queue,
+    texture: &super::SurfaceTexture,
+    fence: &super::Fence,
+    value: crate::FenceValue,
+) {
+    // SAFETY: Our caller's contract; the encoder records only the transition.
+    unsafe {
+        let mut encoder = device
+            .create_command_encoder(&crate::CommandEncoderDescriptor { label: None, queue })
+            .unwrap();
+        encoder.begin_encoding(None).unwrap();
+        encoder.transition_textures(iter::once(crate::TextureBarrier {
+            texture: texture.borrow(),
+            range: wgt::ImageSubresourceRange::default(),
+            usage: crate::StateTransition {
+                from: wgt::TextureUses::UNINITIALIZED,
+                to: wgt::TextureUses::PRESENT,
+            },
+            queue_family_ownership_transfer: None,
+        }));
+        let command_buffer = encoder.end_encoding().unwrap();
+        queue
+            .submit(&[&command_buffer], &[texture], (fence, value))
+            .unwrap();
+        assert!(device.wait(fence, value, None).unwrap());
+        encoder.reset_all(iter::once(command_buffer));
+    }
+}
+
+/// Acquires a frame, moves it to the present state, submits that, setting `fence` to `value`,
+/// waits for it, and presents the frame.
 ///
 /// # Safety
 ///
@@ -173,43 +211,25 @@ unsafe fn present_frame(
     fence: &super::Fence,
     value: crate::FenceValue,
 ) {
-    // SAFETY: Our caller's contract; the encoder records only the transition.
+    // SAFETY: Our caller's contract.
     unsafe {
         let acquired =
             crate::Surface::acquire_texture(surface, Some(Duration::from_secs(1)), fence).unwrap();
-        let mut encoder = device
-            .create_command_encoder(&crate::CommandEncoderDescriptor { label: None, queue })
-            .unwrap();
-        encoder.begin_encoding(None).unwrap();
-        encoder.transition_textures(iter::once(crate::TextureBarrier {
-            texture: acquired.texture.borrow(),
-            range: wgt::ImageSubresourceRange::default(),
-            usage: crate::StateTransition {
-                from: wgt::TextureUses::UNINITIALIZED,
-                to: wgt::TextureUses::PRESENT,
-            },
-            queue_family_ownership_transfer: None,
-        }));
-        let command_buffer = encoder.end_encoding().unwrap();
-        queue
-            .submit(&[&command_buffer], &[&acquired.texture], (fence, value))
-            .unwrap();
+        submit_for_present(device, queue, &acquired.texture, fence, value);
         queue.present(surface, acquired.texture).unwrap();
-        assert!(device.wait(fence, value, None).unwrap());
-        encoder.reset_all(iter::once(command_buffer));
     }
 }
 
 /// Checks the destruction of the device in `calls`: `vkDestroyDevice` is the last device call,
 /// and no queue command was in progress then.
-fn check_destroyed(calls: &[calls::Call]) {
+fn check_destroyed(calls: &[call_log::Call]) {
     let last = calls
         .iter()
-        .rposition(|call| call.kind != calls::Kind::Mark)
+        .rposition(|call| call.kind != call_log::Kind::Mark)
         .unwrap();
     assert_eq!(
         calls[last].kind,
-        calls::Kind::DestroyDevice,
+        call_log::Kind::DestroyDevice,
         "the device was not destroyed last: {calls:#?}"
     );
     assert_eq!(calls[last].in_flight, 0, "{calls:#?}");
