@@ -49,7 +49,7 @@ use crate::{
         TextureInitTrackerAction,
     },
     instance::{Adapter, RequestDeviceError},
-    lock::{rank, Mutex, RwLock},
+    lock::{rank, Mutex, RwLock, RwLockWriteGuard},
     pipeline::{
         self, shader_module_error_into_compilation_info, ColorStateError, PassthroughInterface,
     },
@@ -469,6 +469,10 @@ impl Drop for Device {
         }
     }
 }
+
+/// How many times [`Device::lock_after_submissions`] waits for the device's submissions without
+/// holding `command_indices`, while other threads keep submitting, before it waits holding it.
+const LOCK_AFTER_SUBMISSIONS_TRIES: u32 = 3;
 
 impl Device {
     pub fn features(&self) -> &wgt::Features {
@@ -1030,6 +1034,65 @@ impl Device {
         self.deferred_resource_destruction();
 
         maintain_result
+    }
+
+    /// Waits on the host, with no timeout, for the submission `index` to complete.
+    ///
+    /// Returns `Ok(false)` if the backend gave up first, as GL's and WebGL's waits do.
+    pub(crate) fn wait_for_submission(
+        &self,
+        index: crate::SubmissionIndex,
+    ) -> Result<bool, hal::DeviceError> {
+        unsafe { self.raw().wait(self.fence.as_ref(), index, None) }
+    }
+
+    /// Waits for the device's submissions to complete, then takes `command_indices` for
+    /// writing, so that none comes between that wait and a HAL idle wait (see
+    /// [`hal::Queue::wait_for_idle`]).
+    ///
+    /// The wait holds no lock. A submission made meanwhile is waited for in turn; after
+    /// [`LOCK_AFTER_SUBMISSIONS_TRIES`] tries, or once a wait gave up, the last wait holds the
+    /// lock. `gave_up_at` is the last submission that a wait of the caller's gave up on.
+    ///
+    /// Returns `Ok(false)` if the wait for the last submission gave up (GL, WebGL).
+    pub(crate) fn lock_after_submissions(
+        &self,
+        mut gave_up_at: Option<crate::SubmissionIndex>,
+    ) -> (
+        RwLockWriteGuard<'_, CommandIndices>,
+        Result<bool, hal::DeviceError>,
+    ) {
+        let wait = |index: crate::SubmissionIndex, gave_up_at: Option<crate::SubmissionIndex>| {
+            if gave_up_at.is_some_and(|gave_up_at| gave_up_at >= index) {
+                Ok(false)
+            } else {
+                self.wait_for_submission(index)
+            }
+        };
+        for _ in 0..LOCK_AFTER_SUBMISSIONS_TRIES {
+            let index = self
+                .last_successful_submission_index
+                .load(Ordering::Acquire);
+            let waited = wait(index, gave_up_at);
+            let command_indices = self.command_indices.write();
+            let last = self
+                .last_successful_submission_index
+                .load(Ordering::Acquire);
+            if waited.is_err() || last == index {
+                return (command_indices, waited);
+            }
+            drop(command_indices);
+            if let Ok(false) = waited {
+                // The GPU is too slow to catch up between tries.
+                gave_up_at = Some(index);
+                break;
+            }
+        }
+        let command_indices = self.command_indices.write();
+        let index = self
+            .last_successful_submission_index
+            .load(Ordering::Acquire);
+        (command_indices, wait(index, gave_up_at))
     }
 
     /// Check the current status of the GPU and process any submissions that have

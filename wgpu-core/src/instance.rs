@@ -23,7 +23,7 @@ use crate::{
     resource_log,
     timestamp_normalization::TimestampNormalizerInitError,
     weak_vec::WeakVec,
-    DOWNLEVEL_WARNING_MESSAGE,
+    SubmissionIndex, DOWNLEVEL_WARNING_MESSAGE,
 };
 
 use wgt::{Backend, Backends, InstanceFlags, PowerPreference};
@@ -890,12 +890,12 @@ impl Surface {
     /// returned configuration's device.
     ///
     /// If the wait times out, the GPU may still use the surface's textures: the configuration is
-    /// left in place, without its acquired texture, and the error is returned. A backend can time
-    /// out even without a timeout: GL waits for at most `i32::MAX` nanoseconds.
+    /// left in place, without its acquired texture, and what the wait gave up on is returned. A
+    /// backend can time out even without a timeout: GL waits for at most `i32::MAX` nanoseconds.
     fn take_presentation<'a>(
         &self,
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
-    ) -> (Result<Option<Presentation>, WaitIdleError>, UserClosures) {
+    ) -> (Result<Option<Presentation>, WaitGaveUp>, UserClosures) {
         let Some(present) = presentation.as_mut() else {
             return (Ok(None), UserClosures::default());
         };
@@ -911,7 +911,12 @@ impl Surface {
             self.discard_raw(&present.device, &texture);
         }
 
-        // Wait for all work that uses the surface's textures to finish.
+        // Wait for all work that uses the surface's textures to finish. The wait is for this
+        // submission or a later one.
+        let waited_for = present
+            .device
+            .last_successful_submission_index
+            .load(Ordering::Acquire);
         let snatch_guard = present.device.snatchable_lock.read();
         let (user_callbacks, result) = present
             .device
@@ -924,7 +929,7 @@ impl Surface {
             // not actually require you do this, so ignoring the failure is totally fine. See
             // https://github.com/gfx-rs/wgpu/issues/7363
             Err(WaitIdleError::Timeout) if cfg!(target_family = "wasm") => Ok(()),
-            Err(error @ WaitIdleError::Timeout) => Err(error),
+            Err(WaitIdleError::Timeout) => Err(WaitGaveUp { waited_for }),
             Err(WaitIdleError::WrongSubmissionIndex(_, _)) => {
                 unreachable!("no submission index was provided")
             }
@@ -940,16 +945,43 @@ impl Surface {
         (taken, user_callbacks)
     }
 
-    /// Unconfigures the raw surface from `device`.
+    /// Unconfigures the raw surface from `device`, once the device's submissions completed (see
+    /// [`Self::teardown_waited`]). `gave_up_at` is the submission that [`Self::take_presentation`]'s
+    /// wait gave up on, if it did.
     ///
     /// # Safety
     ///
     /// `device` must have been returned by [`Self::take_presentation`], and the
     /// surface must not have been configured since.
-    unsafe fn unconfigure_raw(&self, device: &Device) {
+    unsafe fn unconfigure_raw(&self, device: &Device, gave_up_at: Option<SubmissionIndex>) {
         if let Some(surface) = self.raw(device.backend()) {
-            let _command_indices = device.command_indices.write();
+            let (_command_indices, waited) = device.lock_after_submissions(gave_up_at);
+            let _ = Self::teardown_waited(device, waited);
             unsafe { surface.unconfigure(device.raw()) };
+        }
+    }
+
+    /// The outcome of the wait for `device`'s submissions before the HAL tears a configuration
+    /// down. A wait that gave up (GL, WebGL) is logged. A failed wait loses the device. The
+    /// teardown goes on either way: the HAL must release the configuration.
+    fn teardown_waited(
+        device: &Device,
+        waited: Result<bool, hal::DeviceError>,
+    ) -> Result<(), DeviceError> {
+        match waited {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                log::warn!(
+                    "Gave up waiting for the GPU before tearing down a surface configuration"
+                );
+                Ok(())
+            }
+            Err(error) => {
+                log::warn!(
+                    "Failed to wait for the GPU before tearing down a surface configuration: {error}"
+                );
+                Err(device.handle_hal_error(error))
+            }
         }
     }
 
@@ -960,9 +992,14 @@ impl Surface {
         presentation: &mut MutexGuard<'a, Option<Presentation>>,
     ) -> (Option<Arc<Device>>, UserClosures) {
         let (taken, user_callbacks) = self.take_presentation(presentation);
-        let present = taken.unwrap_or_else(|error| {
+        let mut gave_up_at = None;
+        let present = taken.unwrap_or_else(|gave_up| {
             // Unconfiguring cannot fail, and dropping a surface must release it.
-            log::error!("Failed to wait for the GPU before unconfiguring the surface: {error}");
+            log::error!(
+                "Failed to wait for the GPU before unconfiguring the surface: {}",
+                WaitIdleError::Timeout
+            );
+            gave_up_at = Some(gave_up.waited_for);
             presentation.take().map(|mut present| {
                 present.destroy_texture_views();
                 present
@@ -970,7 +1007,7 @@ impl Surface {
         });
         let device = present.map(|present| present.device);
         if let Some(device) = &device {
-            unsafe { self.unconfigure_raw(device) };
+            unsafe { self.unconfigure_raw(device, gave_up_at) };
         }
         (device, user_callbacks)
     }
@@ -1072,9 +1109,9 @@ impl Surface {
             let previous = match taken {
                 Ok(previous) => previous.map(|previous| previous.device),
                 // The surface stays configured, without the texture it had acquired.
-                Err(error) => {
+                Err(WaitGaveUp { .. }) => {
                     previous_device = None;
-                    break 'configure Err(E::from(error));
+                    break 'configure Err(E::GpuWaitTimeout);
                 }
             };
             previous_device = previous;
@@ -1086,15 +1123,22 @@ impl Surface {
                 let same_device = match &previous_device {
                     Some(previous_device) if Arc::ptr_eq(previous_device, device) => true,
                     Some(previous_device) => {
-                        unsafe { self.unconfigure_raw(previous_device) };
+                        unsafe { self.unconfigure_raw(previous_device, None) };
                         false
                     }
                     None => false,
                 };
-                let _command_indices = device.command_indices.write();
-                if same_device {
+                let _command_indices = if same_device {
+                    let (command_indices, waited) = device.lock_after_submissions(None);
+                    let waited = Self::teardown_waited(device, waited);
                     unsafe { surface_raw.unconfigure(device.raw()) };
-                }
+                    if let Err(error) = waited {
+                        break 'configure Err(E::Device(error));
+                    }
+                    command_indices
+                } else {
+                    device.command_indices.write()
+                };
                 unsafe { surface_raw.configure(device.raw(), &hal_config) }
             };
             match result {
@@ -1133,6 +1177,12 @@ impl Drop for Surface {
         drop(device);
         self.pending_callbacks.defer(user_closures);
     }
+}
+
+/// [`Surface::take_presentation`]'s wait for the GPU gave up, as GL's waits do after about two
+/// seconds: the device's submissions up to `waited_for`, at least, may be incomplete.
+struct WaitGaveUp {
+    waited_for: SubmissionIndex,
 }
 
 pub struct Adapter {

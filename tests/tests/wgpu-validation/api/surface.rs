@@ -856,3 +856,199 @@ fn the_next_acquisition_gives_back_the_image_of_a_texture_released_under_the_sna
     s.queue.present(frame);
     s.assert_no_violations();
 }
+
+// Waiting for the GPU before a teardown.
+
+/// Runs the next wait of `device` with another thread stalling its GPU and submitting, and the wait
+/// after it with the GPU resuming. A teardown that waits for the GPU (`take_presentation`), then
+/// tears the configuration down in the HAL, which waits for the queue to become idle, must wait
+/// for the other thread's submission too, before the HAL's idle wait: the noop surface records a
+/// teardown with a submission incomplete.
+fn submit_during_the_next_wait_and_resume_in_the_one_after(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) {
+    // SAFETY: The noop device is only given hooks.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.run_during_next_wait({
+        let (device, queue) = (device.clone(), queue.clone());
+        move || {
+            thread::spawn(move || {
+                // SAFETY: The noop device is only told to stall.
+                unsafe { device.as_hal::<Noop>() }.unwrap().stall_gpu();
+                queue.submit([]);
+            })
+            .join()
+            .unwrap();
+        }
+    });
+    noop.run_during_next_wait({
+        let device = device.clone();
+        move || {
+            // SAFETY: The noop device is only told to resume.
+            unsafe { device.as_hal::<Noop>() }.unwrap().resume_gpu();
+        }
+    });
+}
+
+/// Configuring again tears the previous configuration down on the same device.
+#[test]
+fn reconfiguring_waits_for_a_submission_made_while_it_waited() {
+    let s = setup();
+    submit_during_the_next_wait_and_resume_in_the_one_after(&s.device, &s.queue);
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    assert_eq!(
+        s.noop_device().take_violations(),
+        [] as [noop::DeviceViolation; 0]
+    );
+}
+
+/// Configuring for another device unconfigures the surface from the previous one.
+#[test]
+fn configuring_for_another_device_waits_for_a_submission_made_while_it_waited() {
+    let s = setup();
+    let adapter = pollster::block_on(s.instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&s.surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    let (other_device, _other_queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).unwrap();
+    submit_during_the_next_wait_and_resume_in_the_one_after(&s.device, &s.queue);
+    s.surface.configure(&other_device, &s.config);
+    s.assert_no_violations();
+    assert_eq!(
+        s.noop_device().take_violations(),
+        [] as [noop::DeviceViolation; 0]
+    );
+}
+
+/// The teardown waits for the GPU holding no lock: another thread submits meanwhile. The first wait
+/// of a configuration is `take_presentation`'s; the teardown's is the second.
+#[test]
+fn the_teardown_waits_for_the_gpu_without_blocking_submissions() {
+    let s = setup();
+    let submitted = Arc::new(Mutex::new(None));
+    s.noop_device().run_during_next_wait(|| {});
+    s.noop_device().run_during_next_wait({
+        let (queue, submitted) = (s.queue.clone(), Arc::clone(&submitted));
+        move || {
+            let finished = finishes_in_time(move || {
+                queue.submit([]);
+            });
+            *submitted.lock().unwrap() = Some(finished);
+        }
+    });
+    s.surface.configure(&s.device, &s.resized(1));
+    assert_eq!(*submitted.lock().unwrap(), Some(true));
+    s.assert_no_violations();
+    assert_eq!(
+        s.noop_device().take_violations(),
+        [] as [noop::DeviceViolation; 0]
+    );
+}
+
+/// Runs the next wait of `device` with another thread stalling its GPU and submitting.
+fn stall_and_submit_during_the_next_wait(device: &wgpu::Device, queue: &wgpu::Queue) {
+    // SAFETY: The noop device is only given hooks.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.run_during_next_wait({
+        let (device, queue) = (device.clone(), queue.clone());
+        move || {
+            thread::spawn(move || {
+                // SAFETY: The noop device is only told to stall.
+                unsafe { device.as_hal::<Noop>() }.unwrap().stall_gpu();
+                queue.submit([]);
+            })
+            .join()
+            .unwrap();
+        }
+    });
+}
+
+/// A submission made while the teardown waits for the GPU, holding no lock, is waited for too,
+/// before the HAL tears the configuration down.
+#[test]
+fn a_submission_made_while_the_teardown_waits_is_waited_for_too() {
+    let s = setup();
+    s.noop_device().run_during_next_wait(|| {});
+    stall_and_submit_during_the_next_wait(&s.device, &s.queue);
+    s.noop_device().run_during_next_wait({
+        let device = s.device.clone();
+        move || {
+            // SAFETY: The noop device is only told to resume.
+            unsafe { device.as_hal::<Noop>() }.unwrap().resume_gpu();
+        }
+    });
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    assert_eq!(
+        s.noop_device().take_violations(),
+        [] as [noop::DeviceViolation; 0]
+    );
+}
+
+/// A failed wait before the teardown loses the device, and the configuration fails, having
+/// released the previous one.
+#[test]
+fn a_teardown_whose_wait_fails_loses_the_device() {
+    let s = setup();
+    let lost = Arc::new(Mutex::new(None));
+    s.device.set_device_lost_callback({
+        let lost = Arc::clone(&lost);
+        move |reason, _message| *lost.lock().unwrap() = Some(reason)
+    });
+    s.noop_device().run_during_next_wait({
+        let device = s.device.clone();
+        move || {
+            // SAFETY: The noop device is only told to fail its next wait, the teardown's.
+            unsafe { device.as_hal::<Noop>() }
+                .unwrap()
+                .fail_next(DeviceOperation::Wait, wgpu_hal::DeviceError::Lost);
+        }
+    });
+    s.surface.configure(&s.device, &s.resized(1));
+    assert_eq!(*lost.lock().unwrap(), Some(wgpu::DeviceLostReason::Unknown));
+    s.assert_no_violations();
+}
+
+/// Dropping a surface after the wait for the GPU gave up, as GL's do after about two seconds,
+/// does not wait a second time for the same submissions.
+#[test]
+fn dropping_a_surface_after_the_wait_gave_up_does_not_wait_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+
+    let s = setup();
+    s.noop_device().stall_gpu();
+    s.queue.submit([]);
+    let waits = Arc::new(AtomicUsize::new(0));
+    for _ in 0..3 {
+        let waits = Arc::clone(&waits);
+        s.noop_device().run_during_next_wait(move || {
+            waits.fetch_add(1, SeqCst);
+        });
+    }
+    let Setup {
+        surface, device, ..
+    } = s;
+    drop(Arc::into_inner(surface).expect("the test holds the only reference"));
+    assert_eq!(waits.load(SeqCst), 1);
+    // SAFETY: The noop device is only told to resume.
+    unsafe { device.as_hal::<Noop>() }.unwrap().resume_gpu();
+}
+
+/// When the teardown's wait gives up, the HAL's teardown follows: `wgpu_hal::Surface::configure`
+/// allows it, for the submissions that wait gave up on.
+#[test]
+fn reconfiguring_after_the_teardown_wait_gave_up_meets_the_teardowns_requirement() {
+    let s = setup();
+    stall_and_submit_during_the_next_wait(&s.device, &s.queue);
+    s.surface.configure(&s.device, &s.resized(1));
+    s.assert_no_violations();
+    assert_eq!(
+        s.noop_device().take_violations(),
+        [] as [noop::DeviceViolation; 0]
+    );
+    s.noop_device().resume_gpu();
+}

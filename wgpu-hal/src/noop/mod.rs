@@ -76,6 +76,16 @@ pub enum DeviceOperation {
     EndEncoding,
 }
 
+/// A requirement of [`crate::Queue`] that a caller broke, as [`Context::take_violations`] reports
+/// it.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DeviceViolation {
+    /// [`crate::Queue::wait_for_idle`] while a submission to the queue had not completed.
+    WaitForIdleWithSubmissionsPending,
+}
+
 /// The test hooks of a noop device and its queue.
 #[cfg(feature = "noop_test_hooks")]
 #[derive(Default)]
@@ -83,8 +93,17 @@ struct DeviceHooks {
     failures: lock::SpinLock<Vec<(DeviceOperation, crate::DeviceError)>>,
     during_submit: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
     during_begin_encoding: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
+    during_wait: lock::SpinLock<Vec<Box<dyn FnOnce() + Send>>>,
     /// Whether the GPU is stalled (see [`Context::stall_gpu`]).
     stalled: wgpu_sync::atomic::AtomicBool,
+    /// The fence value of the last submission made while the GPU is stalled, or 0: it has not
+    /// completed, as the GPU has not resumed since.
+    pending: AtomicU64,
+    /// The highest value that a wait with no timeout gave up on while the GPU is stalled, or 0.
+    gave_up_at: AtomicU64,
+    /// The highest value that a wait with no timeout failed on while the GPU is stalled, or 0.
+    failed_at: AtomicU64,
+    violations: lock::SpinLock<Vec<DeviceViolation>>,
 }
 
 #[cfg(feature = "noop_test_hooks")]
@@ -113,6 +132,27 @@ impl DeviceHooks {
     /// Runs the hook of the next `begin_encoding`, if any.
     fn run_during_begin_encoding(&self) {
         Self::run_next(&self.during_begin_encoding);
+    }
+
+    /// Runs the hook of the next [`crate::Device::wait`], if any.
+    fn run_during_wait(&self) {
+        Self::run_next(&self.during_wait);
+    }
+
+    /// Whether a submission to the queue has not completed that no wait gave up on: a wait with
+    /// no timeout that gives up covers the submissions it waited for (see
+    /// [`crate::Queue::wait_for_idle`]). With `failed`, so does one that failed (see
+    /// [`crate::Surface::unconfigure`]).
+    fn submissions_pending(&self, failed: bool) -> bool {
+        let mut covered = self.gave_up_at.load(Ordering::Acquire);
+        if failed {
+            covered = covered.max(self.failed_at.load(Ordering::Acquire));
+        }
+        self.pending.load(Ordering::Acquire) > covered
+    }
+
+    fn violation(&self, violation: DeviceViolation) {
+        self.violations.lock().push(violation);
     }
 
     /// Runs the first of `hooks`, if any, with `hooks` unlocked.
@@ -165,6 +205,27 @@ impl Context {
         self.hooks().during_begin_encoding.lock().push(Box::new(f));
     }
 
+    /// Runs `f` inside the next [`crate::Device::wait`] of this device, on the waiting thread,
+    /// before the wait checks the fence. Hooks run one per wait, in the order they were added.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn run_during_next_wait(&self, f: impl FnOnce() + Send + 'static) {
+        self.hooks().during_wait.lock().push(Box::new(f));
+    }
+
+    /// Returns the violations of the HAL's requirements that this device and its queue found
+    /// since the last call, and forgets them. A surface reports its own
+    /// ([`Surface::take_violations`]).
+    ///
+    /// # Panics
+    ///
+    /// If `self` is an instance or an adapter.
+    pub fn take_violations(&self) -> Vec<DeviceViolation> {
+        core::mem::take(&mut *self.hooks().violations.lock())
+    }
+
     /// Stalls this device's GPU: the submissions made from now on run, but their fence values
     /// are reached only once [`Self::resume_gpu`] is called. Meanwhile, waiting for them times
     /// out, as on a backend whose waits have a bound, such as GL's.
@@ -183,7 +244,11 @@ impl Context {
     ///
     /// If `self` is an instance or an adapter.
     pub fn resume_gpu(&self) {
-        self.hooks().stalled.store(false, Ordering::Release);
+        let hooks = self.hooks();
+        hooks.stalled.store(false, Ordering::Release);
+        hooks.pending.store(0, Ordering::Release);
+        hooks.gave_up_at.store(0, Ordering::Release);
+        hooks.failed_at.store(0, Ordering::Release);
     }
 }
 #[derive(Debug)]
@@ -487,6 +552,9 @@ impl crate::Queue for Context {
         #[cfg(feature = "noop_test_hooks")]
         if self.hooks().stalled.load(Ordering::Acquire) {
             fence.stalled_value.fetch_max(fence_value, Ordering::AcqRel);
+            self.hooks()
+                .pending
+                .fetch_max(fence_value, Ordering::AcqRel);
             return Ok(());
         }
         fence.value.store(fence_value, Ordering::Release);
@@ -505,6 +573,11 @@ impl crate::Queue for Context {
     }
 
     unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
+        #[cfg(feature = "noop_test_hooks")]
+        if self.hooks().submissions_pending(false) {
+            self.hooks()
+                .violation(DeviceViolation::WaitForIdleWithSubmissionsPending);
+        }
         Ok(())
     }
 }
@@ -669,8 +742,13 @@ impl crate::Device for Context {
     ) -> DeviceResult<bool> {
         #[cfg(feature = "noop_test_hooks")]
         if let Some(error) = self.hooks().take_failure(DeviceOperation::Wait) {
+            if timeout.is_none() {
+                self.hooks().failed_at.fetch_max(value, Ordering::AcqRel);
+            }
             return Err(error);
         }
+        #[cfg(feature = "noop_test_hooks")]
+        self.hooks().run_during_wait();
         let completed = fence.completed(
             #[cfg(feature = "noop_test_hooks")]
             self.hooks(),
@@ -678,6 +756,9 @@ impl crate::Device for Context {
         // A stalled GPU finishes nothing until it resumes: the wait times out.
         #[cfg(feature = "noop_test_hooks")]
         if completed < value && self.hooks().stalled.load(Ordering::Acquire) {
+            if timeout.is_none() {
+                self.hooks().gave_up_at.fetch_max(value, Ordering::AcqRel);
+            }
             return Ok(false);
         }
         // The relevant commands must have already been submitted, and noop-backend commands are

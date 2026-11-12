@@ -177,3 +177,119 @@ fn destroying_a_device_while_another_thread_drops_its_buffers() {
     }
     dropper.join().unwrap();
 }
+
+/// Dropping the queue waits for its submissions on their fence before it waits for the queue to
+/// become idle, as `wgpu_hal::Queue::wait_for_idle` requires: the idle wait must not wait for one
+/// of them. The noop queue records an idle wait with a submission incomplete; here the GPU stalls,
+/// and resumes only inside a fence wait.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn dropping_the_queue_waits_for_its_submissions_before_waiting_for_it_to_be_idle() {
+    use wgpu_hal::{api::Noop, noop::DeviceViolation};
+
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    // SAFETY: The noop device is only given hooks and inspected.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.stall_gpu();
+    queue.submit([]);
+    let resuming = device.clone();
+    noop.run_during_next_wait(move || {
+        // SAFETY: The noop device is only told to resume.
+        unsafe { resuming.as_hal::<Noop>() }.unwrap().resume_gpu();
+    });
+    drop(queue);
+    assert_eq!(noop.take_violations(), [] as [DeviceViolation; 0]);
+}
+
+/// Runs `probe` on another thread, and returns whether it finished within ten seconds: a probe
+/// that must not block is waited for only until it finishes.
+#[cfg(not(target_family = "wasm"))]
+fn finishes_in_time(probe: impl FnOnce() + Send + 'static) -> bool {
+    let (sender, receiver) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        // Dropped when `probe` returns or unwinds.
+        let _sender = sender;
+        probe();
+    });
+    matches!(
+        receiver.recv_timeout(std::time::Duration::from_secs(10)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
+    )
+}
+
+/// Dropping the queue waits for its submissions holding no lock: another thread polls the device
+/// meanwhile. No submission can follow a dropped queue, so the lock is taken only for the idle
+/// wait.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn dropping_the_queue_waits_for_its_submissions_without_blocking_polls() {
+    use std::sync::{Arc, Mutex};
+    use wgpu_hal::api::Noop;
+
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    // SAFETY: The noop device is only given hooks.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.stall_gpu();
+    queue.submit([]);
+    let polled = Arc::new(Mutex::new(None));
+    noop.run_during_next_wait({
+        let (device, polled) = (device.clone(), Arc::clone(&polled));
+        move || {
+            let polling = device.clone();
+            let finished = finishes_in_time(move || {
+                let _ = polling.poll(wgpu::PollType::Poll);
+            });
+            *polled.lock().unwrap() = Some(finished);
+            // SAFETY: The noop device is only told to resume.
+            unsafe { device.as_hal::<Noop>() }.unwrap().resume_gpu();
+        }
+    });
+    drop(queue);
+    assert_eq!(*polled.lock().unwrap(), Some(true));
+}
+
+/// A failed wait while dropping the queue loses the device, and skips the idle wait, which would
+/// wait for the submission: dropping cannot panic.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn dropping_the_queue_when_its_wait_fails_loses_the_device_without_an_idle_wait() {
+    use std::sync::{Arc, Mutex};
+    use wgpu_hal::{
+        api::Noop,
+        noop::{DeviceOperation, DeviceViolation},
+    };
+
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    let lost = Arc::new(Mutex::new(None));
+    device.set_device_lost_callback({
+        let lost = Arc::clone(&lost);
+        move |reason, _message| *lost.lock().unwrap() = Some(reason)
+    });
+    // SAFETY: The noop device is only given hooks and inspected.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.stall_gpu();
+    queue.submit([]);
+    noop.fail_next(DeviceOperation::Wait, wgpu_hal::DeviceError::OutOfMemory);
+    drop(queue);
+    assert_eq!(*lost.lock().unwrap(), Some(wgpu::DeviceLostReason::Unknown));
+    assert_eq!(noop.take_violations(), [] as [DeviceViolation; 0]);
+    noop.resume_gpu();
+}
+
+/// When the wait for the submissions gives up, as GL's does after about two seconds, the idle
+/// wait follows: `wgpu_hal::Queue::wait_for_idle` allows it, for the submissions that wait gave up
+/// on.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn dropping_the_queue_after_its_wait_gave_up_meets_the_idle_waits_requirement() {
+    use wgpu_hal::{api::Noop, noop::DeviceViolation};
+
+    let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+    // SAFETY: The noop device is only given hooks and inspected.
+    let noop = unsafe { device.as_hal::<Noop>() }.unwrap();
+    noop.stall_gpu();
+    queue.submit([]);
+    drop(queue);
+    assert_eq!(noop.take_violations(), [] as [DeviceViolation; 0]);
+    noop.resume_gpu();
+}

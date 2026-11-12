@@ -19,7 +19,10 @@
 //!   the surface it was acquired from;
 //! - a submission uses only acquired images, and lists the surface texture of each one it uses.
 //!   This is stricter than [`crate::Queue::submit`], which requires the list for the images that
-//!   the submission writes to; wgpu-core lists every image a submission uses.
+//!   the submission writes to; wgpu-core lists every image a submission uses;
+//! - every submission to the device's queue has completed when a configuration is replaced or
+//!   the surface unconfigured. Only a stalled GPU (`Context::stall_gpu`, a test hook) leaves one
+//!   incomplete.
 //!
 //! It does not check, so a test that finds no violation proves nothing about, that:
 //!
@@ -102,6 +105,9 @@ pub enum SurfaceViolation {
     Unlisted { image: usize },
     /// A submission used `image` while it was not acquired, or after its swapchain was replaced.
     NotAcquiredInSubmission { image: usize },
+    /// `call` (replacing a configuration, or unconfiguring) while a submission to the device's
+    /// queue had not completed.
+    SubmissionsPending { call: SurfaceCall },
 }
 
 /// A command that wrote to an image of a noop surface's swapchain, as
@@ -280,6 +286,20 @@ struct Hooks {
 impl fmt::Debug for Hooks {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Hooks").finish_non_exhaustive()
+    }
+}
+
+/// Whether a submission to `device`'s queue has not completed that no wait of the caller's gave
+/// up or failed on. Only a stalled GPU leaves one incomplete, which needs the test hooks.
+fn submissions_pending(device: &Context) -> bool {
+    #[cfg(feature = "noop_test_hooks")]
+    {
+        device.hooks().submissions_pending(true)
+    }
+    #[cfg(not(feature = "noop_test_hooks"))]
+    {
+        let _ = device;
+        false
     }
 }
 
@@ -522,11 +542,17 @@ impl crate::Surface for Surface {
 
     unsafe fn configure(
         &self,
-        _device: &Context,
+        device: &Context,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
         let (_call, failure) = self.enter(SurfaceCall::Configure);
+        let submissions_pending = submissions_pending(device);
         self.shared.with_state(|state| {
+            if state.swapchain.is_some() && submissions_pending {
+                state.violation(SurfaceViolation::SubmissionsPending {
+                    call: SurfaceCall::Configure,
+                });
+            }
             state.check_images_released(SurfaceCall::Configure);
             if let Some(error) = failure {
                 state.swapchain = None;
@@ -555,11 +581,17 @@ impl crate::Surface for Surface {
         })
     }
 
-    unsafe fn unconfigure(&self, _device: &Context) {
+    unsafe fn unconfigure(&self, device: &Context) {
         let (_call, _) = self.enter(SurfaceCall::Unconfigure);
+        let submissions_pending = submissions_pending(device);
         self.shared.with_state(|state| {
             if state.swapchain.is_none() {
                 state.violation(SurfaceViolation::NotConfigured(SurfaceCall::Unconfigure));
+            }
+            if submissions_pending {
+                state.violation(SurfaceViolation::SubmissionsPending {
+                    call: SurfaceCall::Unconfigure,
+                });
             }
             state.check_images_released(SurfaceCall::Unconfigure);
             state.swapchain = None;
