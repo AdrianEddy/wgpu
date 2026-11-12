@@ -454,21 +454,18 @@ fn destroy_swapchain_semaphores(
 impl Swapchain for NativeSwapchain {
     unsafe fn release_resources(&mut self, device: &crate::vulkan::Device) {
         profiling::scope!("Swapchain::release_resources");
+        // Every present was made on the swapchain's device's queue.
+        debug_assert!(Arc::ptr_eq(&self.device, &device.shared));
         {
-            profiling::scope!("vkDeviceWaitIdle");
-            // We need to also wait until all presentation work is done. Because there is no way to portably wait until
-            // the presentation work is done, we are forced to wait until the device is idle.
-            //
-            // `vkDeviceWaitIdle` requires host access to all of the device's queues to be externally synchronized,
-            // which the contract of `Surface::configure` and `unconfigure`, the callers, ensures.
+            profiling::scope!("vkQueueWaitIdle");
+            // The queue's idle wait covers its presents' queue operations (Vulkan 1.4.324).
             let _ = unsafe {
-                device
-                    .shared
+                self.device
                     .raw
-                    .device_wait_idle()
+                    .queue_wait_idle(self.device.raw_queue)
                     .map_err(map_host_device_oom_and_lost_err)
             };
-        };
+        }
 
         if let Some(fence) = self.fence {
             unsafe { device.shared.raw.destroy_fence(fence, None) }

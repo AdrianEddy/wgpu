@@ -29,6 +29,8 @@ mod command;
 pub mod conv;
 mod descriptor;
 mod device;
+#[cfg(test)]
+mod device_tests;
 mod drm;
 mod instance;
 mod memory;

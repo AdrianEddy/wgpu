@@ -19,8 +19,8 @@
 //!   less.
 //! - `two_surfaces`: two surfaces of one device, configured on two threads at once, a bounded
 //!   number of times. DX12 waits for its queue to become idle with a fence that the device's
-//!   surfaces share, and Vulkan's swapchain teardown calls `vkDeviceWaitIdle`, which both need
-//!   the configurations excluded from each other and from queue operations
+//!   surfaces share, and Vulkan's swapchain teardown waits for its queue to become idle, which
+//!   both need the configurations excluded from each other and from queue operations
 //!   (<https://github.com/gfx-rs/wgpu/pull/10675>).
 //! - `configure_race`: one surface reconfigured a bounded number of times, with changing present
 //!   modes and frame latencies, while another thread submits; then configured for another device
