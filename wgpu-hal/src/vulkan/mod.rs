@@ -620,8 +620,8 @@ struct DeviceShared {
     queue_index: u32,
     raw_queue: vk::Queue,
     /// Serializes host access to `raw_queue` with code outside wgpu-hal: taken around each command
-    /// that accesses it ([`Self::with_queue_lock`]).
-    queue_lock: Arc<dyn QueueLock>,
+    /// that accesses it ([`Self::with_queue_lock`]). `None` for an internally synchronized queue.
+    queue_lock: Option<Arc<dyn QueueLock>>,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
@@ -652,9 +652,9 @@ struct DeviceShared {
 }
 
 impl DeviceShared {
-    /// Runs `f`, a command that accesses `raw_queue`, holding the queue lock.
+    /// Runs `f`, a command that accesses `raw_queue`, holding the queue lock, if it has one.
     fn with_queue_lock<R>(&self, f: impl FnOnce() -> R) -> R {
-        let _guard = QueueLockGuard::new(&*self.queue_lock);
+        let _guard = self.queue_lock.as_deref().map(QueueLockGuard::new);
         f()
     }
 }
@@ -816,13 +816,16 @@ impl Queue {
     /// or wgpu-hal, nor wait for a submission of theirs. Nor may code that runs inside a Vulkan
     /// call, such as a `log` logger or a debug messenger, take it. `vkQueuePresentKHR` can block in
     /// the driver while wgpu-hal holds it.
-    pub fn queue_lock(&self) -> Arc<dyn QueueLock> {
-        Arc::clone(&self.device.queue_lock)
+    ///
+    /// `None` for a queue created internally synchronized (see [`DeviceQueue::create_flags`]),
+    /// which needs no lock.
+    pub fn queue_lock(&self) -> Option<Arc<dyn QueueLock>> {
+        self.device.queue_lock.clone()
     }
 
     /// Takes [`Self::queue_lock`] until the guard drops.
-    pub fn lock_queue(&self) -> QueueLockGuard<'_> {
-        QueueLockGuard::new(&*self.device.queue_lock)
+    pub fn lock_queue(&self) -> Option<QueueLockGuard<'_>> {
+        self.device.queue_lock.as_deref().map(QueueLockGuard::new)
     }
 }
 
@@ -1913,6 +1916,40 @@ struct RawTlasInstance {
     acceleration_structure_reference: u64,
 }
 
+/// The queue that [`Adapter::device_from_raw`] gives wgpu-hal.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct DeviceQueue {
+    /// The queue's family.
+    pub family_index: u32,
+    /// The queue's index among the queues of its family created with `create_flags`.
+    pub queue_index: u32,
+    /// The flags the queue was created with (`VkDeviceQueueCreateInfo::flags`).
+    ///
+    /// With `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which needs
+    /// `VK_KHR_internally_synchronized_queues` and its `internallySynchronizedQueues` feature
+    /// enabled, the queue synchronizes host access itself, and wgpu-hal takes no lock around its
+    /// commands ([`Queue::queue_lock`] is `None`).
+    pub create_flags: vk::DeviceQueueCreateFlags,
+}
+
+impl DeviceQueue {
+    /// Queue `queue_index` of family `family_index`, created with no flags.
+    pub fn new(family_index: u32, queue_index: u32) -> Self {
+        Self {
+            family_index,
+            queue_index,
+            create_flags: vk::DeviceQueueCreateFlags::empty(),
+        }
+    }
+
+    /// Sets [`Self::create_flags`].
+    pub fn create_flags(mut self, create_flags: vk::DeviceQueueCreateFlags) -> Self {
+        self.create_flags = create_flags;
+        self
+    }
+}
+
 /// Arguments to the [`CreateDeviceCallback`].
 #[derive(Debug)]
 pub struct CreateDeviceCallbackArgs<'arg, 'pnext, 'this>
@@ -1928,6 +1965,10 @@ where
     /// 1. Any queue you provide must be compatible with `wgpu`'s usage,
     /// 2. You must not leave the vector empty,
     /// 3. `wgpu` currently only uses the first entry.
+    ///
+    /// With `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` in the first entry's flags,
+    /// also enable `VK_KHR_internally_synchronized_queues` and its `internallySynchronizedQueues`
+    /// feature: wgpu-hal then takes no queue lock (see [`DeviceQueue::create_flags`]).
     pub queue_create_infos: &'arg mut Vec<vk::DeviceQueueCreateInfo<'pnext>>,
     /// The create info for the device. You may add or modify things in the pnext chain, but
     /// do not turn features off. Additionally, do not add things to the list of extensions,

@@ -233,6 +233,11 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 #### Hal
 
 - BREAKING: `wgpu_hal::Queue::wait_for_idle`, and `Surface::configure` and `unconfigure` when they tear a configuration down, require the queue's submissions to have completed first. wgpu-core waits for them holding no lock. By @AdrianEddy.
+- BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` takes the queue as a `DeviceQueue`, whose flags let a queue created internally synchronized (`VK_KHR_internally_synchronized_queues`) take no lock. By @AdrianEddy.
+  ```diff
+  - family_index, queue_index,
+  + DeviceQueue::new(family_index, queue_index),
+  ```
 - `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
 
 ### Bug Fixes
