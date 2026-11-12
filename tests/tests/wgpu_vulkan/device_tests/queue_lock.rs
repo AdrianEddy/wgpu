@@ -19,7 +19,7 @@ const FINISH_WITHIN: Duration = Duration::from_secs(10);
 #[test]
 fn a_submission_waits_for_the_lock_handed_out() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some((instance, _messenger)) = super::instance(false) else {
+    let Some((instance, _messenger)) = super::instance(wgpu::InstanceFlags::empty()) else {
         return;
     };
     for adapter in super::adapters(&instance) {
@@ -31,7 +31,7 @@ fn a_submission_waits_for_the_lock_handed_out() {
             hal.queue_lock()
                 .expect("a queue created without flags takes a lock")
         };
-        let guard = QueueLockGuard::new(&*lock);
+        let guard = QueueLockGuard::new(&*lock, super::QUEUE);
         let (submitted, submission) = mpsc::channel();
         let submitter = thread::spawn({
             let queue = queue.clone();
@@ -61,7 +61,9 @@ fn a_submission_waits_for_the_lock_handed_out() {
 fn a_raw_submitter_and_wgpu_never_use_the_queue_at_once() {
     const ROUNDS: usize = 200;
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some((instance, messenger)) = super::instance(true) else {
+    let Some((instance, messenger)) =
+        super::instance(wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG)
+    else {
         return;
     };
     for adapter in super::adapters(&instance) {
@@ -84,7 +86,7 @@ fn a_raw_submitter_and_wgpu_never_use_the_queue_at_once() {
                         .unwrap();
                 for _ in 0..ROUNDS {
                     {
-                        let _guard = QueueLockGuard::new(&*lock);
+                        let _guard = QueueLockGuard::new(&*lock, super::QUEUE);
                         // SAFETY: The queue lock is held; an empty submission signals the fence.
                         unsafe { raw_device.queue_submit(raw_queue, &[], fence) }.unwrap();
                     }

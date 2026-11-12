@@ -915,17 +915,14 @@ impl super::Device {
     }
 
     /// The lock that wgpu-hal takes around each command that accesses the device's queue (see
-    /// [`super::Queue::queue_lock`]). `None` for an internally synchronized queue.
+    /// [`super::Queue::queue_lock`]). `None` for an internally synchronized queue given no lock.
     pub fn queue_lock(&self) -> Option<Arc<dyn super::QueueLock>> {
-        self.shared.queue_lock.clone()
+        self.shared.queue_lock()
     }
 
-    /// Takes [`Self::queue_lock`] until the guard drops.
+    /// Takes [`Self::queue_lock`], with the queue's scope, until the guard drops.
     pub fn lock_queue(&self) -> Option<super::QueueLockGuard<'_>> {
-        self.shared
-            .queue_lock
-            .as_deref()
-            .map(super::QueueLockGuard::new)
+        self.shared.lock_queue()
     }
 
     pub fn enabled_device_extensions(&self) -> &[&'static CStr] {

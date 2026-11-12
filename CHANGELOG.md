@@ -225,6 +225,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Noop surfaces check requirements that `wgpu_hal::Surface` and `wgpu_hal::Queue` place on their callers, and record each one broken as a `wgpu_hal::noop::SurfaceViolation`, returned by `Surface::take_violations`. The noop `Api::TextureView` is now a type of its own. By @AdrianEddy.
 - Add the `noop_test_hooks` feature to `wgpu-hal`, for wgpu's own tests: it lets them run code inside, and fail, calls on noop surfaces, devices and queues. By @AdrianEddy.
 - Add `wgpu_hal::vulkan::Queue::queue_lock` and `lock_queue`, the lock that wgpu-hal takes around each command on its queue, for code that submits to the same `VkQueue`, such as FFmpeg or an OpenXR runtime. By @AdrianEddy.
+- Give `wgpu_hal::vulkan::Adapter::device_from_raw` a queue lock of the application's (`DeviceQueue::lock`), which wgpu-hal always takes. Its `QueueLockScope` lets one lock serve every queue of a device, and debug builds catch a holder that calls into wgpu. By @AdrianEddy.
 
 #### DX12
 

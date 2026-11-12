@@ -1,3 +1,4 @@
+mod injected;
 mod internal;
 mod queue_lock;
 
@@ -7,7 +8,16 @@ use std::{
 };
 
 use ash::{ext, vk};
-use wgpu_hal::{api::Vulkan, vulkan::call_log};
+use wgpu_hal::{
+    api::Vulkan,
+    vulkan::{call_log, QueueLockScope},
+};
+
+/// The queue that wgpu-hal opens a device with, and the tests give `device_from_raw`.
+pub const QUEUE: QueueLockScope = QueueLockScope::Queue {
+    family_index: 0,
+    queue_index: 0,
+};
 
 /// One test at a time: the tests share `call_log`'s records.
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
@@ -55,14 +65,20 @@ unsafe extern "system" fn record_message(
     vk::FALSE
 }
 
-/// A wgpu instance on a Vulkan instance whose device functions go through `call_log`.
+/// The instance flags each test of every queue command runs with: without and with `DEBUG`,
+/// which loads the `VK_EXT_debug_utils` device functions, so that their wrappers are installed.
+pub const FLAGS: [wgpu::InstanceFlags; 2] =
+    [wgpu::InstanceFlags::empty(), wgpu::InstanceFlags::DEBUG];
+
+/// A wgpu instance with `flags` on a Vulkan instance whose device functions go through
+/// `call_log`.
 ///
-/// With `validation`, the Khronos validation layer is enabled if it is installed, with a
-/// [`Messenger`] that records its error messages, the thread-safety checker's included. The
+/// With `VALIDATION` in `flags`, the Khronos validation layer is enabled if it is installed, with
+/// a [`Messenger`] that records its error messages, the thread-safety checker's included. The
 /// checker is on by default, and set on explicitly where the layer takes settings
 /// (`VK_EXT_layer_settings`).
 /// `None`, having printed why, without Vulkan.
-pub fn instance(validation: bool) -> Option<(wgpu::Instance, Option<Messenger>)> {
+pub fn instance(flags: wgpu::InstanceFlags) -> Option<(wgpu::Instance, Option<Messenger>)> {
     // SAFETY: Loading the Vulkan library has no requirements.
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
         println!("skipped: no Vulkan");
@@ -74,15 +90,10 @@ pub fn instance(validation: bool) -> Option<(wgpu::Instance, Option<Messenger>)>
         .unwrap_or(vk::API_VERSION_1_0);
     // SAFETY: No requirements.
     let layers = unsafe { entry.enumerate_instance_layer_properties() }.unwrap_or_default();
-    let validation = validation
+    let validation = flags.contains(wgpu::InstanceFlags::VALIDATION)
         && layers
             .iter()
             .any(|layer| layer.layer_name_as_c_str() == Ok(VALIDATION_LAYER));
-    let flags = if validation {
-        wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG
-    } else {
-        wgpu::InstanceFlags::empty()
-    };
     let mut extensions =
         wgpu_hal::vulkan::Instance::desired_extensions(&entry, version, flags).unwrap();
     let validation = validation && extensions.contains(&ext::debug_utils::NAME);
@@ -95,7 +106,9 @@ pub fn instance(validation: bool) -> Option<(wgpu::Instance, Option<Messenger>)>
     if layer_settings {
         extensions.push(ext::layer_settings::NAME);
     }
-    println!("validation layer: {validation}, thread-safety checker set on: {layer_settings}");
+    println!(
+        "{flags:?}, validation layer: {validation}, thread-safety checker set on: {layer_settings}"
+    );
     // As `wgpu_hal::vulkan::Instance::init` does.
     let app_info = vk::ApplicationInfo::default().api_version(if version < vk::API_VERSION_1_1 {
         vk::API_VERSION_1_0

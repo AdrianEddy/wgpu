@@ -13,7 +13,7 @@ use wgpu_hal::{
 };
 
 /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which `ash` 0.38 lacks.
-const INTERNALLY_SYNCHRONIZED: vk::DeviceQueueCreateFlags =
+pub(super) const INTERNALLY_SYNCHRONIZED: vk::DeviceQueueCreateFlags =
     vk::DeviceQueueCreateFlags::from_raw(1 << 2);
 const INTERNALLY_SYNCHRONIZED_QUEUES: &CStr = c"VK_KHR_internally_synchronized_queues";
 
@@ -38,7 +38,7 @@ impl InternallySynchronizedQueuesFeatures {
 }
 
 /// Whether `adapter` can create internally synchronized queues. Prints why not.
-fn supports_internally_synchronized_queues(adapter: &wgpu::Adapter) -> bool {
+pub(super) fn supports_internally_synchronized_queues(adapter: &wgpu::Adapter) -> bool {
     // SAFETY: Only inspected.
     let hal = unsafe { adapter.as_hal::<Vulkan>() }.unwrap();
     let instance = hal.shared_instance().raw_instance();
@@ -79,8 +79,21 @@ fn open(
     create_flags: vk::DeviceQueueCreateFlags,
     enable_extension: bool,
 ) -> Result<wgpu_hal::OpenDevice<Vulkan>, wgpu_hal::DeviceError> {
-    let (raw, extensions) = create(adapter, create_flags, enable_extension);
-    let queue = DeviceQueue::new(0, 0).create_flags(create_flags);
+    open_with(
+        adapter,
+        DeviceQueue::new(0, 0).create_flags(create_flags),
+        enable_extension,
+    )
+}
+
+/// Opens a device on `adapter` as [`open`] does, giving `device_from_raw` `queue`, which names
+/// queue 0 of family 0.
+pub(super) fn open_with(
+    adapter: &wgpu::Adapter,
+    queue: DeviceQueue,
+    enable_extension: bool,
+) -> Result<wgpu_hal::OpenDevice<Vulkan>, wgpu_hal::DeviceError> {
+    let (raw, extensions) = create(adapter, queue.create_flags, enable_extension);
     // SAFETY: Created by `create` as `device_from_raw` requires, but for the flags when
     // `enable_extension` is false.
     unsafe { from_raw(adapter, raw, &extensions, queue) }
@@ -206,7 +219,7 @@ fn check_internal(calls: &[call_log::Call]) {
 #[test]
 fn an_internally_synchronized_queue_takes_no_lock() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some((instance, _messenger)) = super::instance(false) else {
+    let Some((instance, _messenger)) = super::instance(wgpu::InstanceFlags::empty()) else {
         return;
     };
     for adapter in super::adapters(&instance) {
@@ -230,7 +243,7 @@ fn an_internally_synchronized_queue_takes_no_lock() {
 #[test]
 fn a_callback_can_make_the_queue_internally_synchronized() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some((instance, _messenger)) = super::instance(false) else {
+    let Some((instance, _messenger)) = super::instance(wgpu::InstanceFlags::empty()) else {
         return;
     };
     for adapter in super::adapters(&instance) {
@@ -277,7 +290,7 @@ fn a_callback_can_make_the_queue_internally_synchronized() {
 #[test]
 fn an_internally_synchronized_queue_needs_the_extension() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some((instance, _messenger)) = super::instance(false) else {
+    let Some((instance, _messenger)) = super::instance(wgpu::InstanceFlags::empty()) else {
         return;
     };
     for adapter in super::adapters(&instance) {

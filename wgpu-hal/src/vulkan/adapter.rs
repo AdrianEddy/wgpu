@@ -2869,6 +2869,7 @@ impl super::Adapter {
             family_index,
             queue_index,
             create_flags,
+            ref lock,
         } = queue;
         let internally_synchronized =
             create_flags.contains(DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR);
@@ -3272,11 +3273,22 @@ impl super::Adapter {
             queue_flags,
             queue_index,
             raw_queue,
-            queue_lock: (!internally_synchronized).then(|| {
-                let lock: Arc<dyn super::QueueLock> =
-                    Arc::new(super::queue_lock::DeviceQueueLock::new());
-                lock
-            }),
+            // A lock given is always taken; without one, wgpu-hal's own, unless the queue is
+            // internally synchronized.
+            queue_lock: match lock {
+                Some(lock) => Some(Arc::clone(lock)),
+                None if internally_synchronized => None,
+                None => {
+                    let own: Arc<dyn super::QueueLock> =
+                        Arc::new(super::queue_lock::DeviceQueueLock::new());
+                    Some(own)
+                }
+            }
+            .map(|lock| Arc::new(super::queue_lock::TrackedQueueLock::new(lock))),
+            queue_scope: super::QueueLockScope::Queue {
+                family_index,
+                queue_index,
+            },
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
