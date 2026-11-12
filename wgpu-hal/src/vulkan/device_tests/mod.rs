@@ -6,11 +6,12 @@
 //! `device_tests::`. They watch the Vulkan calls themselves, through [`call_log`].
 
 mod injected;
+mod present_fences;
 mod queue_lock;
 mod teardown;
 
 use alloc::{vec, vec::Vec};
-use core::{borrow::Borrow, iter, time::Duration};
+use core::{borrow::Borrow, iter, ops::Range, time::Duration};
 use std::sync::Mutex;
 
 use ash::{ext, vk};
@@ -88,6 +89,55 @@ fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, supe
     .unwrap();
     let surface = instance.create_surface_from_vk_surface_khr(vk_surface, None);
     Some((instance, surface))
+}
+
+/// An instance with wgpu-hal's desired extensions and no surface, whose device functions are the
+/// driver's own. `None`, having printed why, without Vulkan.
+fn plain_instance() -> Option<super::Instance> {
+    // SAFETY: Loading the Vulkan library has no requirements.
+    let Ok(entry) = (unsafe { ash::Entry::load() }) else {
+        std::println!("skipped: no Vulkan");
+        return None;
+    };
+    let flags = wgt::InstanceFlags::empty();
+    // SAFETY: No requirements.
+    let version = unsafe { entry.try_enumerate_instance_version() }
+        .unwrap()
+        .unwrap_or(vk::API_VERSION_1_0);
+    let extensions = super::Instance::desired_extensions(&entry, version, flags).unwrap();
+    let app_info = vk::ApplicationInfo::default().api_version(if version < vk::API_VERSION_1_1 {
+        vk::API_VERSION_1_0
+    } else {
+        vk::API_VERSION_1_3
+    });
+    let names = extensions
+        .iter()
+        .map(|name| name.as_ptr())
+        .collect::<Vec<_>>();
+    let info = vk::InstanceCreateInfo::default()
+        .application_info(&app_info)
+        .enabled_extension_names(&names);
+    // SAFETY: A valid create info.
+    let raw = unsafe { entry.create_instance(&info, None) }.unwrap();
+    // SAFETY: Created from `entry` with wgpu-hal's desired extensions; wgpu-hal destroys it.
+    let instance = unsafe {
+        super::Instance::from_raw(
+            entry,
+            raw,
+            version,
+            0,
+            None,
+            extensions,
+            flags,
+            wgt::MemoryBudgetThresholds::default(),
+            false,
+            wgt::VulkanSwapchainKind::Native,
+            None,
+            None,
+        )
+    }
+    .unwrap();
+    Some(instance)
 }
 
 /// The instance flags each test runs with: without and with `DEBUG`, which loads the
@@ -236,4 +286,31 @@ fn check_destroyed(calls: &[call_log::Call]) {
         "the device was not destroyed last: {calls:#?}"
     );
     assert_eq!(calls[last].in_flight, 0, "{calls:#?}");
+}
+
+/// The span of each teardown in `calls`: from a mark `unconfigure` to the next mark
+/// `unconfigured`.
+fn teardowns(calls: &[call_log::Call]) -> Vec<Range<usize>> {
+    calls
+        .iter()
+        .enumerate()
+        .filter(|(_, call)| call.name == "unconfigure")
+        .map(|(start, _)| {
+            let end = start
+                + calls[start..]
+                    .iter()
+                    .position(|call| call.name == "unconfigured")
+                    .unwrap();
+            start..end
+        })
+        .collect()
+}
+
+/// How a device's swapchains wait for their presents in their teardown, for the test's output.
+fn teardown_path(device: &super::Device) -> &'static str {
+    if device.presents_signal_fences() {
+        "the teardown waits on present fences"
+    } else {
+        "no present fences: the teardown waits for the queue"
+    }
 }

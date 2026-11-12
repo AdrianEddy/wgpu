@@ -226,6 +226,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Add the `noop_test_hooks` feature to `wgpu-hal`, for wgpu's own tests: it lets them run code inside, and fail, calls on noop surfaces, devices and queues. By @AdrianEddy.
 - Add `wgpu_hal::vulkan::Queue::queue_lock` and `lock_queue`, the lock that wgpu-hal takes around each command on its queue, for code that submits to the same `VkQueue`, such as FFmpeg or an OpenXR runtime. By @AdrianEddy.
 - Give `wgpu_hal::vulkan::Adapter::device_from_raw` a queue lock of the application's (`DeviceQueue::lock`), which wgpu-hal always takes. Its `QueueLockScope` lets one lock serve every queue of a device, and debug builds catch a holder that calls into wgpu. By @AdrianEddy.
+- Vulkan presents signal fences where the device supports `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1`, and a swapchain's teardown waits on them, without the queue lock, instead of for the queue to become idle. `Instance::desired_extensions` now includes the surface maintenance extensions they depend on. By @AdrianEddy.
 
 #### DX12
 

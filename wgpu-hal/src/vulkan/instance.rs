@@ -376,6 +376,17 @@ impl super::Instance {
         // so that we don't have to conditionally use the functions provided by the 1.1 instance
         extensions.push(khr::get_physical_device_properties2::NAME);
 
+        // VK_KHR_surface_maintenance1 and VK_EXT_surface_maintenance1, which depend on
+        // VK_KHR_get_surface_capabilities2: a device's swapchain maintenance extension, with which
+        // presents signal fences, depends on one of them. Both, as each device may support either.
+        if instance_extensions.iter().any(|inst_ext| {
+            inst_ext.extension_name_as_c_str() == Ok(khr::get_surface_capabilities2::NAME)
+        }) {
+            extensions.push(khr::get_surface_capabilities2::NAME);
+            extensions.push(super::adapter::KHR_SURFACE_MAINTENANCE1);
+            extensions.push(ext::surface_maintenance1::NAME);
+        }
+
         // Only keep available extensions.
         extensions.retain(|&ext| {
             if instance_extensions

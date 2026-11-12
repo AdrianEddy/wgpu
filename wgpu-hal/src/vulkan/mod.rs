@@ -325,6 +325,11 @@ impl Surface {
     /// previous call that hasn't been presented yet, and is discarded unread if the
     /// surface is reconfigured first.
     ///
+    /// A chain with a `VkSwapchainPresentFenceInfoKHR` gives the presentation its fence in place
+    /// of the one wgpu-hal gives it where presents signal fences (where the device has
+    /// `swapchainMaintenance1`). The swapchain's teardown then waits for the queue to become idle
+    /// instead.
+    ///
     /// # Safety
     ///
     /// - `chain` must point to a valid `pNext` chain of structs that can extend
@@ -677,6 +682,9 @@ struct DeviceShared {
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
+    /// Whether presents signal fences (`swapchainMaintenance1`): a swapchain's teardown then waits
+    /// on its presents' fences, instead of for the queue to become idle.
+    present_fences: bool,
     extension_fns: DeviceExtensionFunctions,
     vendor_id: u32,
     pipeline_cache_validation_key: [u8; 16],

@@ -242,6 +242,10 @@ pub struct PhysicalDeviceFeatures {
     vulkan_memory_model: Option<vk::PhysicalDeviceVulkanMemoryModelFeaturesKHR<'static>>,
 
     shader_draw_parameters: Option<vk::PhysicalDeviceShaderDrawParametersFeatures<'static>>,
+
+    /// Features provided by `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1`,
+    /// whose structures are the same.
+    swapchain_maintenance1: Option<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>>,
 }
 
 /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which `ash` 0.38 does not define.
@@ -250,6 +254,38 @@ pub(super) const DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR: vk::DeviceQueu
 
 /// `VK_KHR_internally_synchronized_queues`, which `ash` 0.38 does not define.
 const INTERNALLY_SYNCHRONIZED_QUEUES: &CStr = c"VK_KHR_internally_synchronized_queues";
+
+/// `VK_KHR_surface_maintenance1`, which `ash` 0.38 does not define.
+pub(super) const KHR_SURFACE_MAINTENANCE1: &CStr = c"VK_KHR_surface_maintenance1";
+
+/// `VK_KHR_swapchain_maintenance1`, which `ash` 0.38 does not define.
+const KHR_SWAPCHAIN_MAINTENANCE1: &CStr = c"VK_KHR_swapchain_maintenance1";
+
+/// The device extensions with which presents can signal fences, `VK_KHR_swapchain_maintenance1`
+/// first, each with the instance extension it depends on. Their structures are the same: the KHR
+/// structure types have the values of the EXT ones.
+pub(super) const SWAPCHAIN_MAINTENANCE1: [(&CStr, &CStr); 2] = [
+    (KHR_SWAPCHAIN_MAINTENANCE1, KHR_SURFACE_MAINTENANCE1),
+    (
+        ext::swapchain_maintenance1::NAME,
+        ext::surface_maintenance1::NAME,
+    ),
+];
+
+/// Whether a device created with `enabled_extensions`, and with the features that
+/// [`PhysicalDeviceFeatures::from_extensions_and_requested_features`] selects for them, has
+/// `swapchainMaintenance1`: whether its presents can signal fences.
+fn enables_swapchain_maintenance1(
+    phd_features: &PhysicalDeviceFeatures,
+    enabled_extensions: &[&'static CStr],
+) -> bool {
+    SWAPCHAIN_MAINTENANCE1
+        .iter()
+        .any(|(extension, _)| enabled_extensions.contains(extension))
+        && phd_features
+            .swapchain_maintenance1
+            .is_some_and(|features| features.swapchain_maintenance1 == vk::TRUE)
+}
 
 impl PhysicalDeviceFeatures {
     pub fn get_core(&self) -> vk::PhysicalDeviceFeatures {
@@ -341,6 +377,9 @@ impl PhysicalDeviceFeatures {
             info = info.push_next(feature);
         }
         if let Some(ref mut feature) = self.shader_draw_parameters {
+            info = info.push_next(feature);
+        }
+        if let Some(ref mut feature) = self.swapchain_maintenance1 {
             info = info.push_next(feature);
         }
         info
@@ -764,6 +803,18 @@ impl PhysicalDeviceFeatures {
                 Some(
                     vk::PhysicalDeviceShaderDrawParametersFeatures::default()
                         .shader_draw_parameters(needed),
+                )
+            } else {
+                None
+            },
+            // Presents signal fences, on which a swapchain's teardown waits.
+            swapchain_maintenance1: if enables_swapchain_maintenance1(
+                phd_features,
+                enabled_extensions,
+            ) {
+                Some(
+                    vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
+                        .swapchain_maintenance1(true),
                 )
             } else {
                 None
@@ -1360,6 +1411,36 @@ impl PhysicalDeviceProperties {
         self.driver.is_some_and(|driver| driver.driver_id == id)
     }
 
+    /// Drops the extensions that the device lists but that a device of an instance with
+    /// `instance_extensions` cannot enable. A device extension that depends on an instance
+    /// extension that the instance has not enabled is unsupported, whatever the device lists (the
+    /// specification's "Extension Dependencies"). The swapchain maintenance extensions also depend
+    /// on `VK_KHR_get_physical_device_properties2` (or Vulkan 1.1), through which wgpu-hal queries
+    /// and enables their feature: `gpdp2` says whether the instance has its functions.
+    fn drop_extensions_unusable_with(
+        &mut self,
+        instance_extensions: &[&'static CStr],
+        gpdp2: bool,
+    ) {
+        self.supported_extensions.retain(|extension| {
+            SWAPCHAIN_MAINTENANCE1
+                .iter()
+                .all(|&(device_extension, instance_extension)| {
+                    extension.extension_name_as_c_str() != Ok(device_extension)
+                        || (gpdp2 && instance_extensions.contains(&instance_extension))
+                })
+        });
+    }
+
+    /// The extension with which presents can signal fences that the device supports:
+    /// `VK_KHR_swapchain_maintenance1`, else `VK_EXT_swapchain_maintenance1`.
+    fn swapchain_maintenance1(&self) -> Option<&'static CStr> {
+        SWAPCHAIN_MAINTENANCE1
+            .iter()
+            .map(|&(extension, _)| extension)
+            .find(|&extension| self.supports_extension(extension))
+    }
+
     /// Map `requested_features` to the list of Vulkan extension strings required to create the logical device.
     fn get_required_extensions(&self, requested_features: wgt::Features) -> Vec<&'static CStr> {
         let mut extensions = Vec::new();
@@ -1517,6 +1598,12 @@ impl PhysicalDeviceProperties {
         // Optional `VK_KHR_incremental_present`
         if self.supports_extension(khr::incremental_present::NAME) {
             extensions.push(khr::incremental_present::NAME);
+        }
+
+        // Optional `VK_KHR_swapchain_maintenance1`, else `VK_EXT_swapchain_maintenance1`: presents
+        // signal fences, on which a swapchain's teardown waits.
+        if let Some(extension) = self.swapchain_maintenance1() {
+            extensions.push(extension);
         }
 
         // Optional `VK_EXT_robustness2`
@@ -2062,6 +2149,10 @@ impl super::InstanceShared {
                 unsafe { self.raw.enumerate_device_extension_properties(phd).unwrap() };
             capabilities.properties = unsafe { self.raw.get_physical_device_properties(phd) };
             capabilities.device_api_version = capabilities.properties.api_version;
+            capabilities.drop_extensions_unusable_with(
+                &self.extensions,
+                self.get_physical_device_properties.is_some(),
+            );
 
             let supports_multiview = capabilities.device_api_version >= vk::API_VERSION_1_1
                 || capabilities.supports_extension(khr::multiview::NAME);
@@ -2439,6 +2530,13 @@ impl super::InstanceShared {
                 let next = features
                     .shader_draw_parameters
                     .insert(vk::PhysicalDeviceShaderDrawParametersFeatures::default());
+                features2 = features2.push_next(next);
+            }
+
+            if capabilities.swapchain_maintenance1().is_some() {
+                let next = features
+                    .swapchain_maintenance1
+                    .insert(vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default());
                 features2 = features2.push_next(next);
             }
 
@@ -3293,6 +3391,7 @@ impl super::Adapter {
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
             enabled_extensions: enabled_extensions.into(),
+            present_fences: enables_swapchain_maintenance1(&self.phd_features, enabled_extensions),
             extension_fns: super::DeviceExtensionFunctions {
                 debug_utils: debug_utils_fn,
                 draw_indirect_count: indirect_count_fn,
@@ -3968,19 +4067,4 @@ fn query_cooperative_matrix_properties(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::arm_driver_leaks_timeline_semaphores as leaks;
-
-    #[test]
-    fn arm_timeline_semaphore_driver_versions() {
-        assert!(leaks("v1.g18p0-01eac0.9e534f339477793d151cc7ab4c27f2c0"));
-        assert!(!leaks("v1.g24p0-00eac0.3c7aec95bbe4cb46ae6709632084ff89"));
-        assert!(leaks(
-            "v1.r44p0-wayland-drm-g310-dmaheap-aarch64-d877e132c-18"
-        ));
-        assert!(!leaks("v1.r46p0-01eac0"));
-        assert!(leaks("?"));
-        assert!(leaks("v1.x50p0"));
-        assert!(leaks("v1.r50"));
-    }
-}
+mod tests;

@@ -13,7 +13,7 @@ use crate::{Device as _, Queue as _, Surface as _};
 /// A lock that excludes like a mutex, for every scope, tells the wrappers which thread holds it,
 /// and records the scope of each acquisition. A binary semaphore: it keeps no guard state.
 #[derive(Default)]
-struct InstrumentedLock {
+pub(super) struct InstrumentedLock {
     locked: Mutex<bool>,
     unlocked: Condvar,
     scopes: Mutex<Vec<QueueLockScope>>,
@@ -39,14 +39,23 @@ unsafe impl QueueLock for InstrumentedLock {
 }
 
 /// Opens a device on `adapter` with `vkCreateDevice` and `device_from_raw`, on queue 0 of family
-/// 0, giving it `lock`.
-fn open(
+/// 0, giving it `lock`. Without `present_fences`, the device lacks the swapchain maintenance
+/// extensions, so that its presents signal no fences.
+pub(super) fn open(
     adapter: &super::super::Adapter,
     instance: &super::super::Instance,
     lock: Arc<InstrumentedLock>,
+    present_fences: bool,
 ) -> (super::super::Device, super::super::Queue) {
     let features = wgt::Features::empty();
-    let extensions = adapter.required_device_extensions(features);
+    let mut extensions = adapter.required_device_extensions(features);
+    if !present_fences {
+        extensions.retain(|extension| {
+            !super::super::adapter::SWAPCHAIN_MAINTENANCE1
+                .iter()
+                .any(|(name, _)| name == extension)
+        });
+    }
     let mut physical_features = adapter.physical_device_features(&extensions, features);
     let priorities = [1.0];
     let queues = [vk::DeviceQueueCreateInfo::default()
@@ -87,19 +96,23 @@ fn open(
 
 /// Configures a headless surface, presents to it, configures it again, discards a frame and
 /// unconfigures it, then waits for the queue to become idle, on each adapter, with a lock that the
-/// application gave the device: every queue command holds it, with the queue's scope, and no
-/// fence wait does.
+/// application gave the device, with present fences where the adapter supports them and without:
+/// every queue command holds the lock, with the queue's scope, and no fence wait does.
 #[test]
 fn surface_operations_hold_the_lock_the_application_gave() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    for flags in super::FLAGS {
+    for (flags, present_fences) in super::FLAGS
+        .into_iter()
+        .flat_map(|flags| [(flags, true), (flags, false)])
+    {
         std::println!("{flags:?}");
         let Some((instance, surface)) = super::headless_instance(flags) else {
             return;
         };
         for (exposed, caps) in super::adapters(&instance, &surface) {
             let lock = Arc::new(InstrumentedLock::default());
-            let (device, queue) = open(&exposed.adapter, &instance, lock.clone());
+            let (device, queue) = open(&exposed.adapter, &instance, lock.clone(), present_fences);
+            std::println!("{:?}: {}", exposed.info.name, super::teardown_path(&device));
             let config = super::config(&caps);
             // SAFETY: The device's own fence.
             let fence = unsafe { device.create_fence() }.unwrap();
