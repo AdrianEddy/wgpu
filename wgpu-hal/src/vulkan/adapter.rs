@@ -3223,6 +3223,7 @@ impl super::Adapter {
             queue_flags,
             queue_index,
             raw_queue,
+            queue_lock: Arc::new(super::queue_lock::DeviceQueueLock::new()),
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,

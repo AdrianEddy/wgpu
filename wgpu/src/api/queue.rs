@@ -360,6 +360,8 @@ impl Queue {
     ///   is the last reference to it and it is not in use by the GPU.
     ///   The guard and handle may be dropped at any time however.
     /// - All the safety requirements of wgpu-hal must be upheld.
+    /// - On Vulkan, a command that accesses the raw queue holds the queue's lock (see
+    ///   `wgpu_hal::vulkan::Queue::queue_lock`). DX12's and Metal's queues need no lock.
     ///
     /// [`A::Queue`]: hal::Api::Queue
     #[cfg(wgpu_core)]

@@ -1051,7 +1051,9 @@ impl Swapchain for DxgiSwapchain {
         // waiting for `interop_progress_value` also waits out the last in-flight present. Vulkan's
         // work on the buffers is on the device's queue: its idle wait covers it, and needs no other
         // queue of the device externally synchronized, as a device's idle wait would.
-        let _ = unsafe { device.shared.raw.queue_wait_idle(device.shared.raw_queue) };
+        let _ = device.shared.with_queue_lock(|| unsafe {
+            device.shared.raw.queue_wait_idle(device.shared.raw_queue)
+        });
         // A failed submit or a device loss can leave `vulkan_progress` values that Vulkan never
         // signals, and the interop queue waits for them. Vulkan is idle, so signal them here.
         let vulkan_progress_value = self.vulkan_progress_counter.load(Ordering::Relaxed);

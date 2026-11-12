@@ -1,5 +1,6 @@
 //! Wrappers of the Vulkan device functions that access a queue, through which a test watches the
-//! calls that wgpu-hal makes. wgpu-hal's own tests use it.
+//! calls that wgpu-hal makes: for wgpu's own tests (feature `vulkan_test_hooks`), not a stable
+//! API.
 //!
 //! [`load_instance`] loads an instance whose `vkGetDeviceProcAddr` hands out these wrappers. Every
 //! device function that wgpu-hal loads goes through it: `ash::Device`'s tables, and the loaders of
@@ -52,6 +53,8 @@ pub struct Call {
 #[derive(Debug)]
 pub struct Recorded {
     pub calls: Vec<Call>,
+    /// The most queue commands that were in progress at once, on any threads.
+    pub most_queue_commands_at_once: usize,
 }
 
 static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
@@ -59,12 +62,14 @@ static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
 static REAL: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
 static REAL_GET_DEVICE_PROC_ADDR: Mutex<Option<vk::PFN_vkGetDeviceProcAddr>> = Mutex::new(None);
 static IN_QUEUE_COMMAND: AtomicUsize = AtomicUsize::new(0);
+static MOST_AT_ONCE: AtomicUsize = AtomicUsize::new(0);
 
 /// Takes what was recorded since the last call, and starts recording afresh.
 pub fn take() -> Recorded {
     let mut calls = CALLS.lock().unwrap();
     Recorded {
         calls: mem::take(&mut *calls),
+        most_queue_commands_at_once: MOST_AT_ONCE.swap(0, Ordering::SeqCst),
     }
 }
 
@@ -105,7 +110,8 @@ unsafe fn real<F: Copy>(name: &'static str) -> F {
 /// Runs `f`, a queue command, counting the queue commands in progress.
 fn queue_command<R>(name: &'static str, queue: vk::Queue, f: impl FnOnce() -> R) -> R {
     record(name, Kind::Queue, queue);
-    IN_QUEUE_COMMAND.fetch_add(1, Ordering::SeqCst);
+    let now = IN_QUEUE_COMMAND.fetch_add(1, Ordering::SeqCst) + 1;
+    MOST_AT_ONCE.fetch_max(now, Ordering::SeqCst);
     let result = f();
     IN_QUEUE_COMMAND.fetch_sub(1, Ordering::SeqCst);
     result

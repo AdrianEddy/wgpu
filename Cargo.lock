@@ -5101,6 +5101,7 @@ dependencies = [
  "anyhow",
  "approx",
  "arrayvec",
+ "ash",
  "bitflags 2.13.2",
  "bytemuck",
  "cargo_metadata",
