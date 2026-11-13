@@ -341,7 +341,7 @@ mod hooks {
 
     use super::setup;
     use crate::{
-        noop::{DeviceOperation, SurfaceCall, SurfaceViolation},
+        noop::{AdapterQueries, Context, DeviceOperation, SurfaceCall, SurfaceViolation},
         CommandEncoder as _, Device as _, Instance as _, Queue as _, Surface as _,
     };
 
@@ -534,7 +534,7 @@ mod hooks {
     }
 
     #[test]
-    #[should_panic(expected = "only a noop device or queue has test hooks")]
+    #[should_panic(expected = "only a noop device or queue has device test hooks")]
     fn an_instance_has_no_device_hooks() {
         let s = setup();
         s.instance
@@ -542,7 +542,7 @@ mod hooks {
     }
 
     #[test]
-    #[should_panic(expected = "only a noop device or queue has test hooks")]
+    #[should_panic(expected = "only a noop device or queue has device test hooks")]
     fn an_adapter_has_no_device_hooks() {
         let s = setup();
         // SAFETY: The noop backend has no requirements here.
@@ -550,5 +550,82 @@ mod hooks {
             .remove(0)
             .adapter;
         adapter.run_during_next_submit(|| ());
+    }
+
+    #[test]
+    fn an_instance_selects_its_adapter_only_when_asked() {
+        let s = setup();
+        let request = |force_fallback_adapter| {
+            // SAFETY: The noop backend has no requirements here.
+            unsafe {
+                s.instance
+                    .request_adapter(wgt::PowerPreference::None, force_fallback_adapter, None)
+            }
+            .is_some()
+        };
+        assert!(!request(false), "an instance declines by default");
+        s.instance.select_adapter_lazily(true);
+        assert!(request(false));
+        // The adapter's default device type is `Cpu`, which a fallback request takes.
+        assert!(request(true));
+        // `setup` enumerated the adapters once.
+        assert_eq!(
+            s.instance.adapter_queries(),
+            AdapterQueries {
+                enumerations: 1,
+                requests: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn a_fallback_request_selects_no_hardware_adapter() {
+        let instance_desc = crate::InstanceDescriptor {
+            name: "noop fallback test",
+            flags: wgt::InstanceFlags::empty(),
+            memory_budget_thresholds: wgt::MemoryBudgetThresholds::default(),
+            backend_options: wgt::BackendOptions {
+                noop: wgt::NoopBackendOptions {
+                    device_type: Some(wgt::DeviceType::DiscreteGpu),
+                    ..wgt::NoopBackendOptions::enabled()
+                },
+                ..Default::default()
+            },
+            telemetry: None,
+            display: None,
+        };
+        // SAFETY: The noop backend has no requirements here.
+        let instance = unsafe { Context::init(&instance_desc) }.unwrap();
+        instance.select_adapter_lazily(true);
+        let request = |force_fallback_adapter| {
+            // SAFETY: As above.
+            unsafe {
+                instance.request_adapter(wgt::PowerPreference::None, force_fallback_adapter, None)
+            }
+            .is_some()
+        };
+        assert!(request(false), "a request selects the discrete adapter");
+        assert!(
+            !request(true),
+            "a fallback request selects a hardware adapter"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "only a noop instance has instance test hooks")]
+    fn an_adapter_has_no_instance_hooks() {
+        let s = setup();
+        // SAFETY: The noop backend has no requirements here.
+        let adapter = unsafe { s.instance.enumerate_adapters(None) }
+            .remove(0)
+            .adapter;
+        adapter.select_adapter_lazily(true);
+    }
+
+    #[test]
+    #[should_panic(expected = "only a noop instance has instance test hooks")]
+    fn a_device_has_no_instance_hooks() {
+        let s = setup();
+        s.device.adapter_queries();
     }
 }
