@@ -27,6 +27,9 @@ pub struct Api;
 #[derive(Debug)]
 pub struct Context {
     options: Arc<wgt::NoopBackendOptions>,
+    /// The test hooks of an instance. `None` for an adapter, a device or a queue.
+    #[cfg(feature = "noop_test_hooks")]
+    instance: Option<InstanceHooks>,
     /// The test hooks of a device and its queue, which share them. `None` for an instance or an
     /// adapter.
     #[cfg(feature = "noop_test_hooks")]
@@ -34,10 +37,23 @@ pub struct Context {
 }
 
 impl Context {
-    /// An instance or an adapter.
-    fn new(options: &Arc<wgt::NoopBackendOptions>) -> Self {
+    /// An instance.
+    fn new_instance(options: &Arc<wgt::NoopBackendOptions>) -> Self {
         Self {
             options: Arc::clone(options),
+            #[cfg(feature = "noop_test_hooks")]
+            instance: Some(InstanceHooks::default()),
+            #[cfg(feature = "noop_test_hooks")]
+            device: None,
+        }
+    }
+
+    /// An adapter.
+    fn new_adapter(options: &Arc<wgt::NoopBackendOptions>) -> Self {
+        Self {
+            options: Arc::clone(options),
+            #[cfg(feature = "noop_test_hooks")]
+            instance: None,
             #[cfg(feature = "noop_test_hooks")]
             device: None,
         }
@@ -50,11 +66,113 @@ impl Context {
         let new = || Self {
             options: Arc::clone(options),
             #[cfg(feature = "noop_test_hooks")]
+            instance: None,
+            #[cfg(feature = "noop_test_hooks")]
             device: Some(Arc::clone(&hooks)),
         };
         crate::OpenDevice {
             device: new(),
             queue: new(),
+        }
+    }
+
+    /// The instance's only adapter, as [`crate::Instance::enumerate_adapters`] exposes it.
+    fn expose_adapter(&self) -> crate::ExposedAdapter<Api> {
+        let subgroup_min_size = self
+            .options
+            .subgroup_min_size
+            .unwrap_or(wgt::MINIMUM_SUBGROUP_MIN_SIZE);
+        let subgroup_max_size = self
+            .options
+            .subgroup_max_size
+            .unwrap_or(wgt::MAXIMUM_SUBGROUP_MAX_SIZE);
+        let features = self.options.features.unwrap_or(wgt::Features::all());
+        let limits = self
+            .options
+            .limits
+            .clone()
+            .unwrap_or(CAPABILITIES.limits.clone());
+
+        let default_info = adapter_info();
+        let info = wgt::AdapterInfo {
+            device_type: self.options.device_type.unwrap_or(default_info.device_type),
+            subgroup_min_size,
+            subgroup_max_size,
+            ..default_info
+        };
+
+        let capabilities = crate::Capabilities {
+            limits,
+            ..CAPABILITIES
+        };
+
+        crate::ExposedAdapter {
+            adapter: Context::new_adapter(&self.options),
+            info,
+            features,
+            capabilities,
+        }
+    }
+}
+
+/// The test hooks of a noop instance.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Debug, Default)]
+struct InstanceHooks {
+    /// Whether [`crate::Instance::request_adapter`] selects the adapter (see
+    /// [`Context::select_adapter_lazily`]).
+    select_lazily: wgpu_sync::atomic::AtomicBool,
+    /// How many times [`crate::Instance::enumerate_adapters`] ran.
+    enumerations: wgpu_sync::atomic::AtomicUsize,
+    /// How many times [`crate::Instance::request_adapter`] ran.
+    requests: wgpu_sync::atomic::AtomicUsize,
+}
+
+/// How many times a noop instance was asked for adapters, as [`Context::adapter_queries`]
+/// reports it.
+#[cfg(feature = "noop_test_hooks")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AdapterQueries {
+    /// Calls of [`crate::Instance::enumerate_adapters`], which exposes every adapter.
+    pub enumerations: usize,
+    /// Calls of [`crate::Instance::request_adapter`], which exposes at most the one it selects.
+    pub requests: usize,
+}
+
+#[cfg(feature = "noop_test_hooks")]
+impl Context {
+    fn instance_hooks(&self) -> &InstanceHooks {
+        self.instance
+            .as_ref()
+            .expect("only a noop instance has instance test hooks")
+    }
+
+    /// Makes [`crate::Instance::request_adapter`] of this instance select its adapter, the one
+    /// that [`crate::Instance::enumerate_adapters`] exposes, as a backend that selects its
+    /// adapter without exposing the others does. Unless `force_fallback_adapter` is requested and
+    /// the adapter is not a [`wgt::DeviceType::Cpu`] one: then it selects none.
+    ///
+    /// By default it declines, as the trait's default does: with one adapter, nothing is spared.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is not an instance.
+    pub fn select_adapter_lazily(&self, lazily: bool) {
+        self.instance_hooks()
+            .select_lazily
+            .store(lazily, Ordering::Relaxed);
+    }
+
+    /// How many times this instance was asked for adapters so far.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is not an instance.
+    pub fn adapter_queries(&self) -> AdapterQueries {
+        let hooks = self.instance_hooks();
+        AdapterQueries {
+            enumerations: hooks.enumerations.load(Ordering::Relaxed),
+            requests: hooks.requests.load(Ordering::Relaxed),
         }
     }
 }
@@ -172,7 +290,7 @@ impl Context {
     fn hooks(&self) -> &DeviceHooks {
         self.device
             .as_deref()
-            .expect("only a noop device or queue has test hooks, not an instance or an adapter")
+            .expect("only a noop device or queue has device test hooks")
     }
 
     /// Makes the next `operation` on this device or its queue fail with `error`. Failures of the
@@ -364,7 +482,7 @@ impl crate::Instance for Context {
     unsafe fn init(desc: &crate::InstanceDescriptor<'_>) -> Result<Self, crate::InstanceError> {
         let options = Arc::new(desc.backend_options.noop.clone());
         if options.enable {
-            Ok(Context::new(&options))
+            Ok(Context::new_instance(&options))
         } else {
             Err(crate::InstanceError::new(String::from(
                 "noop backend disabled because NoopBackendOptions::enable is false",
@@ -382,40 +500,32 @@ impl crate::Instance for Context {
         &self,
         _surface_hint: Option<&Surface>,
     ) -> Vec<crate::ExposedAdapter<Api>> {
-        let subgroup_min_size = self
-            .options
-            .subgroup_min_size
-            .unwrap_or(wgt::MINIMUM_SUBGROUP_MIN_SIZE);
-        let subgroup_max_size = self
-            .options
-            .subgroup_max_size
-            .unwrap_or(wgt::MAXIMUM_SUBGROUP_MAX_SIZE);
-        let features = self.options.features.unwrap_or(wgt::Features::all());
-        let limits = self
-            .options
-            .limits
-            .clone()
-            .unwrap_or(CAPABILITIES.limits.clone());
+        #[cfg(feature = "noop_test_hooks")]
+        if let Some(hooks) = &self.instance {
+            hooks.enumerations.fetch_add(1, Ordering::Relaxed);
+        }
+        vec![self.expose_adapter()]
+    }
 
-        let default_info = adapter_info();
-        let info = wgt::AdapterInfo {
-            device_type: self.options.device_type.unwrap_or(default_info.device_type),
-            subgroup_min_size,
-            subgroup_max_size,
-            ..default_info
+    /// Declines, as the default does, unless a test enabled [`Context::select_adapter_lazily`]
+    /// on this instance.
+    #[cfg(feature = "noop_test_hooks")]
+    unsafe fn request_adapter(
+        &self,
+        _power_preference: wgt::PowerPreference,
+        force_fallback_adapter: bool,
+        _surface_hint: Option<&Surface>,
+    ) -> Option<crate::ExposedAdapter<Api>> {
+        let Some(hooks) = &self.instance else {
+            return None;
         };
-
-        let capabilities = crate::Capabilities {
-            limits,
-            ..CAPABILITIES
-        };
-
-        vec![crate::ExposedAdapter {
-            adapter: Context::new(&self.options),
-            info,
-            features,
-            capabilities,
-        }]
+        hooks.requests.fetch_add(1, Ordering::Relaxed);
+        if !hooks.select_lazily.load(Ordering::Relaxed) {
+            return None;
+        }
+        let adapter = self.expose_adapter();
+        (!force_fallback_adapter || adapter.info.device_type == wgt::DeviceType::Cpu)
+            .then_some(adapter)
     }
 }
 

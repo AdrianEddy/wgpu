@@ -115,8 +115,212 @@ mod request_adapter_error {
 
 /// `request_adapter` lets each backend select its adapter without exposing the others
 /// (`wgpu_hal::Instance::request_adapter`), and checks that selection as it checks the adapters of
-/// a full enumeration.
+/// a full enumeration. The noop backend selects so only when a test asks it to
+/// (`wgpu_hal::noop::Context::select_adapter_lazily`).
 mod lazy_adapter {
+    use std::sync::Arc;
+
+    use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WebDisplayHandle, WebWindowHandle};
+    use wgpu_core as wgc;
+    use wgpu_hal::noop::AdapterQueries;
+    use wgpu_types as wgt;
+
+    /// A wgpu-core instance with only the noop backend, which selects its adapter itself if
+    /// `lazily`.
+    fn noop_instance(
+        options: wgt::NoopBackendOptions,
+        lazily: bool,
+    ) -> Arc<wgc::instance::Instance> {
+        let instance = wgc::instance::Instance::new(
+            "test",
+            wgt::instance::InstanceDescriptor {
+                backends: wgt::Backends::NOOP,
+                backend_options: wgt::BackendOptions {
+                    noop: wgt::NoopBackendOptions {
+                        enable: true,
+                        ..options
+                    },
+                    ..Default::default()
+                },
+                ..wgt::instance::InstanceDescriptor::new_without_display_handle()
+            },
+            None,
+        );
+        noop(&instance).select_adapter_lazily(lazily);
+        instance
+    }
+
+    fn noop(instance: &wgc::instance::Instance) -> &wgpu_hal::noop::Context {
+        // SAFETY: the tests only use the noop instance's test hooks; nothing destroys it.
+        unsafe { instance.as_hal::<wgpu_hal::api::Noop>() }.expect("the noop backend is enabled")
+    }
+
+    fn queries(enumerations: usize, requests: usize) -> AdapterQueries {
+        AdapterQueries {
+            enumerations,
+            requests,
+        }
+    }
+
+    /// A backend that selects its adapter itself is not enumerated.
+    #[test]
+    fn selection_spares_the_enumeration() {
+        let instance = noop_instance(wgt::NoopBackendOptions::default(), true);
+        instance
+            .request_adapter(&wgt::RequestAdapterOptions::default(), wgt::Backends::NOOP)
+            .unwrap();
+        assert_eq!(noop(&instance).adapter_queries(), queries(0, 1));
+    }
+
+    /// A backend that declines to select its adapter is enumerated.
+    #[test]
+    fn declined_selection_enumerates() {
+        let instance = noop_instance(wgt::NoopBackendOptions::default(), false);
+        instance
+            .request_adapter(&wgt::RequestAdapterOptions::default(), wgt::Backends::NOOP)
+            .unwrap();
+        assert_eq!(noop(&instance).adapter_queries(), queries(1, 1));
+    }
+
+    /// `request_adapters` and `enumerate_adapters` list every adapter, so they never ask a
+    /// backend to select one.
+    #[test]
+    fn listing_adapters_enumerates() {
+        let instance = noop_instance(wgt::NoopBackendOptions::default(), true);
+        instance
+            .request_adapters(&wgt::RequestAdapterOptions::default(), wgt::Backends::NOOP)
+            .unwrap();
+        assert_eq!(noop(&instance).adapter_queries(), queries(1, 0));
+        assert_eq!(
+            instance
+                .enumerate_adapters(wgt::Backends::NOOP, false)
+                .len(),
+            1
+        );
+        assert_eq!(noop(&instance).adapter_queries(), queries(2, 0));
+    }
+
+    /// The selected adapter gets the features and limits that the enumerated adapter gets: here,
+    /// the limit bucket in place of the noop backend's maximum limits.
+    #[test]
+    fn selection_is_filtered_as_an_enumerated_adapter() {
+        let options = wgt::NoopBackendOptions {
+            device_type: Some(wgt::DeviceType::DiscreteGpu),
+            features: Some(wgt::Features::CORE_FEATURES_AND_LIMITS),
+            ..Default::default()
+        };
+        let request = wgt::RequestAdapterOptions {
+            apply_limit_buckets: true,
+            ..Default::default()
+        };
+        let adapter = |lazily| {
+            let instance = noop_instance(options.clone(), lazily);
+            let adapter = instance
+                .request_adapter(&request, wgt::Backends::NOOP)
+                .unwrap();
+            (
+                adapter.get_info(),
+                adapter.features(),
+                adapter.limits(),
+                noop(&instance).adapter_queries(),
+            )
+        };
+        let (info, features, limits, enumerated_queries) = adapter(false);
+        let (selected_info, selected_features, selected_limits, selected_queries) = adapter(true);
+
+        assert_eq!(enumerated_queries, queries(1, 1));
+        assert_eq!(selected_queries, queries(0, 1));
+        assert_eq!(limits, wgt::Limits::defaults());
+        assert_eq!(selected_info, info);
+        assert_eq!(selected_features, features);
+        assert_eq!(selected_limits, limits);
+    }
+
+    /// A selected adapter that does not suit the request is dropped, and the backend is
+    /// enumerated: the request fails as it does without the selection. Below WebGPU's minimum
+    /// limits, no limit bucket takes the adapter, which only wgpu-core can tell.
+    #[test]
+    fn unsuitable_selection_enumerates() {
+        let options = wgt::NoopBackendOptions {
+            limits: Some(wgt::Limits {
+                max_texture_dimension_2d: 1024,
+                ..wgt::Limits::default()
+            }),
+            device_type: Some(wgt::DeviceType::DiscreteGpu),
+            features: Some(wgt::Features::CORE_FEATURES_AND_LIMITS),
+            ..Default::default()
+        };
+        let request = wgt::RequestAdapterOptions {
+            apply_limit_buckets: true,
+            ..Default::default()
+        };
+        let error = |lazily| {
+            let instance = noop_instance(options.clone(), lazily);
+            let Err(error) = instance.request_adapter(&request, wgt::Backends::NOOP) else {
+                panic!("an adapter suits the request");
+            };
+            (error, noop(&instance).adapter_queries())
+        };
+        let (enumerated, enumerated_queries) = error(false);
+        let (selected, selected_queries) = error(true);
+
+        assert_eq!(enumerated_queries, queries(1, 1));
+        assert_eq!(selected_queries, queries(1, 1));
+        assert_eq!(selected, enumerated);
+    }
+
+    /// A backend with no adapter for `force_fallback_adapter` selects none, and is enumerated:
+    /// the error gives the enumeration's reason.
+    #[test]
+    fn no_fallback_selection_enumerates() {
+        let instance = noop_instance(
+            wgt::NoopBackendOptions {
+                device_type: Some(wgt::DeviceType::DiscreteGpu),
+                ..Default::default()
+            },
+            true,
+        );
+        let request = wgt::RequestAdapterOptions {
+            force_fallback_adapter: true,
+            ..Default::default()
+        };
+        let Err(wgt::RequestAdapterError::NotFound {
+            no_fallback_backends,
+            ..
+        }) = instance.request_adapter(&request, wgt::Backends::NOOP)
+        else {
+            panic!("expected `NotFound`");
+        };
+
+        assert_eq!(noop(&instance).adapter_queries(), queries(1, 1));
+        assert_eq!(no_fallback_backends, wgt::Backends::NOOP);
+    }
+
+    /// A request for a surface gives the backend the surface, and checks the selection against it as
+    /// it checks an enumerated adapter: a selection that can present to it spares the enumeration.
+    #[test]
+    fn selection_for_a_surface_spares_the_enumeration() {
+        let instance = noop_instance(wgt::NoopBackendOptions::default(), true);
+        // SAFETY: The noop backend does not use the handles.
+        let surface = unsafe {
+            instance.create_surface(
+                Some(RawDisplayHandle::Web(WebDisplayHandle::new())),
+                RawWindowHandle::Web(WebWindowHandle::new(1)),
+            )
+        }
+        .unwrap();
+        let request = wgt::RequestAdapterOptions {
+            compatible_surface: Some(&*surface),
+            ..Default::default()
+        };
+        let adapter = instance
+            .request_adapter(&request, wgt::Backends::NOOP)
+            .unwrap();
+
+        assert_eq!(noop(&instance).adapter_queries(), queries(0, 1));
+        assert!(adapter.is_surface_supported(&surface));
+    }
+
     /// These expose the adapters of every native backend (DX12 creates a device for each one it
     /// exposes), so they need the machine's drivers. They skip where there is no adapter of their
     /// kind.
