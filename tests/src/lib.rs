@@ -16,7 +16,7 @@ pub mod wasm;
 pub mod wasm_manager;
 
 #[cfg(target_arch = "wasm32")]
-pub use init::initialize_html_canvas;
+pub use init::{initialize_html_canvas, WebDisplayHandle};
 
 pub use self::image::ComparisonType;
 pub use config::{GpuTestConfiguration, GpuTestInitializer};

@@ -90,6 +90,7 @@ mod transition_resources;
 mod vertex_formats;
 mod vertex_indices;
 mod vertex_state;
+mod web_request_adapter;
 mod write_texture;
 mod zero_init;
 
@@ -186,6 +187,8 @@ fn all_tests() -> Vec<wgpu_test::GpuTestInitializer> {
     vertex_formats::all_tests(&mut tests);
     vertex_indices::all_tests(&mut tests);
     vertex_state::all_tests(&mut tests);
+    #[cfg(wasm_test)]
+    web_request_adapter::all_tests(&mut tests);
     write_texture::all_tests(&mut tests);
     zero_init::all_tests(&mut tests);
     naga_capabilities::all_tests(&mut tests);
