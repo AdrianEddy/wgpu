@@ -168,6 +168,23 @@ impl Instance {
     ///
     /// When targeting WebGL2, a [`compatible_surface`](RequestAdapterOptions::compatible_surface)
     /// must be specified; using `RequestAdapterOptions::default()` will not succeed.
+    ///
+    /// Unlike [`Self::enumerate_adapters`], this need not expose every adapter. Exposing a DX12
+    /// adapter creates a device for it, so DX12 first orders its adapters from DXGI's descriptors:
+    /// in `IDXGIFactory1::EnumAdapters1` order for [`PowerPreference::None`], and by
+    /// `IDXGIFactory6::EnumAdapterByGpuPreference`, software adapters last, for `LowPower` and
+    /// `HighPerformance` (only software adapters with `force_fallback_adapter`). It exposes them in
+    /// that order until one exposes. Without DXGI 1.6 for a preference, when none exposes, or when
+    /// the adapter it selects does not suit `options`, every DX12 adapter is exposed. The other
+    /// backends expose all their adapters.
+    ///
+    /// For `LowPower` and `HighPerformance`, DX12's selection follows DXGI's order, so it may
+    /// differ from the adapter that ranking all of DX12's adapters by device type would return:
+    /// another adapter of the same type, or, where a per-app GPU preference set in Windows'
+    /// graphics settings supersedes the requested one, an adapter of another type. With other
+    /// backends, DX12's selection is ranked with their adapters by device type, Vulkan's first
+    /// among equals, so a Vulkan adapter of the type that the preference ranks first is
+    /// returned, and the per-app preference has no effect.
     pub fn request_adapter(
         &self,
         options: &RequestAdapterOptions<'_, '_>,

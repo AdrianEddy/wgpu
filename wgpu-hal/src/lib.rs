@@ -705,6 +705,39 @@ pub trait Instance: Sized + WasmNotSendSync {
         &self,
         surface_hint: Option<&<Self::A as Api>::Surface>,
     ) -> Vec<ExposedAdapter<Self::A>>;
+
+    /// Expose the single adapter that best matches `power_preference` and
+    /// `force_fallback_adapter`, exposing as few adapters as possible.
+    ///
+    /// `None`, which the default returns, means the backend selects none; the
+    /// caller then exposes every adapter with [`Self::enumerate_adapters`].
+    /// Overrides should select consistently with how callers rank a full
+    /// enumeration (`force_fallback_adapter` restricts the choice to
+    /// [`wgt::DeviceType::Cpu`]), but may follow a native preference order
+    /// instead. For `LowPower` and `HighPerformance`, DX12 follows DXGI's GPU
+    /// preference, which orders integrated, discrete and external GPUs by
+    /// class, and which a per-app GPU preference in Windows' graphics settings
+    /// can supersede. DXGI does not document deriving those classes from the
+    /// UMA flag that DX12's [`wgt::DeviceType`] comes from: its selection can
+    /// be of another type than the caller's ranking puts first, and it can
+    /// order adapters of the same type differently from enumeration.
+    ///
+    /// The caller checks the result as it checks an enumerated adapter, also
+    /// against the request's surface, and enumerates the backend if it does not
+    /// suit, but does not rank it against the backend's other adapters. An
+    /// override may ignore `surface_hint` where any adapter it selects can
+    /// present to any of its surfaces, as on DX12; elsewhere a selection that
+    /// cannot present costs an enumeration, which exposes it again. GLES on
+    /// WebGL2 exposes its adapter from the hint's context, so it cannot ignore
+    /// it.
+    unsafe fn request_adapter(
+        &self,
+        _power_preference: wgt::PowerPreference,
+        _force_fallback_adapter: bool,
+        _surface_hint: Option<&<Self::A as Api>::Surface>,
+    ) -> Option<ExposedAdapter<Self::A>> {
+        None
+    }
 }
 
 pub trait Surface: WasmNotSendSync {
@@ -3302,6 +3335,9 @@ pub enum D3D12ExposeAdapterResult {
 /// Pluggable telemetry, mainly to be used by Firefox.
 #[derive(Debug, Clone, Copy)]
 pub struct Telemetry {
+    /// Called once for each DX12 adapter that wgpu-hal tries to expose, with the outcome.
+    /// [`Instance::enumerate_adapters`] tries every adapter, and [`Instance::request_adapter`]
+    /// only those up to the one it selects.
     #[cfg(dx12)]
     pub d3d12_expose_adapter: fn(
         desc: &windows::Win32::Graphics::Dxgi::DXGI_ADAPTER_DESC2,
