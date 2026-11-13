@@ -119,6 +119,44 @@ pub fn enumerate_adapters(factory: DxgiFactory) -> Vec<DxgiAdapter> {
     adapters
 }
 
+/// [`enumerate_adapters`], ordered by `IDXGIFactory6::EnumAdapterByGpuPreference`
+/// instead of `EnumAdapters1`'s primary-display-first order. Returns `None`
+/// when DXGI 1.6 is unavailable (Windows 10 before 1803, Windows Server before
+/// 1709), or when enumerating fails before its end: a partial list could hide
+/// the adapter to select. The caller then ranks a full enumeration itself.
+#[cfg(dx12)]
+pub fn enumerate_adapters_by_gpu_preference(
+    factory: &DxgiFactory,
+    preference: Dxgi::DXGI_GPU_PREFERENCE,
+) -> Option<Vec<DxgiAdapter>> {
+    let DxgiFactory::Factory6(factory6) = factory else {
+        return None;
+    };
+
+    let mut adapters = Vec::with_capacity(8);
+
+    for cur_index in 0.. {
+        profiling::scope!("IDXGIFactory6::EnumAdapterByGpuPreference");
+        let adapter1: Dxgi::IDXGIAdapter1 =
+            match unsafe { factory6.EnumAdapterByGpuPreference(cur_index, preference) } {
+                Ok(a) => a,
+                Err(e) if e.code() == Dxgi::DXGI_ERROR_NOT_FOUND => break,
+                Err(e) => {
+                    log::error!("Failed enumerating adapters by GPU preference: {e}");
+                    return None;
+                }
+            };
+
+        if !should_keep_adapter(&adapter1) {
+            continue;
+        }
+
+        adapters.push(DxgiAdapter::new(adapter1));
+    }
+
+    Some(adapters)
+}
+
 #[derive(Clone, Debug)]
 pub enum DxgiFactory {
     /// Provided by DXGI 1.4

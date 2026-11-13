@@ -455,15 +455,71 @@ impl Instance {
     /// Returns a list of adapters that match the given request options and are compatible with the specified backends.
     ///
     /// On success at least one compatible adapter will be returned in the resulting vector.
+    /// Every adapter of `backends` is exposed to find them.
     pub fn request_adapters(
         self: &Arc<Self>,
         desc: &wgt::RequestAdapterOptions<&Surface>,
         backends: Backends,
     ) -> Result<Vec<Arc<Adapter>>, wgt::RequestAdapterError> {
+        Ok(self
+            .find_adapters(desc, backends, Wanted::All)?
+            .into_iter()
+            .map(|adapter| Adapter::new(adapter, self.clone()))
+            .collect())
+    }
+
+    /// Returns the adapter of `backends` that best matches the given request options.
+    ///
+    /// A backend that can select its best adapter without exposing the others
+    /// (`hal::Instance::request_adapter`; DX12 does, creating devices only for the adapters
+    /// it tries up to its selection) offers only that one. It may follow a native preference
+    /// order (DX12's is DXGI's, which a per-app GPU preference in Windows' graphics settings
+    /// can supersede), so this is not always the first adapter of [`Self::request_adapters`],
+    /// nor always of its device type. With other backends, the selection is ranked with their
+    /// adapters by device type, Vulkan's first among equals, so a Vulkan adapter of the type
+    /// that the power preference ranks first is returned, and a per-app GPU preference has no
+    /// effect. A backend that cannot select, that declines, or whose selection does not suit
+    /// `desc` has all its adapters exposed.
+    ///
+    /// Each backend selects before the adapters of all `backends` are ranked together,
+    /// so DX12 creates a device for the adapter it selects even when another backend's
+    /// adapter is returned.
+    pub fn request_adapter(
+        self: &Arc<Self>,
+        desc: &wgt::RequestAdapterOptions<&Surface>,
+        backends: Backends,
+    ) -> Result<Arc<Adapter>, wgt::RequestAdapterError> {
+        profiling::scope!("Instance::request_adapter");
+        api_log!("Instance::request_adapter");
+
+        let adapter = self
+            .find_adapters(desc, backends, Wanted::Best)?
+            .into_iter()
+            .next()
+            .expect(
+                "find_adapters should always return at least one compatible adapter on success",
+            );
+        let adapter = Adapter::new(adapter, self.clone());
+        api_log_debug!("Request adapter result {:?}", adapter.get_info());
+        Ok(adapter)
+    }
+
+    /// The adapters of `backends` that suit `desc`, ranked by `desc.power_preference`. On
+    /// success there is at least one.
+    ///
+    /// With [`Wanted::Best`], each backend first offers its best adapter alone
+    /// (`hal::Instance::request_adapter`). If it offers none, or that adapter does not
+    /// suit `desc`, the backend's adapters are all exposed, as with [`Wanted::All`], so
+    /// that the selection and the reasons of a [`wgt::RequestAdapterError::NotFound`] are
+    /// those of a full enumeration.
+    fn find_adapters(
+        &self,
+        desc: &wgt::RequestAdapterOptions<&Surface>,
+        backends: Backends,
+        wanted: Wanted,
+    ) -> Result<Vec<hal::DynExposedAdapter>, wgt::RequestAdapterError> {
         let mut adapters = Vec::new();
-        let mut incompatible_surface_backends = Backends::empty();
-        let mut no_fallback_backends = Backends::empty();
-        let mut no_adapter_backends = Backends::empty();
+        let mut unsuitable = UnsuitableBackends::none();
 
         for &(backend, ref instance) in self
             .instance_per_backend
@@ -476,108 +532,44 @@ impl Instance {
                 .compatible_surface
                 .and_then(|surface| surface.raw(backend));
 
-            let mut backend_adapters =
-                unsafe { instance.enumerate_adapters(compatible_hal_surface) };
-            if backend_adapters.is_empty() {
-                log::debug!("enabled backend `{backend:?}` has no adapters");
-                no_adapter_backends |= Backends::from(backend);
-                // by continuing, we avoid setting the further error bits below
-                continue;
-            }
-
-            if desc.force_fallback_adapter {
-                log::debug!("Filtering `{backend:?}` for `force_fallback_adapter`");
-                backend_adapters.retain(|exposed| {
-                    let keep = exposed.info.device_type == wgt::DeviceType::Cpu;
-                    if !keep {
-                        log::debug!("* Eliminating adapter `{}`", exposed.info.name);
-                    }
-                    keep
-                });
-                if backend_adapters.is_empty() {
-                    log::debug!("* Backend `{backend:?}` has no fallback adapters");
-                    no_fallback_backends |= Backends::from(backend);
-                    continue;
-                }
-            }
-
-            if let Some(surface) = desc.compatible_surface {
-                backend_adapters.retain(|exposed| {
-                    let capabilities = surface.get_capabilities_with_raw(exposed);
-                    if let Err(err) = capabilities {
-                        log::debug!(
-                            "Adapter {:?} not compatible with surface: {}",
-                            exposed.info,
-                            err
-                        );
-                        incompatible_surface_backends |= Backends::from(backend);
-                        false
-                    } else {
-                        true
-                    }
-                });
-                if backend_adapters.is_empty() {
-                    incompatible_surface_backends |= Backends::from(backend);
-                    continue;
-                }
-            }
-
-            let backend_adapters = backend_adapters
-                .into_iter()
-                .map(|mut raw| {
-                    self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
-                    raw
-                })
-                .map(|mut raw| {
-                    filter_features_and_limits(
-                        self.flags,
-                        &mut raw.features,
-                        &mut raw.capabilities.limits,
+            if wanted == Wanted::Best {
+                let best = unsafe {
+                    instance.request_adapter(
+                        desc.power_preference,
+                        desc.force_fallback_adapter,
+                        compatible_hal_surface,
+                    )
+                };
+                if let Some(best) = best {
+                    // Why one adapter does not suit `desc` says nothing about the backend's
+                    // other adapters: the enumeration below records the backend's reasons.
+                    let suitable = self.suitable_adapters(
+                        backend,
+                        vec![best],
+                        desc,
+                        &mut UnsuitableBackends::none(),
                     );
-                    raw
-                })
-                .filter(|raw| self.adapter_allowed(raw));
-
-            if desc.apply_limit_buckets {
-                adapters.extend(backend_adapters.filter_map(limits::apply_limit_buckets));
-            } else {
-                adapters.extend(backend_adapters);
+                    if let Some(best) = suitable.first() {
+                        log::debug!(
+                            "Backend `{backend:?}` selected adapter without full enumeration: {:?}",
+                            best.info
+                        );
+                        adapters.extend(suitable);
+                        continue;
+                    }
+                }
             }
+
+            let backend_adapters = unsafe { instance.enumerate_adapters(compatible_hal_surface) };
+            adapters.extend(self.suitable_adapters(
+                backend,
+                backend_adapters,
+                desc,
+                &mut unsuitable,
+            ));
         }
 
-        match desc.power_preference {
-            PowerPreference::LowPower => {
-                sort(&mut adapters, true);
-            }
-            PowerPreference::HighPerformance => {
-                sort(&mut adapters, false);
-            }
-            PowerPreference::None => {}
-        };
-
-        fn sort(adapters: &mut [hal::DynExposedAdapter], prefer_integrated_gpu: bool) {
-            adapters
-                .sort_by_key(|adapter| get_order(adapter.info.device_type, prefer_integrated_gpu));
-        }
-
-        fn get_order(device_type: wgt::DeviceType, prefer_integrated_gpu: bool) -> u8 {
-            // Since devices of type "Other" might really be "Unknown" and come
-            // from APIs like OpenGL that don't specify device type, Prefer more
-            // Specific types over Other.
-            //
-            // This means that backends which do provide accurate device types
-            // will be preferred if their device type indicates an actual
-            // hardware GPU (integrated or discrete).
-            match device_type {
-                wgt::DeviceType::DiscreteGpu if prefer_integrated_gpu => 2,
-                wgt::DeviceType::IntegratedGpu if prefer_integrated_gpu => 1,
-                wgt::DeviceType::DiscreteGpu => 1,
-                wgt::DeviceType::IntegratedGpu => 2,
-                wgt::DeviceType::Other => 3,
-                wgt::DeviceType::VirtualGpu => 4,
-                wgt::DeviceType::Cpu => 5,
-            }
-        }
+        rank_adapters(&mut adapters, desc.power_preference);
 
         // `request_adapter` can be a bit of a black box.
         // Shine some light on its decision in debug log.
@@ -587,9 +579,9 @@ impl Instance {
                 supported_backends: self.supported_backends,
                 requested_backends: self.requested_backends,
                 active_backends: self.active_backends(),
-                no_fallback_backends,
-                no_adapter_backends,
-                incompatible_surface_backends,
+                no_fallback_backends: unsuitable.no_fallback,
+                no_adapter_backends: unsuitable.no_adapter,
+                incompatible_surface_backends: unsuitable.incompatible_surface,
             })
         } else {
             log::debug!(
@@ -599,30 +591,90 @@ impl Instance {
             for adapter in &adapters {
                 log::debug!("* {:?}", adapter.info);
             }
-            Ok(adapters
-                .into_iter()
-                .map(|adapter| Adapter::new(adapter, self.clone()))
-                .collect::<Vec<_>>())
+            Ok(adapters)
         }
     }
 
-    pub fn request_adapter(
-        self: &Arc<Self>,
+    /// `backend_adapters`, the adapters that `backend` exposed, less those that do not
+    /// suit `desc`, with their features and limits filtered as this instance requires.
+    /// Records in `unsuitable` that `backend` exposed no adapter, or none for
+    /// `force_fallback_adapter`, and that `desc.compatible_surface` rejected one of its
+    /// adapters (even if others remain). Adapters that `adapter_allowed` or the limit
+    /// buckets drop record nothing.
+    fn suitable_adapters(
+        &self,
+        backend: Backend,
+        mut backend_adapters: Vec<hal::DynExposedAdapter>,
         desc: &wgt::RequestAdapterOptions<&Surface>,
-        backends: Backends,
-    ) -> Result<Arc<Adapter>, wgt::RequestAdapterError> {
-        profiling::scope!("Instance::request_adapter");
-        api_log!("Instance::request_adapter");
+        unsuitable: &mut UnsuitableBackends,
+    ) -> Vec<hal::DynExposedAdapter> {
+        if backend_adapters.is_empty() {
+            log::debug!("enabled backend `{backend:?}` has no adapters");
+            unsuitable.no_adapter |= Backends::from(backend);
+            // by returning, we avoid setting the further error bits below
+            return Vec::new();
+        }
 
-        let adapter = self
-            .request_adapters(desc, backends)?
+        if desc.force_fallback_adapter {
+            log::debug!("Filtering `{backend:?}` for `force_fallback_adapter`");
+            backend_adapters.retain(|exposed| {
+                let keep = exposed.info.device_type == wgt::DeviceType::Cpu;
+                if !keep {
+                    log::debug!("* Eliminating adapter `{}`", exposed.info.name);
+                }
+                keep
+            });
+            if backend_adapters.is_empty() {
+                log::debug!("* Backend `{backend:?}` has no fallback adapters");
+                unsuitable.no_fallback |= Backends::from(backend);
+                return Vec::new();
+            }
+        }
+
+        if let Some(surface) = desc.compatible_surface {
+            backend_adapters.retain(|exposed| {
+                let capabilities = surface.get_capabilities_with_raw(exposed);
+                if let Err(err) = capabilities {
+                    log::debug!(
+                        "Adapter {:?} not compatible with surface: {}",
+                        exposed.info,
+                        err
+                    );
+                    unsuitable.incompatible_surface |= Backends::from(backend);
+                    false
+                } else {
+                    true
+                }
+            });
+            if backend_adapters.is_empty() {
+                unsuitable.incompatible_surface |= Backends::from(backend);
+                return Vec::new();
+            }
+        }
+
+        let backend_adapters = backend_adapters
             .into_iter()
-            .next()
-            .expect(
-                "request_adapters should always return at least one compatible adapter on success",
-            );
-        api_log_debug!("Request adapter result {:?}", adapter.get_info());
-        Ok(adapter)
+            .map(|mut raw| {
+                self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
+                raw
+            })
+            .map(|mut raw| {
+                filter_features_and_limits(
+                    self.flags,
+                    &mut raw.features,
+                    &mut raw.capabilities.limits,
+                );
+                raw
+            })
+            .filter(|raw| self.adapter_allowed(raw));
+
+        if desc.apply_limit_buckets {
+            backend_adapters
+                .filter_map(limits::apply_limit_buckets)
+                .collect()
+        } else {
+            backend_adapters.collect()
+        }
     }
 
     /// This is similar to wgpu-hal's `adjust_raw_limits` but tailored to
@@ -1585,6 +1637,66 @@ fn adapter_allowed(
     }
 
     true
+}
+
+/// How many of a backend's adapters [`Instance::find_adapters`] needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Wanted {
+    /// Every adapter that suits the request, as [`Instance::request_adapters`] returns.
+    All,
+    /// The best adapter of each backend, which the backend may select without exposing its
+    /// other adapters, as for [`Instance::request_adapter`].
+    Best,
+}
+
+/// The backends that have no adapter for a request, by reason, for
+/// [`wgt::RequestAdapterError::NotFound`].
+#[derive(Debug)]
+struct UnsuitableBackends {
+    no_adapter: Backends,
+    no_fallback: Backends,
+    incompatible_surface: Backends,
+}
+
+impl UnsuitableBackends {
+    /// No backend, for no reason yet.
+    fn none() -> Self {
+        Self {
+            no_adapter: Backends::empty(),
+            no_fallback: Backends::empty(),
+            incompatible_surface: Backends::empty(),
+        }
+    }
+}
+
+/// Sorts `adapters` by how well their device type matches `power_preference`, keeping
+/// the order of adapters of the same rank. `PowerPreference::None` keeps the order.
+fn rank_adapters(adapters: &mut [hal::DynExposedAdapter], power_preference: PowerPreference) {
+    let prefer_integrated_gpu = match power_preference {
+        PowerPreference::LowPower => true,
+        PowerPreference::HighPerformance => false,
+        PowerPreference::None => return,
+    };
+    adapters.sort_by_key(|adapter| get_order(adapter.info.device_type, prefer_integrated_gpu));
+
+    fn get_order(device_type: wgt::DeviceType, prefer_integrated_gpu: bool) -> u8 {
+        // Since devices of type "Other" might really be "Unknown" and come
+        // from APIs like OpenGL that don't specify device type, Prefer more
+        // Specific types over Other.
+        //
+        // This means that backends which do provide accurate device types
+        // will be preferred if their device type indicates an actual
+        // hardware GPU (integrated or discrete).
+        match device_type {
+            wgt::DeviceType::DiscreteGpu if prefer_integrated_gpu => 2,
+            wgt::DeviceType::IntegratedGpu if prefer_integrated_gpu => 1,
+            wgt::DeviceType::DiscreteGpu => 1,
+            wgt::DeviceType::IntegratedGpu => 2,
+            wgt::DeviceType::Other => 3,
+            wgt::DeviceType::VirtualGpu => 4,
+            wgt::DeviceType::Cpu => 5,
+        }
+    }
 }
 
 fn filter_features_and_limits(
