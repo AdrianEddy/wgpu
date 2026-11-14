@@ -481,9 +481,12 @@ impl Instance {
     /// effect. A backend that cannot select, that declines, or whose selection does not suit
     /// `desc` has all its adapters exposed.
     ///
-    /// Each backend selects before the adapters of all `backends` are ranked together,
-    /// so DX12 creates a device for the adapter it selects even when another backend's
-    /// adapter is returned.
+    /// The backends are asked in order, until the adapters found include one that no
+    /// later backend's adapter can rank before: any adapter for `PowerPreference::None`
+    /// and for `force_fallback_adapter`, else an integrated GPU for `LowPower` and a
+    /// discrete one for `HighPerformance`. That adapter is the one that asking every
+    /// backend would return. A backend that is asked still exposes its selection when
+    /// another backend's adapter is returned: DX12 creates a device for it.
     pub fn request_adapter(
         self: &Arc<Self>,
         desc: &wgt::RequestAdapterOptions<&Surface>,
@@ -511,7 +514,10 @@ impl Instance {
     /// (`hal::Instance::request_adapter`). If it offers none, or that adapter does not
     /// suit `desc`, the backend's adapters are all exposed, as with [`Wanted::All`], so
     /// that the selection and the reasons of a [`wgt::RequestAdapterError::NotFound`] are
-    /// those of a full enumeration.
+    /// those of a full enumeration. The backends after one whose adapters, with those of
+    /// the backends before it, include an adapter that no later adapter can outrank
+    /// ([`ranks_first_whatever_follows`]) are not asked: the first adapter is the same as
+    /// with every backend asked, and the error cannot happen.
     fn find_adapters(
         &self,
         desc: &wgt::RequestAdapterOptions<&Surface>,
@@ -526,6 +532,14 @@ impl Instance {
             .iter()
             .filter(|&&(backend, _)| backends.contains(Backends::from(backend)))
         {
+            if wanted == Wanted::Best && ranks_first_whatever_follows(&adapters, desc) {
+                log::debug!(
+                    "Backend `{backend:?}` and the backends after it are not asked: \
+                    none of their adapters can rank before an adapter already found"
+                );
+                break;
+            }
+
             profiling::scope!("enumerating", &*alloc::format!("{backend:?}"));
 
             let compatible_hal_surface = desc
@@ -1656,34 +1670,65 @@ impl UnsuitableBackends {
     }
 }
 
-/// Sorts `adapters` by how well their device type matches `power_preference`, keeping
-/// the order of adapters of the same rank. `PowerPreference::None` keeps the order.
+/// Sorts `adapters` by how well their device type matches `power_preference`
+/// ([`device_type_order`]), keeping the order of adapters of the same rank.
+/// `PowerPreference::None` keeps the order.
 fn rank_adapters(adapters: &mut [hal::DynExposedAdapter], power_preference: PowerPreference) {
     let prefer_integrated_gpu = match power_preference {
         PowerPreference::LowPower => true,
         PowerPreference::HighPerformance => false,
         PowerPreference::None => return,
     };
-    adapters.sort_by_key(|adapter| get_order(adapter.info.device_type, prefer_integrated_gpu));
+    adapters
+        .sort_by_key(|adapter| device_type_order(adapter.info.device_type, prefer_integrated_gpu));
+}
 
-    fn get_order(device_type: wgt::DeviceType, prefer_integrated_gpu: bool) -> u8 {
-        // Since devices of type "Other" might really be "Unknown" and come
-        // from APIs like OpenGL that don't specify device type, Prefer more
-        // Specific types over Other.
-        //
-        // This means that backends which do provide accurate device types
-        // will be preferred if their device type indicates an actual
-        // hardware GPU (integrated or discrete).
-        match device_type {
-            wgt::DeviceType::DiscreteGpu if prefer_integrated_gpu => 2,
-            wgt::DeviceType::IntegratedGpu if prefer_integrated_gpu => 1,
-            wgt::DeviceType::DiscreteGpu => 1,
-            wgt::DeviceType::IntegratedGpu => 2,
-            wgt::DeviceType::Other => 3,
-            wgt::DeviceType::VirtualGpu => 4,
-            wgt::DeviceType::Cpu => 5,
-        }
+/// The rank of an adapter of `device_type` in [`rank_adapters`], the lowest first:
+/// [`BEST_DEVICE_TYPE_ORDER`] at best.
+fn device_type_order(device_type: wgt::DeviceType, prefer_integrated_gpu: bool) -> u8 {
+    // Since devices of type "Other" might really be "Unknown" and come
+    // from APIs like OpenGL that don't specify device type, Prefer more
+    // Specific types over Other.
+    //
+    // This means that backends which do provide accurate device types
+    // will be preferred if their device type indicates an actual
+    // hardware GPU (integrated or discrete).
+    match device_type {
+        wgt::DeviceType::DiscreteGpu if prefer_integrated_gpu => 2,
+        wgt::DeviceType::IntegratedGpu if prefer_integrated_gpu => 1,
+        wgt::DeviceType::DiscreteGpu => 1,
+        wgt::DeviceType::IntegratedGpu => 2,
+        wgt::DeviceType::Other => 3,
+        wgt::DeviceType::VirtualGpu => 4,
+        wgt::DeviceType::Cpu => 5,
     }
+}
+
+/// The lowest [`device_type_order`]: an integrated GPU's when one is preferred, else a
+/// discrete GPU's.
+const BEST_DEVICE_TYPE_ORDER: u8 = 1;
+
+/// Whether the adapter that [`rank_adapters`] ranks first among `adapters` stays first
+/// whatever adapters that suit `desc` are appended to them.
+///
+/// The sort is stable, so an adapter stays before the later adapters of its rank. It
+/// stays first, then, if no adapter that suits `desc` ranks better than the best of
+/// `adapters`: if `adapters` holds any adapter, for [`PowerPreference::None`], which keeps
+/// the order, and for `force_fallback_adapter`, which only `Cpu` adapters suit
+/// ([`Instance::suitable_adapters`]); else if it holds one of [`BEST_DEVICE_TYPE_ORDER`].
+fn ranks_first_whatever_follows(
+    adapters: &[hal::DynExposedAdapter],
+    desc: &wgt::RequestAdapterOptions<&Surface>,
+) -> bool {
+    let prefer_integrated_gpu = match desc.power_preference {
+        _ if desc.force_fallback_adapter => return !adapters.is_empty(),
+        PowerPreference::None => return !adapters.is_empty(),
+        PowerPreference::LowPower => true,
+        PowerPreference::HighPerformance => false,
+    };
+    adapters.iter().any(|adapter| {
+        device_type_order(adapter.info.device_type, prefer_integrated_gpu) == BEST_DEVICE_TYPE_ORDER
+    })
 }
 
 fn filter_features_and_limits(
@@ -1952,5 +1997,294 @@ mod tests {
             res.is_empty(),
             "Downlevel limits are greater than default limits",
         )
+    }
+
+    /// `request_adapter` asks the backends in order, and only until the adapters found
+    /// include one that no later backend's adapter can rank before. Each backend here
+    /// offers a noop adapter of a chosen device type, or none, under a real backend's
+    /// name, and counts how many times it is asked for adapters.
+    mod backends_asked {
+        use core::sync::atomic::AtomicUsize;
+
+        use super::*;
+
+        /// What a backend offers: no adapter, or one of `device_type`, which a limit
+        /// bucket takes if `bucketed` (else `apply_limit_buckets` drops it).
+        #[derive(Clone, Copy, Debug)]
+        enum Offer {
+            Nothing,
+            Adapter {
+                device_type: wgt::DeviceType,
+                bucketed: bool,
+            },
+        }
+
+        const DEVICE_TYPES: [wgt::DeviceType; 5] = [
+            wgt::DeviceType::Other,
+            wgt::DeviceType::IntegratedGpu,
+            wgt::DeviceType::DiscreteGpu,
+            wgt::DeviceType::VirtualGpu,
+            wgt::DeviceType::Cpu,
+        ];
+
+        /// The backends' names, in `Instance::new`'s order.
+        const BACKENDS: [Backend; 3] = [Backend::Vulkan, Backend::Dx12, Backend::Gl];
+
+        /// Whatever three backends can offer.
+        fn every_offer() -> Vec<[Offer; 3]> {
+            let mut offers = alloc::vec![Offer::Nothing];
+            for device_type in DEVICE_TYPES {
+                for bucketed in [true, false] {
+                    offers.push(Offer::Adapter {
+                        device_type,
+                        bucketed,
+                    });
+                }
+            }
+            let mut offered = Vec::new();
+            for &first in &offers {
+                for &second in &offers {
+                    for &third in &offers {
+                        offered.push([first, second, third]);
+                    }
+                }
+            }
+            offered
+        }
+
+        /// A backend named `backend` that offers the adapter of `noop`, if any.
+        struct TestBackend {
+            noop: Option<hal::noop::Context>,
+            backend: Backend,
+            /// Whether `request_adapter` selects the adapter, as DX12 does, or declines,
+            /// as a backend that is enumerated does.
+            lazily: bool,
+            /// How many times `enumerate_adapters` and `request_adapter` were called.
+            queries: Arc<AtomicUsize>,
+        }
+
+        impl TestBackend {
+            fn expose(&self) -> Option<hal::DynExposedAdapter> {
+                let noop = self.noop.as_ref()?;
+                let mut adapter =
+                    unsafe { hal::DynInstance::enumerate_adapters(noop, None) }.pop()?;
+                adapter.info.name = alloc::format!("{:?}", self.backend);
+                Some(adapter)
+            }
+        }
+
+        impl hal::DynResource for TestBackend {
+            fn as_any(&self) -> &dyn core::any::Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn core::any::Any {
+                self
+            }
+        }
+
+        impl hal::DynInstance for TestBackend {
+            unsafe fn create_surface(
+                &self,
+                _display_handle: raw_window_handle::RawDisplayHandle,
+                _window_handle: raw_window_handle::RawWindowHandle,
+            ) -> Result<Box<dyn hal::DynSurface>, hal::InstanceError> {
+                unreachable!("the requests have no surface")
+            }
+
+            unsafe fn enumerate_adapters(
+                &self,
+                _surface_hint: Option<&dyn hal::DynSurface>,
+            ) -> Vec<hal::DynExposedAdapter> {
+                self.queries.fetch_add(1, Ordering::Relaxed);
+                self.expose().into_iter().collect()
+            }
+
+            unsafe fn request_adapter(
+                &self,
+                _power_preference: PowerPreference,
+                force_fallback_adapter: bool,
+                _surface_hint: Option<&dyn hal::DynSurface>,
+            ) -> Option<hal::DynExposedAdapter> {
+                self.queries.fetch_add(1, Ordering::Relaxed);
+                if !self.lazily {
+                    return None;
+                }
+                self.expose().filter(|adapter| {
+                    !force_fallback_adapter || adapter.info.device_type == wgt::DeviceType::Cpu
+                })
+            }
+        }
+
+        fn noop_instance(device_type: wgt::DeviceType, bucketed: bool) -> hal::noop::Context {
+            let noop = wgt::NoopBackendOptions {
+                enable: true,
+                device_type: Some(device_type),
+                features: Some(wgt::Features::CORE_FEATURES_AND_LIMITS),
+                // No limit bucket takes an adapter below WebGPU's minimum limits.
+                limits: (!bucketed).then(|| wgt::Limits {
+                    max_texture_dimension_2d: 1024,
+                    ..wgt::Limits::default()
+                }),
+                ..Default::default()
+            };
+            let desc = hal::InstanceDescriptor {
+                name: "test",
+                flags: InstanceFlags::empty(),
+                memory_budget_thresholds: wgt::MemoryBudgetThresholds::default(),
+                backend_options: wgt::BackendOptions {
+                    noop,
+                    ..Default::default()
+                },
+                telemetry: None,
+                display: None,
+            };
+            unsafe { <hal::noop::Context as hal::Instance>::init(&desc) }.unwrap()
+        }
+
+        /// An instance of backends that offer `offered`, in order, and their query counts.
+        fn instance(offered: [Offer; 3], lazily: bool) -> (Arc<Instance>, [Arc<AtomicUsize>; 3]) {
+            let queries = [(); 3].map(|()| Arc::new(AtomicUsize::new(0)));
+            let instance_per_backend = BACKENDS
+                .into_iter()
+                .zip(offered)
+                .zip(&queries)
+                .map(|((backend, offer), queries)| {
+                    let noop = match offer {
+                        Offer::Nothing => None,
+                        Offer::Adapter {
+                            device_type,
+                            bucketed,
+                        } => Some(noop_instance(device_type, bucketed)),
+                    };
+                    let instance: Box<dyn hal::DynInstance> = Box::new(TestBackend {
+                        noop,
+                        backend,
+                        lazily,
+                        queries: queries.clone(),
+                    });
+                    (backend, instance)
+                })
+                .collect();
+            let instance = Instance {
+                instance_per_backend,
+                ..Default::default()
+            };
+            (Arc::new(instance), queries)
+        }
+
+        /// The name of the adapter that `request_adapter` returns, or its error, and how
+        /// many times it asked each backend for adapters.
+        fn request_adapter(
+            offered: [Offer; 3],
+            lazily: bool,
+            desc: &wgt::RequestAdapterOptions<&Surface>,
+        ) -> (Result<String, wgt::RequestAdapterError>, [usize; 3]) {
+            let (instance, queries) = instance(offered, lazily);
+            let selected = instance
+                .request_adapter(desc, Backends::all())
+                .map(|adapter| adapter.get_info().name);
+            (
+                selected,
+                queries.map(|queries| queries.load(Ordering::Relaxed)),
+            )
+        }
+
+        /// The name of the adapter that `request_adapters` ranks first, or its error: what
+        /// `request_adapter` returns if it asks every backend, each of which offers one
+        /// adapter at most here.
+        fn ranked_first(
+            offered: [Offer; 3],
+            desc: &wgt::RequestAdapterOptions<&Surface>,
+        ) -> Result<String, wgt::RequestAdapterError> {
+            let (instance, queries) = instance(offered, true);
+            let ranked = instance.request_adapters(desc, Backends::all());
+            assert_eq!(
+                queries.map(|queries| queries.load(Ordering::Relaxed)),
+                [1; 3],
+                "{offered:?}: `request_adapters` enumerates every backend"
+            );
+            ranked.map(|adapters| adapters[0].get_info().name)
+        }
+
+        /// Checks a request of `desc` to backends that offer `offered`:
+        /// - `request_adapter` returns the adapter that `request_adapters` ranks first, or
+        ///   the same error;
+        /// - it asks the backends in order, and asks one after the first only if, given what
+        ///   the backends before it offer, an adapter of it could be the one returned.
+        ///
+        /// Returns whether it asked fewer backends than all.
+        fn check(
+            offered: [Offer; 3],
+            lazily: bool,
+            desc: &wgt::RequestAdapterOptions<&Surface>,
+        ) -> bool {
+            let context = alloc::format!(
+                "{offered:?}, {:?}, force_fallback_adapter: {}, apply_limit_buckets: {}, \
+                lazily: {lazily}",
+                desc.power_preference,
+                desc.force_fallback_adapter,
+                desc.apply_limit_buckets,
+            );
+            let (selected, queries) = request_adapter(offered, lazily, desc);
+            assert_eq!(selected, ranked_first(offered, desc), "{context}");
+
+            let asked = queries.iter().take_while(|&&queries| queries > 0).count();
+            assert!(
+                asked > 0 && queries[asked..].iter().all(|&queries| queries == 0),
+                "{context}: asked out of order, {queries:?}"
+            );
+            for later in 1..asked {
+                let name = alloc::format!("{:?}", BACKENDS[later]);
+                let can_be_returned = DEVICE_TYPES.into_iter().any(|device_type| {
+                    let mut offered = offered;
+                    offered[later] = Offer::Adapter {
+                        device_type,
+                        bucketed: true,
+                    };
+                    ranked_first(offered, desc).is_ok_and(|first| first == name)
+                });
+                assert!(
+                    can_be_returned,
+                    "{context}: {name} was asked, but none of its adapters can be returned"
+                );
+            }
+            asked < BACKENDS.len()
+        }
+
+        /// [`check`] for every preference, with and without `force_fallback_adapter` and
+        /// `apply_limit_buckets`, with backends that select lazily or decline, and for
+        /// whatever three backends offer.
+        #[test]
+        fn asked_until_no_later_backend_can_outrank() {
+            let every_offer = every_offer();
+            let (mut requests, mut stopped) = (0, 0);
+            for power_preference in [
+                PowerPreference::None,
+                PowerPreference::LowPower,
+                PowerPreference::HighPerformance,
+            ] {
+                for force_fallback_adapter in [false, true] {
+                    for apply_limit_buckets in [false, true] {
+                        let desc = wgt::RequestAdapterOptions {
+                            power_preference,
+                            force_fallback_adapter,
+                            compatible_surface: None,
+                            apply_limit_buckets,
+                        };
+                        for lazily in [false, true] {
+                            for &offered in &every_offer {
+                                requests += 1;
+                                stopped += usize::from(check(offered, lazily, &desc));
+                            }
+                        }
+                    }
+                }
+            }
+            assert!(
+                0 < stopped && stopped < requests,
+                "{stopped} of {requests} requests asked fewer backends than all"
+            );
+        }
     }
 }

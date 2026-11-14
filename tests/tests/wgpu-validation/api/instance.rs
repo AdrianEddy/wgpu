@@ -484,9 +484,9 @@ mod lazy_adapter {
                 unsafe { raw.as_raw().GetDesc2() }.unwrap().AdapterLuid
             }
 
-            /// Also with Vulkan's adapters, which are all exposed: DX12 still tries only the
-            /// adapters it tries alone, and creates a device for the one it selects even where a
-            /// Vulkan adapter is selected.
+            /// Also with Vulkan's adapters, which are all exposed, and before DX12's: DX12 still
+            /// tries only the adapters it tries alone, unless one of Vulkan's ranks first whatever
+            /// DX12 selects. Then DX12 is not asked, and creates no device.
             #[test]
             fn selects_in_dxgi_order() {
                 wgpu_test::init_logger();
@@ -564,8 +564,36 @@ mod lazy_adapter {
                     }
 
                     // With Vulkan, DX12 still tries only these adapters, and wgpu-core ranks its
-                    // selection with Vulkan's adapters.
+                    // selection with Vulkan's adapters. Unless one of Vulkan's adapters ranks
+                    // first whatever DX12 selects: any for `None` and for
+                    // `force_fallback_adapter`, else an integrated GPU for `LowPower` and a
+                    // discrete one for `HighPerformance`. Then DX12 tries none.
                     let context = format!("{context}, with Vulkan");
+                    let vulkan: Vec<wgt::DeviceType> = with_vulkan
+                        .request_adapters(&request, wgt::Backends::VULKAN)
+                        .map(|adapters| {
+                            adapters
+                                .iter()
+                                .map(|adapter| adapter.get_info().device_type)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let vulkan_ranks_first = match power_preference {
+                        _ if force_fallback_adapter => !vulkan.is_empty(),
+                        wgt::PowerPreference::None => !vulkan.is_empty(),
+                        wgt::PowerPreference::LowPower => {
+                            vulkan.contains(&wgt::DeviceType::IntegratedGpu)
+                        }
+                        wgt::PowerPreference::HighPerformance => {
+                            vulkan.contains(&wgt::DeviceType::DiscreteGpu)
+                        }
+                    };
+                    let expected = if vulkan_ranks_first {
+                        Vec::new()
+                    } else {
+                        expected
+                    };
+                    take_tried();
                     let selected = with_vulkan.request_adapter(&request, wgt::Backends::all());
                     assert_eq!(take_tried(), expected, "{context}: the adapters tried");
                     let selected = selected
