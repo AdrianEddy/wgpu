@@ -5,8 +5,8 @@ that `trunk` lacks. This file is not meant for upstream; every other commit is, 
 group named below.
 
 It replaces the vendored copy at `face-masks-rs/vendor/wgpu` (v30.0.1 plus local changes),
-whose `VENDORED.md` §2, §3, §5 and §6 the commits below port. §1 (lazy adapter selection,
-gfx-rs/wgpu#10011) is not carried.
+whose `VENDORED.md` §1 (lazy adapter selection, gfx-rs/wgpu#10011), §2, §3, §5 and §6 the commits
+below port, with §4's tests where wgpu keeps such tests.
 
 ## Base
 
@@ -27,8 +27,9 @@ left out, as CI builds them apart): on Linux the workspace with every target, wg
 two wasm32 rows and the Android libraries; on Windows the workspace, wgpu-hal with the test hooks it has, and the macOS
 and iOS libraries; and from Linux the macOS, iOS and Windows libraries, type-checked. The CPU and GPU suites ran at the
 tip. Each fix has a test that fails without it and passes with it, except where the table says otherwise. Each fix
-commit has a `CHANGELOG.md` entry in `trunk`'s format, without a PR link: none of them has a PR yet. Add the link when
-one is opened.
+commit has a `CHANGELOG.md` entry in `trunk`'s format, without a PR link where it has no PR yet: add the link when one
+is opened. Commit 35's two entries link gfx-rs/wgpu#10011, which upstream closed unmerged. 39 refines 35's change, which
+no release has, so it has no entry of its own.
 
 | # | Commit | Subject | Fixes | Drop when |
 |---|---|---|---|---|
@@ -63,7 +64,13 @@ one is opened.
 | 31 | `376179016` | feat(vulkan)!: support queues created internally synchronized | Third review items 6 and 7: `device_from_raw` takes a `DeviceQueue` (`#[non_exhaustive]`, `new` and setters; breaking). A queue created with `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` is retrieved with `vkGetDeviceQueue2` and takes no lock; the extension, `vkGetDeviceQueue2` and a non-null queue are checked. Nothing opts in automatically. | upstream carries an equivalent |
 | 32 | `1b57b927d` | feat(vulkan): take the application's queue lock, with scopes and checks | Fork-only extensions (third review items 4 and 6): `QueueLockScope`, an application lock given in `DeviceQueue::lock` and always taken, debug tracking by the lock's identity, the staging methods' asserts, and wgpu-core's `ranked.rs` check that no queue lock is held when it takes a lock (lock validation). | the consumers need neither scopes nor injection, or upstream takes them |
 | 33 | `fdb2260c0` | feat(vulkan): wait on present fences in swapchain teardown | Owner's decision 1 of the third fix round: presents signal fences with `swapchain_maintenance1` (KHR, else EXT, per device), and the teardown waits on them without the queue lock; `vkQueueWaitIdle` under the lock stays the fallback. `Instance::desired_extensions` adds the surface maintenance extensions. | upstream carries an equivalent |
-| 34 | (this commit) | docs: add FORK.md | This file | the branch is dropped |
+| 34 | `f5bf6ea78` | docs: add FORK.md | This file | the branch is dropped |
+| 35 | `88c5dbf4d` | feat(core,dx12)!: select adapters lazily in `request_adapter` | `VENDORED.md` §1, gfx-rs/wgpu#10011: `request_adapter` exposed every adapter to rank them, and DX12 creates a device for each, seconds per adapter (OxQuick measured 2.7 s per start for a Radeon iGPU that then lost the selection). A backend may now select its adapter without exposing the others. DX12 orders DXGI's adapters and exposes them in that order until one exposes, so it creates devices only up to its selection: a probe of OxQuick's DX12 start here went from 2.2 s to 0.26 s. Ported onto `trunk`'s `request_adapters` with one filter and one ranking. The DX12 device test fails at the base. | gfx-rs/wgpu#10775 is released and filters the enumeration that `request_adapter` uses: then only the DX12 selection and its HAL hook go, and OxQuick selects by LUID ("The future of lazy adapter selection", below) |
+| 36 | `78c42e9e0` | test(noop): select the noop adapter lazily and count adapter queries | Test infrastructure for 35: instance hooks behind `noop_test_hooks`, with which wgpu-core's lazy selection is tested without a GPU, also for a request with a surface. Each of its seven `lazy_adapter` tests fails with one of four mutations of 35; its four HAL tests check the hooks themselves, among them that a fallback request selects no hardware adapter. Upstream, it needs commits 9 and 11. | with 35's DX12 selection |
+| 37 | `2581eb3d6` | test: request adapters in a browser whose WebGPU has no adapter | §4's `web_request_adapter`, as wasm gpu tests: `trunk`'s WebGPU backend when `requestAdapter` gives no adapter, and the WebGL fallback of `new_instance_with_webgpu_detection`. They test code that the series does not change; each test that replaces `requestAdapter` fails if the replacement is not installed. The wasm test build now compiles the WebGPU backend. | upstream tests these paths, or the tests are dropped |
+| 38 | `8ae018bb7` | perf(core): stop asking backends once no later adapter can win | Review 4 item 4 (the owner's decision 2): with several backends, `request_adapter` asked every backend, so DX12 created a device for its selection, and GL its contexts, after an earlier backend had an adapter that none of theirs could rank before (DX12's device: 0.15 s for the RTX 5090 here, 2 s for the iGPU). It now stops asking there, for `request_adapter` only; the adapter returned and the error stay the same. Tested over 31,944 requests to three test backends: the test fails without the stop, and with a stop on any adapter or in `request_adapters` too. | a release contains it |
+| 39 | `2c35267d7` | fix(core): ask no backend without the surface to select an adapter | Review 4 item 5 (the owner's decision 5): a request for a surface that has no surface for a backend still asked that backend to select, for a selection that could only be dropped. Such a backend is now enumerated without being asked, and wgpu-hal documents that `surface_hint` is `None` only for a request without a surface, and where an override may ignore it. Two noop hooks: the tests fail without the guard, and with a lazy step that passes no hint or does not check the selection against the surface. `selects_in_dxgi_order` tests DX12's surface path on a DirectComposition surface handle. | with 35's DX12 selection |
+| 41 | (this commit) | docs: FORK.md: describe lazy adapter selection | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after it (their tests use
 it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25 as two docs PRs (its row); 26 and 27 with the PRs
@@ -78,6 +85,31 @@ whose fixes they test. The queue-lock stage (third review item 12), after an ups
 - **Present fences:** 33, after C and B (it keeps C's wait, under B's lock, as its fallback). Its tests give the device
   an instrumented lock through 32's injection; without 32 they would use B's handed-out lock instead.
 - **Fork-only:** 32 stays here. Upstream gets it only if it asks for scopes or injection.
+
+Lazy adapter selection: 35 with 36, 38 and 39 as #10011's next form, under a PR number of its own, since #10011 is
+closed. 36 needs 8 and the noop series' commits 9 and 11 first, and is the PR's regression guard: on a CI runner whose
+only DX12 adapter is WARP, the DX12 device test cannot fail without 35 (review 4 item 8). 35's core restructuring
+(`find_adapters`, `suitable_adapters` and `rank_adapters`) with 38 needs neither the HAL hook nor DX12's selection, so
+it can also be proposed apart from them; 38's tests need 8. 39 follows 36, whose noop hooks it extends, and needs the
+noop series' 10 as well. 37 alone.
+
+## The future of lazy adapter selection
+
+The owner's decision 1 of review 4: keep 35 until gfx-rs/wgpu#10775 is released. That PR, open when review 4 read
+it on 2026-11-14, adds a DX12 extension, on #10304's extension API, that restricts enumeration to the adapter of
+one LUID. Then rebase onto it:
+
+- drop 35's DX12 selection and `hal::Instance::request_adapter`, 36's lazy hooks, and 39, which guards the lazy
+  step;
+- OxQuick selects by LUID in `init_graphics`: `EnumAdapters1` order for `PowerPreference::None`,
+  `EnumAdapterByGpuPreference` for `LowPower` and `HighPerformance`, software adapters only for
+  `force_fallback_adapter`, and each LUID in turn until one gives an adapter (`oxquick-app` already depends on
+  `windows`);
+- keep 35 whole only if the released #10775 does not filter the enumeration that `request_adapter` uses.
+
+Either way, 35's core restructuring and 38's early stop stay, as a core-only change without
+`hal::Instance::request_adapter`: with `Backends::all()` and no LUID, a Vulkan adapter of the best rank still means
+that DX12 and GL are never asked.
 
 ## Already upstream, not carried
 
@@ -121,6 +153,51 @@ whose fixes they test. The queue-lock stage (third review item 12), after an ups
   every call that reports an error. A callback can therefore run inside any of those calls, on any thread, for
   any device of the instance: an application lock held across `present` or `submit` and taken by a callback
   deadlocks.
+
+## Differences from `VENDORED.md` §1 and §4
+
+- **One filter, not two** (commit 35). The PR, and so `VENDORED.md` §1, added `validate_requested_adapter`, a
+  second copy of `request_adapter`'s per-backend filter, with a note to keep the two in sync. `trunk` has since
+  moved that loop into `request_adapters` (`303def541`, 2026-10-26). Commit 35 makes the filter one function and
+  the ranking another, used by `request_adapters` for every adapter and by `request_adapter` for each backend's
+  selection first. A selection that does not suit the request records no reason, and the enumeration that
+  follows records the backend's, as in the PR.
+- **Which calls select lazily:** only `request_adapter`, as in the PR. `request_adapters` and
+  `enumerate_adapters` expose every adapter.
+- **Backends asked only until the result is certain** (commit 38, review 4's decision 2): the PR asked every
+  backend, so DX12 created a device for its selection even when an earlier backend's adapter was certain to win.
+  `request_adapter` now stops asking once it has an adapter that no later backend's adapter can rank before. 35
+  keeps the PR's behaviour.
+- **No selection for a surface that the backend has none for** (commit 39): the PR asked such a backend too, for a
+  selection that could only be dropped.
+- **Documentation:** wgpu-hal's `Instance::request_adapter` keeps `VENDORED.md`'s "should … may follow a native
+  preference order", and states DXGI's preference as Microsoft documents it: integrated, discrete and external
+  GPUs by class, with no word on how DXGI decides the class, and which a per-app GPU preference in Windows'
+  graphics settings can supersede. wgpu-core's and wgpu's `request_adapter` now say that for `LowPower` and
+  `HighPerformance` DX12's selection follows DXGI's order, so it can be another adapter of the same device type
+  than a full enumeration ranks first, or, under a per-app GPU preference, an adapter of another type, and that
+  with other backends a Vulkan adapter of the type the preference ranks first is still returned, so the per-app
+  preference has no effect there (review 4's option A); that DX12 creates devices only for the adapters it tries
+  up to its selection; and that the backends are asked in order only until no later one can outrank the adapter
+  found. The PR said none of this.
+- **The PR has not moved on** since the backport: upstream closed it at the three commits `VENDORED.md` backports
+  (`d653d46a3`).
+- **§4's tests** are where wgpu keeps such tests, not in a crate of their own:
+  - `lazy_adapter` is the `lazy_adapter` module of `tests/tests/wgpu-validation/api/instance.rs`: noop tests in the
+    CPU suite (commits 36 and 39), three of them with a surface, and `device_tests` on real adapters (commit 35,
+    with 38's and 39's additions), which skip where there is no adapter of their kind. `VENDORED.md`'s open item,
+    that its test passed on the pristine copy too, is answered: the DX12 test checks which adapters DX12 exposed,
+    against DXGI and DX12's telemetry, and fails at the base, which exposes them all; the noop counters see the
+    lazy step. The vendored test's rank check stays for `None`, which selects the first adapter enumerated, and
+    for `force_fallback_adapter`, which selects a `Cpu` one. For a preference it is relaxed (option A): a device
+    type other than that of the full enumeration's first adapter is printed, not failed, since a per-app GPU
+    preference can choose it.
+  - `web_request_adapter` is `tests/tests/wgpu-gpu/web_request_adapter.rs`, a `wasm_test` module of the wasm gpu
+    tests. Its expectations are derived from `trunk`'s `webgpu.rs` and compare the whole `NotFound`; without
+    `navigator.gpu` they also check the requested and supported backends.
+  - `examples/startup_trace` is not carried: it is a measurement tool, not an example of wgpu's API, and
+    `benches/` holds criterion benchmarks. The startup measurement used a probe outside the repository.
+  - `surface_configure_race` stays dropped: `configure_race` covers it.
 
 ## Residual behaviour
 
@@ -170,6 +247,26 @@ whose fixes they test. The queue-lock stage (third review item 12), after an ups
   `max_bindings_per_bind_group` of `u32::MAX` allows. Passthrough GLSL with hard-coded bindings shifts for
   layouts with bindings of the other pass kind or visible to no stage. The combined binding-point limits are
   still not queried.
+- **Lazy adapter selection** (commits 35, 38 and 39):
+  - For `LowPower` and `HighPerformance`, DX12 follows DXGI's preference order, so `request_adapter` need not
+    return `request_adapters`' first adapter: it can return another adapter of the same device type, or, where a
+    per-app GPU preference in Windows' graphics settings supersedes the requested one, an adapter of another type.
+    This is option A, the owner's decision 3 of review 4: it follows Windows and Dawn, and OxQuick's
+    `GpuPreference`, which maps to `DXGI_GPU_PREFERENCE_*`. With Vulkan in the instance, a Vulkan adapter of the
+    preferred type still wins, so the Windows setting is lost there. `None` selects what a full enumeration ranks
+    first.
+  - A selection that does not suit the request (a surface it cannot present to, a limit bucket it does not fit,
+    `adapter_allowed`'s checks) is dropped and the backend enumerated: that adapter's device is created twice, and
+    so is each adapter's that DX12 tried before it. When no adapter DX12 tries exposes, each is tried twice.
+    Without DXGI 1.6 (Windows 10 before 1803), DX12 declines `LowPower` and `HighPerformance`, which are
+    enumerated as before; `None` still selects lazily in `EnumAdapters1` order.
+  - With several backends, the backends are asked in order until one has an adapter that no later backend's can
+    rank before (commit 38). So DX12 still creates a device for its selection when the earlier backends have no
+    adapter of the best rank, even if one of theirs then wins a tie with it. OxQuick requests DX12 alone on
+    Windows.
+  - `wgpu_hal::Telemetry::d3d12_expose_adapter` now reports only the DX12 adapters that `request_adapter` tries.
+    Firefox's telemetry counts them (per review 4, from summaries of its source): it would see fewer, and with
+    `force_fallback_adapter` only the software adapters. None of the owner's consumers uses it.
 
 ## Proposal: texture-aware present, discard and release (first review, owner decision 2, not carried)
 
@@ -271,6 +368,12 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   feature struct, whose structure type the KHR and EXT extensions share: they name the EXT extension as its only
   parent. Seen with SDK 1.4.304 (header 304) on the RTX 5090; the 1.4.341 layer on eddy2lnx accepts it. wgpu's tests
   fail on any validation message, so they need a layer of 1.4.321 or later wherever a driver lists the KHR extension.
+- **CI's wasm32 row `clippy --tests --features glsl,spirv` failed on commit 16 before this rebase:** commit 16's
+  test `concurrent_deliveries_call_every_callback_once` shares an instance's `PendingCallbacks` between threads,
+  and `PendingCallbacks` is `Sync` only with `send_sync`, without which its queued callbacks need not be `Send`:
+  four E0277 errors, one per kind of callback. 16 now builds the test only with `send_sync`: the rebase folded
+  commit 40, which did, into it (the owner's decision 4 of review 4). The step's other five commands, three clippy
+  and two `doc`, passed before it too.
 - **The CHANGELOG** entries of commits 28 to 33 are cut to `trunk`'s length; 28 and 31 are `BREAKING:`, and 28
   is `fix(core)!:` (it tightens `unsafe` contracts).
 
@@ -305,3 +408,19 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   NVIDIA's and the Windows drivers do not), so headless, the present-fence path ran on RADV only; NVIDIA's ran in
   the window gate on eddy2lnx (Wayland and X11, above). The internally synchronized queue's tests need
   `VK_KHR_internally_synchronized_queues` (NVIDIA 615 on eddy2lnx has it, RADV there does not).
+- The lazy adapter's device tests (commits 35, 38 and 39) expose the adapters of every native backend: only DX12's
+  exposure creates a device, GL creates contexts, and Vulkan and Metal create none. They skip where there is no
+  adapter of their kind, and `dx12::selects_in_dxgi_order` skips without DXGI 1.6. They ran under the GPU lock here
+  (RTX 5090, AMD Radeon iGPU, WARP; DX12, Vulkan and GL), last in review 4's fix round, with the early stop and the
+  DirectComposition surface variant: DX12 exposes DXGI's adapters only up to its selection, alone and for a
+  surface, and none where a Vulkan adapter ranks first; the base fails the DX12 test. Before that round they ran
+  on eddy2lnx too (Vulkan and GL on each GPU). Their skips were compiled, not run: every machine here has the
+  adapters.
+- wgpu-hal's DX12 code was checked with its MSRV, 1.87, for `x86_64-pc-windows-msvc` on eddy2lnx, as CI's Windows
+  MSRV rows do, at each of commits 35 to 41. That compiles the libraries, not the tests.
+- Option A's case, a per-app GPU preference that gives DX12's selection another device type, was not reproduced:
+  it needs per-app graphics settings in the owner's registry, which the lane does not write.
+- The wasm gpu tests, `web_request_adapter` among them (commit 37), ran in the fork's rig here, last in review 4's
+  fix round (432/432): headless Chromium 149,
+  whose `navigator.gpu` exists and whose `requestAdapter` resolves `null`, and WebGL on SwiftShader. The three tests
+  that replace `requestAdapter` check that wgpu called the replacement, and fail when it is not installed.
