@@ -423,6 +423,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 
 #### Vulkan
 
+- Enable `VK_KHR_zero_initialize_workgroup_memory` on devices older than Vulkan 1.3 that support it. Such a device's adapter offered its feature, so Naga zero-initialized workgroup memory natively, but the device was created without the extension or the feature, which `VUID-RuntimeSpirv-shaderZeroInitializeWorkgroupMemory-06372` forbids. By @AdrianEddy.
 - Tearing a swapchain down now waits for the presenting queue to become idle, not the whole device, whose other queues other code may be using. By @AdrianEddy.
 - Discarding a surface texture now gives its image back: the next `get_current_texture` returns the image again, as a new texture whose contents are not kept. A discarded image stayed acquired until the surface was configured again, leaving the swapchain one image short each time. Fixes [#5723](https://github.com/gfx-rs/wgpu/issues/5723). By @AdrianEddy.
 - On Windows, only wait for the swapchain acquire fence in `Fifo` and `FifoRelaxed` present modes. It added acquire latency in `Immediate` and `Mailbox`. By @HashimTheArab in [#10714](https://github.com/gfx-rs/wgpu/pull/10714).

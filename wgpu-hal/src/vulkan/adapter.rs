@@ -1556,6 +1556,12 @@ impl PhysicalDeviceProperties {
                 extensions.push(khr::shader_integer_dot_product::NAME);
             }
 
+            // Optional `VK_KHR_zero_initialize_workgroup_memory`: where the adapter offers its
+            // feature, the device enables it, and Naga zero-initializes workgroup memory natively.
+            if self.supports_extension(khr::zero_initialize_workgroup_memory::NAME) {
+                extensions.push(khr::zero_initialize_workgroup_memory::NAME);
+            }
+
             // Optional `VK_KHR_dynamic_rendering`.
             // Depends on:
             // - `VK_KHR_get_physical_device_properties2` or Vulkan 1.1, and `VK_KHR_depth_stencil_resolve`
