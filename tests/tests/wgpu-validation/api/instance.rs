@@ -318,7 +318,94 @@ mod lazy_adapter {
             .unwrap();
 
         assert_eq!(noop(&instance).adapter_queries(), queries(0, 1));
+        assert_eq!(
+            noop(&instance).hinted_adapter_requests(),
+            1,
+            "the backend was not given the surface"
+        );
         assert!(adapter.is_surface_supported(&surface));
+    }
+
+    /// A surface of `instance`, for the noop backend, which does not use the handles.
+    fn surface(instance: &wgc::instance::Instance) -> Arc<wgc::instance::Surface> {
+        // SAFETY: The noop backend does not use the handles.
+        unsafe {
+            instance.create_surface(
+                Some(RawDisplayHandle::Web(WebDisplayHandle::new())),
+                RawWindowHandle::Web(WebWindowHandle::new(1)),
+            )
+        }
+        .unwrap()
+    }
+
+    fn noop_surface(surface: &wgc::instance::Surface) -> &wgpu_hal::noop::Surface {
+        surface
+            .raw(wgt::Backend::Noop)
+            .expect("the surface has a noop surface")
+            .as_any()
+            .downcast_ref()
+            .expect("the noop backend's surface is a noop surface")
+    }
+
+    /// A selection that cannot present to the request's surface is dropped, and the backend is
+    /// enumerated: the request fails as it does without the selection.
+    #[test]
+    fn selection_that_cannot_present_enumerates() {
+        let error = |lazily| {
+            let instance = noop_instance(wgt::NoopBackendOptions::default(), lazily);
+            let surface = surface(&instance);
+            noop_surface(&surface).refuse_capabilities(true);
+            let request = wgt::RequestAdapterOptions {
+                compatible_surface: Some(&*surface),
+                ..Default::default()
+            };
+            let Err(error) = instance.request_adapter(&request, wgt::Backends::NOOP) else {
+                panic!("an adapter presents to a surface that every adapter refuses");
+            };
+            (error, noop(&instance).adapter_queries())
+        };
+        let (enumerated, enumerated_queries) = error(false);
+        let (selected, selected_queries) = error(true);
+
+        assert_eq!(enumerated_queries, queries(1, 1));
+        assert_eq!(selected_queries, queries(1, 1));
+        assert_eq!(selected, enumerated);
+        let wgt::RequestAdapterError::NotFound {
+            incompatible_surface_backends,
+            ..
+        } = selected
+        else {
+            panic!("expected `NotFound`");
+        };
+        assert_eq!(incompatible_surface_backends, wgt::Backends::NOOP);
+    }
+
+    /// A backend that the request's surface has no surface for is not asked to select: none of
+    /// its adapters can present to it. It is enumerated, for the error's reasons.
+    #[test]
+    fn no_selection_for_a_surface_without_the_backend() {
+        let instance = noop_instance(wgt::NoopBackendOptions::default(), true);
+        let mut surface = surface(&instance);
+        // As a surface that only another backend could create.
+        Arc::get_mut(&mut surface)
+            .expect("the test holds the only reference")
+            .surface_per_backend
+            .remove(&wgt::Backend::Noop)
+            .expect("the surface had a noop surface");
+        let request = wgt::RequestAdapterOptions {
+            compatible_surface: Some(&*surface),
+            ..Default::default()
+        };
+        let Err(wgt::RequestAdapterError::NotFound {
+            incompatible_surface_backends,
+            ..
+        }) = instance.request_adapter(&request, wgt::Backends::NOOP)
+        else {
+            panic!("expected `NotFound`");
+        };
+
+        assert_eq!(noop(&instance).adapter_queries(), queries(1, 0));
+        assert_eq!(incompatible_surface_backends, wgt::Backends::NOOP);
     }
 
     /// These expose the adapters of every native backend (DX12 creates a device for each one it
@@ -415,7 +502,16 @@ mod lazy_adapter {
         mod dx12 {
             use std::sync::Mutex;
 
-            use windows::Win32::{Foundation::LUID, Graphics::Dxgi::*};
+            use windows::Win32::{
+                Foundation::{CloseHandle, HANDLE, LUID},
+                Graphics::{
+                    DirectComposition::{
+                        DCompositionCreateSurfaceHandle, COMPOSITIONOBJECT_READ,
+                        COMPOSITIONOBJECT_WRITE,
+                    },
+                    Dxgi::*,
+                },
+            };
 
             use super::*;
 
@@ -479,6 +575,25 @@ mod lazy_adapter {
                 adapters.into_iter().map(|(luid, _)| luid).collect()
             }
 
+            /// A DirectComposition surface handle, for DX12 surfaces without a window. DX12 keeps
+            /// it until it creates a swapchain, which requesting an adapter does not do.
+            struct SurfaceHandle(HANDLE);
+
+            impl SurfaceHandle {
+                fn new() -> Self {
+                    let access = (COMPOSITIONOBJECT_READ | COMPOSITIONOBJECT_WRITE) as u32;
+                    let handle = unsafe { DCompositionCreateSurfaceHandle(access, None) }
+                        .expect("DCompositionCreateSurfaceHandle failed");
+                    Self(handle)
+                }
+            }
+
+            impl Drop for SurfaceHandle {
+                fn drop(&mut self) {
+                    unsafe { CloseHandle(self.0) }.unwrap();
+                }
+            }
+
             fn luid(adapter: Arc<wgc::instance::Adapter>) -> LUID {
                 let raw = unsafe { adapter.as_hal::<wgpu_hal::api::Dx12>() }.unwrap();
                 unsafe { raw.as_raw().GetDesc2() }.unwrap().AdapterLuid
@@ -486,7 +601,9 @@ mod lazy_adapter {
 
             /// Also with Vulkan's adapters, which are all exposed, and before DX12's: DX12 still
             /// tries only the adapters it tries alone, unless one of Vulkan's ranks first whatever
-            /// DX12 selects. Then DX12 is not asked, and creates no device.
+            /// DX12 selects. Then DX12 is not asked, and creates no device. And for a DX12 surface,
+            /// which every DX12 adapter can present to and Vulkan has none for: DX12 tries the same
+            /// adapters and selects the same one, also with Vulkan.
             #[test]
             fn selects_in_dxgi_order() {
                 wgpu_test::init_logger();
@@ -498,6 +615,8 @@ mod lazy_adapter {
                 let dx12 = instance(wgt::Backends::DX12, Some(TELEMETRY));
                 let with_vulkan =
                     instance(wgt::Backends::DX12 | wgt::Backends::VULKAN, Some(TELEMETRY));
+                // Dropped after the surfaces that use it, which each option drops.
+                let surface_handle = SurfaceHandle::new();
                 for (power_preference, force_fallback_adapter) in OPTIONS {
                     let context = format!(
                         "{power_preference:?}, force_fallback_adapter: {force_fallback_adapter}"
@@ -561,6 +680,30 @@ mod lazy_adapter {
                     } else if !same_type {
                         println!("{context}: DXGI's order selects {info:?}");
                         println!("{context}: the full ranking puts first {ranked_first:?}");
+                    }
+
+                    // For a DX12 surface: DX12's surface support does not depend on the adapter,
+                    // so the surface costs no device, and the selection is the same. Vulkan has no
+                    // surface for it, so it is not asked to select, and its adapters are dropped.
+                    for (instance, label) in [(&dx12, "DX12"), (&with_vulkan, "with Vulkan")] {
+                        let context = format!("{context}, for a surface, {label}");
+                        let surface = unsafe {
+                            instance.create_surface_from_surface_handle(surface_handle.0 .0)
+                        }
+                        .unwrap_or_else(|error| panic!("{context}: {error}"));
+                        let request = wgt::RequestAdapterOptions {
+                            power_preference,
+                            force_fallback_adapter,
+                            compatible_surface: Some(&*surface),
+                            apply_limit_buckets: false,
+                        };
+                        take_tried();
+                        let adapter = instance.request_adapter(&request, wgt::Backends::all());
+                        assert_eq!(take_tried(), expected, "{context}: the adapters tried");
+                        let adapter = adapter
+                            .unwrap_or_else(|error| panic!("{context}: no adapter: {error}"));
+                        assert!(adapter.is_surface_supported(&surface), "{context}");
+                        assert_eq!(luid(adapter), order[selected].0, "{context}: the selection");
                     }
 
                     // With Vulkan, DX12 still tries only these adapters, and wgpu-core ranks its
