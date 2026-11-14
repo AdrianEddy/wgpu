@@ -185,6 +185,9 @@ impl Instance {
     /// backends, DX12's selection is ranked with their adapters by device type, Vulkan's first
     /// among equals, so a Vulkan adapter of the type that the preference ranks first is
     /// returned, and the per-app preference has no effect.
+    ///
+    /// The backends are asked in order, and only until an adapter is found that no later
+    /// backend's adapter can rank before, so with Vulkan's adapters DX12 may not be asked at all.
     pub fn request_adapter(
         &self,
         options: &RequestAdapterOptions<'_, '_>,
