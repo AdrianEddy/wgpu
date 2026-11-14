@@ -724,7 +724,9 @@ pub trait Instance: Sized + WasmNotSendSync {
     ///
     /// The caller checks the result as it checks an enumerated adapter, also
     /// against the request's surface, and enumerates the backend if it does not
-    /// suit, but does not rank it against the backend's other adapters. An
+    /// suit, but does not rank it against the backend's other adapters.
+    /// `surface_hint` is `None` only for a request without a surface: the caller
+    /// does not ask a backend that the request's surface has no surface for. An
     /// override may ignore `surface_hint` where any adapter it selects can
     /// present to any of its surfaces, as on DX12; elsewhere a selection that
     /// cannot present costs an enumeration, which exposes it again. GLES on

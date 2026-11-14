@@ -202,8 +202,8 @@ validation_canary = [
     "wgpu-sync/std", # Required for send/sync
 ]
 # Lets tests run code inside, and fail, calls on the noop backend's surfaces, devices and queues,
-# make a noop instance select its adapter in `Instance::request_adapter`, and count its adapter
-# queries. For wgpu's own tests; not a stable API.
+# make a noop surface refuse every adapter, make a noop instance select its adapter in
+# `Instance::request_adapter`, and count its adapter queries. For wgpu's own tests; not a stable API.
 noop_test_hooks = []
 # Lets tests record the Vulkan calls that wgpu-hal makes on a device (`vulkan::call_log`).
 # For wgpu's own tests; not a stable API.

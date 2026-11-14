@@ -126,6 +126,8 @@ struct InstanceHooks {
     enumerations: wgpu_sync::atomic::AtomicUsize,
     /// How many times [`crate::Instance::request_adapter`] ran.
     requests: wgpu_sync::atomic::AtomicUsize,
+    /// How many of those requests had a surface hint.
+    hinted_requests: wgpu_sync::atomic::AtomicUsize,
 }
 
 /// How many times a noop instance was asked for adapters, as [`Context::adapter_queries`]
@@ -174,6 +176,18 @@ impl Context {
             enumerations: hooks.enumerations.load(Ordering::Relaxed),
             requests: hooks.requests.load(Ordering::Relaxed),
         }
+    }
+
+    /// How many of this instance's [`crate::Instance::request_adapter`] calls so far had a
+    /// surface hint.
+    ///
+    /// # Panics
+    ///
+    /// If `self` is not an instance.
+    pub fn hinted_adapter_requests(&self) -> usize {
+        self.instance_hooks()
+            .hinted_requests
+            .load(Ordering::Relaxed)
     }
 }
 
@@ -514,12 +528,15 @@ impl crate::Instance for Context {
         &self,
         _power_preference: wgt::PowerPreference,
         force_fallback_adapter: bool,
-        _surface_hint: Option<&Surface>,
+        surface_hint: Option<&Surface>,
     ) -> Option<crate::ExposedAdapter<Api>> {
         let Some(hooks) = &self.instance else {
             return None;
         };
         hooks.requests.fetch_add(1, Ordering::Relaxed);
+        if surface_hint.is_some() {
+            hooks.hinted_requests.fetch_add(1, Ordering::Relaxed);
+        }
         if !hooks.select_lazily.load(Ordering::Relaxed) {
             return None;
         }
@@ -588,6 +605,10 @@ impl crate::Adapter for Context {
     }
 
     unsafe fn surface_capabilities(&self, surface: &Surface) -> Option<crate::SurfaceCapabilities> {
+        #[cfg(feature = "noop_test_hooks")]
+        if surface.refuses_capabilities() {
+            return None;
+        }
         Some(crate::SurfaceCapabilities {
             formats: [
                 wgt::TextureFormat::Bgra8Unorm,

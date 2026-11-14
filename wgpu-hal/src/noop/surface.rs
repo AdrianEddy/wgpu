@@ -281,6 +281,10 @@ struct Hooks {
     during: Vec<(SurfaceCall, Hook)>,
     #[cfg(feature = "noop_test_hooks")]
     failures: Vec<(SurfaceCall, crate::SurfaceError)>,
+    /// Whether adapters report that they cannot present to the surface (see
+    /// [`Surface::refuse_capabilities`]).
+    #[cfg(feature = "noop_test_hooks")]
+    refuse_capabilities: bool,
 }
 
 impl fmt::Debug for Hooks {
@@ -453,6 +457,21 @@ impl Surface {
         );
         self.shared
             .with_state(|state| state.hooks.failures.push((call, error)));
+    }
+
+    /// Makes [`crate::Adapter::surface_capabilities`] report, while `refuse`, that no adapter
+    /// can present to this surface, as a backend whose surface support depends on the adapter
+    /// can.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn refuse_capabilities(&self, refuse: bool) {
+        self.shared
+            .with_state(|state| state.hooks.refuse_capabilities = refuse);
+    }
+
+    #[cfg(feature = "noop_test_hooks")]
+    pub(super) fn refuses_capabilities(&self) -> bool {
+        self.shared
+            .with_state(|state| state.hooks.refuse_capabilities)
     }
 
     /// Records the start of `call`, checks that it does not overlap a call it must not, then

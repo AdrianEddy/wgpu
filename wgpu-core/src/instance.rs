@@ -517,7 +517,9 @@ impl Instance {
     /// those of a full enumeration. The backends after one whose adapters, with those of
     /// the backends before it, include an adapter that no later adapter can outrank
     /// ([`ranks_first_whatever_follows`]) are not asked: the first adapter is the same as
-    /// with every backend asked, and the error cannot happen.
+    /// with every backend asked, and the error cannot happen. A backend that
+    /// `desc.compatible_surface` has no surface for is not asked to select: no adapter of it
+    /// can suit `desc`.
     fn find_adapters(
         &self,
         desc: &wgt::RequestAdapterOptions<&Surface>,
@@ -545,8 +547,14 @@ impl Instance {
             let compatible_hal_surface = desc
                 .compatible_surface
                 .and_then(|surface| surface.raw(backend));
+            // A request for a surface that has none for this backend: every adapter of the
+            // backend fails the surface check before the adapter is asked
+            // (`Surface::get_capabilities_with_raw`), so a selection could only be exposed to be
+            // dropped. The enumeration below records the backend's reasons.
+            let surface_missing =
+                desc.compatible_surface.is_some() && compatible_hal_surface.is_none();
 
-            if wanted == Wanted::Best {
+            if wanted == Wanted::Best && !surface_missing {
                 let best = unsafe {
                     instance.request_adapter(
                         desc.power_preference,
