@@ -1,5 +1,5 @@
 //! Which swapchain maintenance extension a device takes, given what its physical device lists and
-//! what its instance enabled.
+//! what its instance enabled, and which optional extensions a device enables.
 
 use core::ffi::CStr;
 
@@ -38,6 +38,47 @@ fn device(
     };
     properties.drop_extensions_unusable_with(instance_extensions, gpdp2);
     properties
+}
+
+/// A physical device of Vulkan `version` that lists `extensions`.
+fn device_of_version(version: u32, extensions: &[&CStr]) -> PhysicalDeviceProperties {
+    PhysicalDeviceProperties {
+        supported_extensions: extensions
+            .iter()
+            .map(|&name| {
+                vk::ExtensionProperties::default()
+                    .extension_name(name)
+                    .unwrap()
+            })
+            .collect(),
+        device_api_version: version,
+        ..Default::default()
+    }
+}
+
+/// A Vulkan 1.2 device that lists `VK_KHR_zero_initialize_workgroup_memory` enables it, so that the
+/// feature, which the adapter then offers and Naga then uses, is enabled; a Vulkan 1.3 device has
+/// the feature in core and does not.
+#[test]
+fn a_pre_1_3_device_enables_zero_initialize_workgroup_memory_where_listed() {
+    let extension = khr::zero_initialize_workgroup_memory::NAME;
+    for (version, listed, enabled) in [
+        (vk::API_VERSION_1_2, true, true),
+        (vk::API_VERSION_1_2, false, false),
+        (vk::API_VERSION_1_3, true, false),
+    ] {
+        let extensions: &[&CStr] = if listed { &[extension] } else { &[] };
+        let device = device_of_version(version, extensions);
+        assert_eq!(
+            device
+                .get_required_extensions(wgt::Features::empty())
+                .contains(&extension),
+            enabled,
+            "Vulkan {}.{}, listed: {listed}",
+            vk::api_version_major(version),
+            vk::api_version_minor(version),
+        );
+    }
 }
 
 /// Where the instance has both surface maintenance extensions, a device that lists both swapchain
