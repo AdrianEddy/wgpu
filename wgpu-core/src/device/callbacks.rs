@@ -530,6 +530,10 @@ mod tests {
     }
 
     /// Threads that queue and deliver at once call every callback once.
+    ///
+    /// Only with `send_sync`: without it the queued callbacks need not be `Send`, and without
+    /// `std` an instance is used by one thread, so `PendingCallbacks` is not `Sync`.
+    #[cfg(send_sync)]
     #[test]
     fn concurrent_deliveries_call_every_callback_once() {
         const THREADS: u32 = 4;
