@@ -369,6 +369,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Subgroup operations on the 16- and 64-bit types of `SHADER_F16`, `SHADER_I16` and `SHADER_INT64` need `shaderSubgroupExtendedTypes`, which a device opened with both now enables; an adapter with one of those types but without it offers no subgroup feature (VUID-RuntimeSpirv-None-06275). By @AdrianEddy.
 - On a device with mesh shaders, the subgroup features need the task and mesh stages among `subgroupSupportedStages`: Naga lets subgroup operations into them (VUID-RuntimeSpirv-None-06343). By @AdrianEddy.
 - Enable `VK_KHR_portability_subset` wherever the device lists it, not only on Apple targets, and take its restrictions from the implementation (VUID-VkDeviceCreateInfo-pProperties-04451). `POLYGON_MODE_POINT` on it needs `pointPolygons`, which opening a device for it enables (VUID-VkPipelineRasterizationStateCreateInfo-pointPolygons-04458). By @AdrianEddy.
+- `SHADER_INT64_ATOMIC_MIN_MAX`, which is storage-buffer only, needs and enables `shaderBufferInt64Atomics` alone; `SHADER_INT64_ATOMIC_ALL_OPS` also needs `shaderSharedInt64Atomics`. By @AdrianEddy.
 
 #### Metal
 
