@@ -470,6 +470,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Gate the debug printing of ray queries and ray tracing on the device's version or its `VK_KHR_shader_non_semantic_info`, not the loader's version (VUID-VkShaderModuleCreateInfo-pCode-08742). By @AdrianEddy.
 - Split indirect mesh task draws into one command per draw without `multiDrawIndirect` or beyond `maxDrawIndirectCount`, as the other indirect draws do (VUID-vkCmdDrawMeshTasksIndirectEXT-drawCount-02718, -02719). By @AdrianEddy.
 - Convert a `One` swizzle of a depth-stencil view to `A` on every device: `depthStencilSwizzleOneSupport` is part of `maintenance5`, which wgpu-hal does not enable. By @AdrianEddy.
+- Query memory budgets only where the physical device offers `VK_EXT_memory_budget` as well as the device having enabled it, so that the RADV workaround holds for devices created elsewhere. By @AdrianEddy.
 
 #### Metal
 

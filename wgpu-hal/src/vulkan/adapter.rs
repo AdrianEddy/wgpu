@@ -3193,6 +3193,7 @@ impl super::Instance {
             shader_integer_dot_product: false,
             shader_int8: false,
             store_op_none: false,
+            memory_budget: false,
             texture_d24: supports_format(
                 &self.shared.raw,
                 phd,
@@ -3355,6 +3356,10 @@ impl super::PrivateCapabilities {
         self.shader_int8 = features
             .shader_float16_int8
             .is_some_and(|features| features.shader_int8 != 0);
+        // A device created with `VK_EXT_memory_budget` that the physical device's workaround hides
+        // (RADV: Mesa work item 15725) does not query budgets.
+        self.memory_budget = has_extension(ext::memory_budget::NAME)
+            && phd_capabilities.supports_extension(ext::memory_budget::NAME);
         self.store_op_none = api_version >= vk::API_VERSION_1_3
             || (api_version >= vk::API_VERSION_1_2 && has_extension(khr::dynamic_rendering::NAME))
             || has_extension(khr::load_store_op_none::NAME)

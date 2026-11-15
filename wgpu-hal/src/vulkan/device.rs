@@ -8,7 +8,7 @@ use core::{
 };
 
 use arrayvec::ArrayVec;
-use ash::{ext, vk};
+use ash::vk;
 use hashbrown::hash_map::Entry;
 use wgpu_sync::{Mutex, RwLock};
 
@@ -595,6 +595,7 @@ impl super::Device {
         stride: u64,
         offset: u64,
     ) -> Result<super::Texture, crate::DeviceError> {
+        use ash::ext;
         use std::os::unix::io::IntoRawFd;
 
         let enabled_extensions = &self.shared.enabled_extensions;
@@ -945,11 +946,7 @@ impl super::Device {
     }
 
     fn get_memory_properties(&self) -> Option<MemoryProperties> {
-        if !self
-            .shared
-            .enabled_extensions
-            .contains(&ext::memory_budget::NAME)
-        {
+        if !self.shared.private_caps.memory_budget {
             return None;
         }
 

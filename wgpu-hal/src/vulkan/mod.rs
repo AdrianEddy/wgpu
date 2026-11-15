@@ -573,6 +573,10 @@ struct PrivateCapabilities {
 
     /// True if `VK_KHR_incremental_present` is enabled on the device.
     incremental_present: bool,
+
+    /// Whether wgpu-hal queries memory budgets: the device enabled `VK_EXT_memory_budget`, and
+    /// the physical device offers it, which RADV's does not here (its workaround hides it).
+    memory_budget: bool,
 }
 
 bitflags::bitflags!(
