@@ -1,5 +1,6 @@
 //! The members of the feature structures that wgpu-hal reads from a device's creation chain, as
-//! `ash` 0.38 defines them: every member of each is a `vk::Bool32` feature.
+//! `ash` 0.38 defines them, or wgpu-hal where `ash` has none: every member of each is a
+//! `vk::Bool32` feature.
 
 use ash::vk;
 
@@ -204,5 +205,12 @@ feature_structures! {
     }
     PhysicalDeviceSwapchainMaintenance1FeaturesEXT {
         swapchain_maintenance1,
+    }
+}
+
+/// `VK_EXT_ray_tracing_invocation_reorder`'s, which `ash` 0.38 does not define.
+impl FeatureStructure for super::ray_tracing_invocation_reorder::FeaturesEXT {
+    fn enable(&mut self, other: &Self) {
+        self.ray_tracing_invocation_reorder |= other.ray_tracing_invocation_reorder;
     }
 }

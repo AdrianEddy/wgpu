@@ -1,7 +1,8 @@
 //! A device that wgpu-hal did not create gives `device_from_raw` the features it was created
 //! with, and wgpu-hal takes its paths from them: where the device lacks a feature that wgpu-hal
 //! would use, it takes the path that does without it, and where it lacks a core feature behind a
-//! downlevel flag, it opens without the flag.
+//! downlevel flag, it opens without the flag. It refuses a requested feature whose Vulkan features
+//! and extensions the device lacks.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{ffi::CStr, panic::AssertUnwindSafe, time::Duration};
@@ -301,13 +302,14 @@ fn a_device_with_the_extension_but_not_swapchain_maintenance1_waits_for_the_queu
     }
 }
 
-/// Gives `device_from_raw` `raw`, created on `adapter` with `extensions` and `enabled`, catching a
-/// refusal: then destroys `raw` and returns the refusal's message.
+/// Gives `device_from_raw` `raw`, created on `adapter` with `extensions` and `enabled`, with
+/// `features` requested, catching a refusal: then destroys `raw` and returns the refusal's message.
 fn take(
     adapter: &super::super::Adapter,
     raw: ash::Device,
     extensions: &[&'static CStr],
     enabled: &vk::PhysicalDeviceFeatures2<'_>,
+    features: wgt::Features,
 ) -> Result<crate::OpenDevice<super::super::Api>, String> {
     // SAFETY: The chain is valid.
     let enabled_features = unsafe { super::super::PhysicalDeviceFeatures::from_enabled(enabled) };
@@ -320,7 +322,7 @@ fn take(
                 None,
                 extensions,
                 &enabled_features,
-                wgt::Features::empty(),
+                features,
                 &wgt::Limits::downlevel_defaults(),
                 &wgt::MemoryHints::default(),
                 super::super::DeviceQueue::new(0, 0),
@@ -370,7 +372,7 @@ fn a_device_without_a_downlevel_feature_opens_without_its_flag() {
             let expected = adapter.device_downlevel_capabilities(&extensions, &unsafe {
                 super::super::PhysicalDeviceFeatures::from_enabled(&enabled)
             });
-            match take(adapter, raw, &extensions, &enabled) {
+            match take(adapter, raw, &extensions, &enabled, wgt::Features::empty()) {
                 Err(message) => wrong.push(alloc::format!(
                     "{:?}: refused a device without {flag:?}: {message}",
                     exposed.info.name
@@ -412,6 +414,66 @@ fn ffmpeg_core(adapter: &super::super::Adapter) -> vk::PhysicalDeviceFeatures {
         .shader_float64(offered.shader_float64 != 0)
 }
 
+/// On each adapter, `open_with_callback` refuses, before creating the device, to open one whose
+/// callback removed an extension that a requested feature needs, with an error: the device would
+/// not give the feature. Before, it created the device and then panicked, leaking it.
+#[test]
+fn opening_refuses_a_device_that_a_callback_left_without_a_requested_feature() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    let mut checked = 0;
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        let base = adapter.required_device_extensions(wgt::Features::empty());
+        // A feature that needs an extension of its own.
+        let Some((name, feature, extension)) =
+            exposed.features.iter_names().find_map(|(name, feature)| {
+                adapter
+                    .required_device_extensions(feature)
+                    .into_iter()
+                    .find(|extension| !base.contains(extension))
+                    .map(|extension| (name, feature, extension))
+            })
+        else {
+            std::println!(
+                "{:?}: skipped: no feature needs an extension",
+                exposed.info.name
+            );
+            continue;
+        };
+        checked += 1;
+        std::println!("{:?}: {name} without {extension:?}", exposed.info.name);
+        let opened = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: The callback removes an extension, against its contract, which is what is
+            // tested: no device is created.
+            unsafe {
+                adapter.open_with_callback(
+                    feature,
+                    &wgt::Limits::downlevel_defaults(),
+                    &wgt::MemoryHints::default(),
+                    Some(alloc::boxed::Box::new(
+                        move |args: super::super::CreateDeviceCallbackArgs<'_, '_, '_>| {
+                            args.extensions.retain(|&other| other != extension);
+                        },
+                    )),
+                )
+            }
+        }));
+        match opened {
+            Ok(Err(crate::DeviceError::Unexpected)) => {}
+            Ok(Err(other)) => wrong.push(alloc::format!("{:?}: {other:?}", exposed.info.name)),
+            Ok(Ok(_)) => wrong.push(alloc::format!("{:?}: opened", exposed.info.name)),
+            Err(_) => wrong.push(alloc::format!("{:?}: panicked", exposed.info.name)),
+        }
+    }
+    std::println!("{checked} adapters checked");
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// On each adapter, a device created with FFmpeg's core features, the only one of the seven
 /// behind downlevel flags that it has being `fragmentStoresAndAtomics`: it opens, without the
 /// flags of the other six, and submits work.
@@ -434,7 +496,7 @@ fn a_device_with_ffmpegs_features_opens() {
         let offered = exposed.capabilities.downlevel.flags;
         let enabled = vk::PhysicalDeviceFeatures2::default().features(ffmpeg_core(adapter));
         let (raw, extensions) = create(adapter, &instance, &enabled);
-        let open = match take(adapter, raw, &extensions, &enabled) {
+        let open = match take(adapter, raw, &extensions, &enabled, wgt::Features::empty()) {
             Ok(open) => open,
             Err(message) => {
                 wrong.push(alloc::format!(
@@ -465,6 +527,122 @@ fn a_device_with_ffmpegs_features_opens() {
             device.destroy_fence(fence);
         }
         drop((queue, device));
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// On each adapter, every feature that it offers round-trips: a device that wgpu-hal would open
+/// with it alone, or with all of them, has it among `Adapter::device_features`, so that
+/// `device_from_raw` takes the device; and wgpu-hal opens a device with all of them.
+#[test]
+fn every_adapter_feature_round_trips() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        let offered = exposed.features;
+        let mut requests = offered.iter().collect::<Vec<_>>();
+        requests.push(offered);
+        for requested in &requests {
+            let extensions = adapter.required_device_extensions(*requested);
+            let enabled = adapter.physical_device_features(&extensions, *requested);
+            let lacking = *requested - adapter.device_features(&extensions, &enabled, 0);
+            if !lacking.is_empty() {
+                wrong.push(alloc::format!(
+                    "{:?}: opened with {requested:?}, lacking {lacking:?}",
+                    exposed.info.name
+                ));
+            }
+        }
+        // SAFETY: Features that the adapter offers; the device is dropped before the instance.
+        let opened = unsafe {
+            crate::Adapter::open(
+                adapter,
+                offered,
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+            )
+        };
+        match opened {
+            Ok(open) => drop(open),
+            Err(error) => wrong.push(alloc::format!(
+                "{:?}: opening with every feature failed: {error}",
+                exposed.info.name
+            )),
+        }
+        std::println!(
+            "{:?}: {} features, each alone and all together",
+            exposed.info.name,
+            requests.len() - 1
+        );
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// On each adapter, a device created without what a feature that the adapter offers needs, and
+/// given `device_from_raw` with that feature requested: `device_from_raw` refuses it before taking
+/// it, naming the feature. The features are the first offered of `TEXTURE_COMPRESSION_BC`,
+/// `SHADER_F64`, `DEPTH_CLIP_CONTROL` and `POLYGON_MODE_LINE`, whose core features the device
+/// lacks, and `CORE_FEATURES_AND_LIMITS` on a device without `independentBlend`. Before,
+/// `device_from_raw` took the requested features as the caller's word.
+#[test]
+fn a_request_for_a_feature_the_device_lacks_is_refused_by_name() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        let mut cases = Vec::new();
+        if let Some(feature) = [
+            wgt::Features::TEXTURE_COMPRESSION_BC,
+            wgt::Features::SHADER_F64,
+            wgt::Features::DEPTH_CLIP_CONTROL,
+            wgt::Features::POLYGON_MODE_LINE,
+        ]
+        .into_iter()
+        .find(|&feature| exposed.features.contains(feature))
+        {
+            cases.push((feature, downlevel_core(adapter)));
+        }
+        if exposed
+            .features
+            .contains(wgt::Features::CORE_FEATURES_AND_LIMITS)
+        {
+            cases.push((
+                wgt::Features::CORE_FEATURES_AND_LIMITS,
+                downlevel_core(adapter).independent_blend(false),
+            ));
+        }
+        for (feature, core) in cases {
+            let name = feature.iter_names().next().unwrap().0;
+            let enabled = vk::PhysicalDeviceFeatures2::default().features(core);
+            let (raw, extensions) = create(adapter, &instance, &enabled);
+            match take(adapter, raw, &extensions, &enabled, feature) {
+                Ok(open) => {
+                    drop(open);
+                    wrong.push(alloc::format!(
+                        "{:?}: took a device without what {name} needs",
+                        exposed.info.name
+                    ));
+                }
+                Err(message) => {
+                    std::println!("{:?}: refused: {message}", exposed.info.name);
+                    if !message.contains(name) {
+                        wrong.push(alloc::format!(
+                            "{:?}: refused without naming {name}: {message}",
+                            exposed.info.name
+                        ));
+                    }
+                }
+            }
+        }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }

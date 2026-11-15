@@ -423,6 +423,8 @@ pub struct Adapter {
     known_memory_flags: vk::MemoryPropertyFlags,
     phd_capabilities: adapter::PhysicalDeviceProperties,
     phd_features: PhysicalDeviceFeatures,
+    /// The support of the physical device for the formats on which features depend.
+    format_support: adapter::FormatSupport,
     /// The adapter's downlevel capabilities. A device's follow what it was created with
     /// ([`Adapter::device_downlevel_capabilities`]).
     downlevel: wgt::DownlevelCapabilities,
