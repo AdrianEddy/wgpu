@@ -990,12 +990,16 @@ fn a_promoted_feature_needs_its_extension_before_its_promotion() {
 /// but without the subset's structure had them.
 #[test]
 fn a_portability_subset_device_needs_its_members() {
-    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
     let subset = [khr::portability_subset::NAME];
     let features = wgt::Features::TEXTURE_COMPONENT_SWIZZLE | wgt::Features::MULTISAMPLE_ARRAY;
     let none = PhysicalDeviceFeatures::default();
-    assert!(derived(&caps, &[], &none).contains(features));
+    let other = device_of_version(vk::API_VERSION_1_3, &[]);
+    assert!(derived(&other, &[], &none).contains(features));
+    // The restrictions are the implementation's: a device of one has them whether or not it
+    // enabled the extension, as it must (VUID-VkDeviceCreateInfo-pProperties-04451).
+    let caps = device_of_version(vk::API_VERSION_1_3, &subset);
     assert!(!derived(&caps, &subset, &none).intersects(features));
+    assert!(!derived(&caps, &[], &none).intersects(features));
     let with = PhysicalDeviceFeatures {
         portability_subset: Some(
             vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default()
@@ -1005,6 +1009,42 @@ fn a_portability_subset_device_needs_its_members() {
         ..PhysicalDeviceFeatures::default()
     };
     assert!(derived(&caps, &subset, &with).contains(features));
+}
+
+/// On an implementation of `VK_KHR_portability_subset`, which lists it, point polygons need its
+/// `pointPolygons`, and opening a device for them enables both the extension and the member;
+/// elsewhere they need only `fillModeNonSolid`.
+#[test]
+fn point_polygons_on_a_portability_subset_need_its_member() {
+    let point = wgt::Features::POLYGON_MODE_POINT;
+    let core = vk::PhysicalDeviceFeatures::default().fill_mode_non_solid(true);
+    let non_solid = PhysicalDeviceFeatures {
+        core,
+        ..PhysicalDeviceFeatures::default()
+    };
+    let other = device_of_version(vk::API_VERSION_1_3, &[]);
+    assert!(derived(&other, &[], &non_solid).contains(point));
+
+    let subset = [khr::portability_subset::NAME];
+    let caps = device_of_version(vk::API_VERSION_1_3, &subset);
+    let offered = PhysicalDeviceFeatures {
+        portability_subset: Some(Default::default()),
+        core,
+        ..PhysicalDeviceFeatures::default()
+    };
+    assert!(!derived(&caps, &subset, &offered).contains(point));
+    let offered = PhysicalDeviceFeatures {
+        portability_subset: Some(
+            vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default().point_polygons(true),
+        ),
+        core,
+        ..PhysicalDeviceFeatures::default()
+    };
+    assert!(derived(&caps, &subset, &offered).contains(point));
+    let (extensions, enabled) = opened(&caps, &offered, point);
+    assert!(extensions.contains(&khr::portability_subset::NAME));
+    assert_eq!(enabled.portability_subset.unwrap().point_polygons, vk::TRUE);
+    assert!(derived(&caps, &extensions, &enabled).contains(point));
 }
 
 /// A device allocates memory with device addresses only with `VK_KHR_buffer_device_address` and
@@ -1773,8 +1813,7 @@ impl Rng {
 /// `VK_KHR_get_physical_device_properties2`, with probability 1/8), random members, formats,
 /// subgroup properties, matrix configurations, driver and timestamp bits; the private
 /// capabilities derived as `Instance::expose_adapter` derives them. Returns its properties,
-/// offered features, format support, queue family and private capabilities, and whether
-/// `get_required_extensions` runs as on an Apple target, where it requests the portability subset.
+/// offered features, format support, queue family and private capabilities.
 fn random_adapter(
     rng: &mut Rng,
 ) -> (
@@ -1783,7 +1822,6 @@ fn random_adapter(
     FormatSupport,
     vk::QueueFamilyProperties,
     PrivateCapabilities,
-    bool,
 ) {
     let versions = [
         vk::API_VERSION_1_0,
@@ -1865,8 +1903,7 @@ fn random_adapter(
         &offered,
         super::super::Workarounds::empty(),
     );
-    let apple = portability && rng.chance(1, 2);
-    (caps, offered, formats, queue, private_caps, apple)
+    (caps, offered, formats, queue, private_caps)
 }
 
 /// Over 3000 random partial adapters, each feature that an adapter offers round-trips through
@@ -1879,7 +1916,7 @@ fn partial_adapters_round_trip() {
     let mut wrong = alloc::vec::Vec::new();
     let mut checked = 0usize;
     for _ in 0..3000 {
-        let (caps, offered, formats, queue, private_caps, apple) = random_adapter(&mut rng);
+        let (caps, offered, formats, queue, private_caps) = random_adapter(&mut rng);
         let (features, downlevel) = offered.to_wgpu(
             &caps,
             |extension| caps.supports_extension(extension),
@@ -1887,14 +1924,11 @@ fn partial_adapters_round_trip() {
             &queue,
         );
         let open = |requested: wgt::Features| {
-            let mut extensions = caps
+            let extensions = caps
                 .get_required_extensions(requested)
                 .into_iter()
                 .filter(|&extension| caps.supports_extension(extension))
                 .collect::<alloc::vec::Vec<_>>();
-            if apple && !extensions.contains(&khr::portability_subset::NAME) {
-                extensions.push(khr::portability_subset::NAME);
-            }
             let enabled = PhysicalDeviceFeatures::from_extensions_and_requested_features(
                 &caps,
                 &offered,

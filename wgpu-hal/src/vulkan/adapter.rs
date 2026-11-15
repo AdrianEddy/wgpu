@@ -1197,11 +1197,14 @@ impl PhysicalDeviceFeatures {
                     requested_features.intersects(wgt::Features::TEXTURE_COMPONENT_SWIZZLE);
                 let multisample_array_needed =
                     requested_features.intersects(wgt::Features::MULTISAMPLE_ARRAY);
+                let point_polygons_needed =
+                    requested_features.contains(wgt::Features::POLYGON_MODE_POINT);
 
                 Some(
                     vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default()
                         .image_view_format_swizzle(image_view_format_swizzle_needed)
-                        .multisample_array_image(multisample_array_needed),
+                        .multisample_array_image(multisample_array_needed)
+                        .point_polygons(point_polygons_needed),
                 )
             } else {
                 None
@@ -1375,7 +1378,16 @@ impl PhysicalDeviceFeatures {
         );
         //if self.core.dual_src_blend != 0
         features.set(F::POLYGON_MODE_LINE, self.core.fill_mode_non_solid != 0);
-        features.set(F::POLYGON_MODE_POINT, self.core.fill_mode_non_solid != 0);
+        // On an implementation of `VK_KHR_portability_subset`, point polygons also need its
+        // `pointPolygons` (VUID-VkPipelineRasterizationStateCreateInfo-pointPolygons-04458).
+        features.set(
+            F::POLYGON_MODE_POINT,
+            self.core.fill_mode_non_solid != 0
+                && (!caps.supports_extension(khr::portability_subset::NAME)
+                    || self
+                        .portability_subset
+                        .is_some_and(|p| p.point_polygons == vk::TRUE)),
+        );
         //if self.core.depth_bounds != 0 {
         //if self.core.alpha_to_one != 0 {
         //if self.core.multi_viewport != 0 {
@@ -1728,9 +1740,10 @@ impl PhysicalDeviceFeatures {
             features.remove(SUBGROUP_FEATURES);
         }
 
-        // Not supported by default by `VK_KHR_portability_subset`, which we use on apple platforms:
-        // a device with the extension has these only with its features.
-        let portability = has_extension(khr::portability_subset::NAME);
+        // Not supported by default by `VK_KHR_portability_subset`. Its restrictions are the
+        // implementation's, whose devices must enable it (VUID-VkDeviceCreateInfo-pProperties-04451):
+        // a device of one has these only with the subset's features.
+        let portability = caps.supports_extension(khr::portability_subset::NAME);
         features.set(
             F::TEXTURE_COMPONENT_SWIZZLE,
             !portability
@@ -2290,9 +2303,11 @@ impl PhysicalDeviceProperties {
             extensions.push(ext::conservative_rasterization::NAME);
         }
 
-        // Require `VK_KHR_portability_subset` on macOS/iOS
-        #[cfg(target_vendor = "apple")]
-        extensions.push(khr::portability_subset::NAME);
+        // Require `VK_KHR_portability_subset` wherever the device lists it
+        // (VUID-VkDeviceCreateInfo-pProperties-04451).
+        if self.supports_extension(khr::portability_subset::NAME) {
+            extensions.push(khr::portability_subset::NAME);
+        }
 
         // Require `VK_EXT_texture_compression_astc_hdr` if the associated feature was requested,
         // before Vulkan 1.3, which has it in core.
