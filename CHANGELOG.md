@@ -353,6 +353,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Enable the `depthBiasClamp` device feature when it is supported. Pipelines with a non-zero `DepthBiasState::clamp` previously failed Vulkan validation. By @VoxelBoy in [#10566](https://github.com/gfx-rs/wgpu/pull/10566).
 - Derive each feature from the members of the feature structures that enable it: `TEXTURE_INT64_ATOMIC` read `shaderImageInt64Atomics` after setting it, and the ray tracing, mesh shader, cooperative matrix and subgroup features followed their extensions alone. A device created with `VK_KHR_buffer_device_address` but without `bufferDeviceAddress` no longer allocates memory with device addresses. By @AdrianEddy.
 - Enable `shaderStorageImageArrayDynamicIndexing` for `STORAGE_RESOURCE_BINDING_ARRAY`, and `shaderStorageBufferArrayDynamicIndexing` without `TEXTURE_BINDING_ARRAY`, which a second call overwrote. Texture and storage resource arrays need the dynamic indexing of the descriptors they array; buffer arrays enable uniform buffers' where offered. By @AdrianEddy.
+- A feature requested without the feature it extends enables what it needs: `SELECTIVE_MULTIVIEW`, `EXPERIMENTAL_MESH_SHADER_POINTS`, `EXPERIMENTAL_MESH_SHADER_MULTIVIEW` (which enables `multiview` too), `SUBGROUP_VERTEX`, `SUBGROUP_BARRIER`, `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS`, `ACCELERATION_STRUCTURE_BINDING_ARRAY`, and `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, whose extension requires `VK_KHR_acceleration_structure`. By @AdrianEddy.
 
 #### Metal
 
