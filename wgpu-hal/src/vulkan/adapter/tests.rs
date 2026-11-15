@@ -481,6 +481,27 @@ fn timeline_semaphores_need_vulkan_1_2_or_the_extension() {
     assert!(capabilities(vk::API_VERSION_1_2, &[], &features).timeline_semaphores);
 }
 
+/// A device queries memory budgets only where it enabled `VK_EXT_memory_budget` and its physical
+/// device offers it: on RADV, whose memory budgets wgpu-hal hides, a device created with the
+/// extension does not.
+#[test]
+fn memory_budgets_need_the_physical_devices_offer() {
+    let budget = [ext::memory_budget::NAME];
+    let features = PhysicalDeviceFeatures::default();
+    let query = |listed: &[&CStr], enabled: &[&CStr]| {
+        let mut capabilities = PrivateCapabilities::default();
+        capabilities.set_extension_and_feature_capabilities(
+            &device_of_version(vk::API_VERSION_1_3, listed),
+            |extension| enabled.contains(&extension),
+            &features,
+        );
+        capabilities.memory_budget
+    };
+    assert!(query(&budget, &budget));
+    assert!(!query(&[], &budget));
+    assert!(!query(&budget, &[]));
+}
+
 /// The capabilities that extensions give follow the extensions a device was created with: a
 /// Vulkan 1.0 device has them only with the extensions; a Vulkan 1.3 device has them in core.
 #[test]

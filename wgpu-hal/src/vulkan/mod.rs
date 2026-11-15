@@ -546,6 +546,10 @@ struct PrivateCapabilities {
     /// - `VK_ATTACHMENT_STORE_OP_NONE_QCOM` provided by `VK_QCOM_render_pass_store_ops`.
     /// - `VK_ATTACHMENT_STORE_OP_NONE_EXT` provided by `VK_EXT_load_store_op_none`.
     store_op_none: bool,
+
+    /// Whether wgpu-hal queries memory budgets: the device enabled `VK_EXT_memory_budget`, and
+    /// the physical device offers it, which RADV's does not here (its workaround hides it).
+    memory_budget: bool,
 }
 
 bitflags::bitflags!(
