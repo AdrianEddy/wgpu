@@ -766,11 +766,9 @@ struct RelaySemaphores {
 }
 
 impl RelaySemaphores {
-    fn new(device: &DeviceShared) -> Result<Self, crate::DeviceError> {
-        Ok(Self {
-            wait: None,
-            signal: device.new_binary_semaphore("RelaySemaphores: 1")?,
-        })
+    /// The semaphores of a queue's first submission, which signals `signal`.
+    fn new(signal: vk::Semaphore) -> Self {
+        Self { wait: None, signal }
     }
 
     /// Advances the semaphores, returning the semaphores that should be used for a submission.
