@@ -205,4 +205,7 @@ feature_structures! {
     PhysicalDeviceSwapchainMaintenance1FeaturesEXT {
         swapchain_maintenance1,
     }
+    PhysicalDeviceShaderSubgroupExtendedTypesFeatures {
+        shader_subgroup_extended_types,
+    }
 }

@@ -38,6 +38,12 @@ const SUBGROUP_FEATURES: wgt::Features = wgt::Features::SUBGROUP
     .union(wgt::Features::SUBGROUP_VERTEX)
     .union(wgt::Features::SUBGROUP_BARRIER);
 
+/// The features that give shaders 16- and 64-bit types, which subgroup operations then take as
+/// operands only with `shaderSubgroupExtendedTypes` (VUID-RuntimeSpirv-None-06275).
+const EXTENDED_TYPE_FEATURES: wgt::Features = wgt::Features::SHADER_F16
+    .union(wgt::Features::SHADER_I16)
+    .union(wgt::Features::SHADER_INT64);
+
 /// The features that use acceleration structures, and need their extensions and features.
 const ACCELERATION_STRUCTURE_FEATURES: wgt::Features = wgt::Features::EXPERIMENTAL_RAY_QUERY
     .union(wgt::Features::EXPERIMENTAL_RAY_TRACING_PIPELINES)
@@ -164,6 +170,10 @@ pub struct PhysicalDeviceFeatures {
     /// whose structures are the same.
     pub(super) swapchain_maintenance1:
         Option<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>>,
+
+    /// Features provided by `VK_KHR_shader_subgroup_extended_types`, promoted to Vulkan 1.2.
+    shader_subgroup_extended_types:
+        Option<vk::PhysicalDeviceShaderSubgroupExtendedTypesFeatures<'static>>,
 }
 
 /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which `ash` 0.38 does not define.
@@ -429,7 +439,8 @@ impl PhysicalDeviceFeatures {
                         || enable_if_of_type(&mut features.cooperative_matrix, next)
                         || enable_if_of_type(&mut features.vulkan_memory_model, next)
                         || enable_if_of_type(&mut features.shader_draw_parameters, next)
-                        || enable_if_of_type(&mut features.swapchain_maintenance1, next);
+                        || enable_if_of_type(&mut features.swapchain_maintenance1, next)
+                        || enable_if_of_type(&mut features.shader_subgroup_extended_types, next);
                 }
                 next = (*next).p_next;
             }
@@ -535,6 +546,12 @@ impl PhysicalDeviceFeatures {
             ]
         );
         enable_members!(self, timeline_semaphore, vulkan12, [timeline_semaphore]);
+        enable_members!(
+            self,
+            shader_subgroup_extended_types,
+            vulkan12,
+            [shader_subgroup_extended_types]
+        );
         enable_members!(
             self,
             buffer_device_address,
@@ -662,6 +679,10 @@ impl PhysicalDeviceFeatures {
             ),
             shader_draw_parameters: query(version >= vk::API_VERSION_1_1),
             swapchain_maintenance1: query(caps.swapchain_maintenance1().is_some()),
+            // `VK_KHR_shader_subgroup_extended_types` is promoted to 1.2
+            shader_subgroup_extended_types: query(
+                version >= vk::API_VERSION_1_2 || has(khr::shader_subgroup_extended_types::NAME),
+            ),
         }
     }
 
@@ -693,6 +714,7 @@ impl PhysicalDeviceFeatures {
         vulkan_memory_model,
         shader_draw_parameters,
         swapchain_maintenance1,
+        shader_subgroup_extended_types,
     );
 
     fn supports_storage_input_output_16(&self) -> bool {
@@ -1114,6 +1136,19 @@ impl PhysicalDeviceFeatures {
                 Some(
                     vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
                         .swapchain_maintenance1(true),
+                )
+            } else {
+                None
+            },
+            // Subgroup operations on the 16- and 64-bit types of the other features requested.
+            shader_subgroup_extended_types: if requested_features.intersects(SUBGROUP_FEATURES)
+                && requested_features.intersects(EXTENDED_TYPE_FEATURES)
+                && (device_api_version >= vk::API_VERSION_1_2
+                    || enabled_extensions.contains(&khr::shader_subgroup_extended_types::NAME))
+            {
+                Some(
+                    vk::PhysicalDeviceShaderSubgroupExtendedTypesFeatures::default()
+                        .shader_subgroup_extended_types(true),
                 )
             } else {
                 None
@@ -1545,6 +1580,22 @@ impl PhysicalDeviceFeatures {
                     .is_some_and(|mesh| mesh.multiview_mesh_shader != 0),
         );
 
+        // Subgroup operations take every type that the device's other features give shaders, as
+        // WebGPU's `subgroups` takes `f16` with `shader-f16`: 16- and 64-bit operands need
+        // `shaderSubgroupExtendedTypes` (VUID-RuntimeSpirv-None-06275). A device with one of
+        // those types but without it has no subgroup feature, as Dawn offers no `subgroups` with
+        // `shader-f16` but without it.
+        let subgroup_types = !features.intersects(EXTENDED_TYPE_FEATURES)
+            || (promoted(
+                vk::API_VERSION_1_2,
+                khr::shader_subgroup_extended_types::NAME,
+            ) && self
+                .shader_subgroup_extended_types
+                .is_some_and(|types| types.shader_subgroup_extended_types != 0));
+        if !subgroup_types {
+            features.remove(SUBGROUP_FEATURES);
+        }
+
         // Not supported by default by `VK_KHR_portability_subset`, which we use on apple platforms:
         // a device with the extension has these only with its features.
         let portability = has_extension(khr::portability_subset::NAME);
@@ -1901,6 +1952,14 @@ impl PhysicalDeviceProperties {
             // Require `VK_EXT_descriptor_indexing` if one of the associated features was requested
             if requested_features.intersects(INDEXING_FEATURES) {
                 extensions.push(ext::descriptor_indexing::NAME);
+            }
+
+            // Require `VK_KHR_shader_subgroup_extended_types` for subgroup operations on the 16- and
+            // 64-bit types of the other features requested.
+            if requested_features.intersects(SUBGROUP_FEATURES)
+                && requested_features.intersects(EXTENDED_TYPE_FEATURES)
+            {
+                extensions.push(khr::shader_subgroup_extended_types::NAME);
             }
 
             // Always require `VK_KHR_shader_float16_int8` if available as it enables
