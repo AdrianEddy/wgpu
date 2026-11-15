@@ -468,6 +468,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - `SHADER_INT64_ATOMIC_MIN_MAX`, which is storage-buffer only, needs and enables `shaderBufferInt64Atomics` alone; `SHADER_INT64_ATOMIC_ALL_OPS` also needs `shaderSharedInt64Atomics`. By @AdrianEddy.
 - Below Vulkan 1.2, enable the extensions that enabled extensions depend on: `VK_KHR_spirv_1_4` and `VK_KHR_shader_float_controls` for ray queries, `VK_EXT_descriptor_indexing` for acceleration structures, and `VK_KHR_bind_memory2` and `VK_KHR_get_memory_requirements2` for the two-plane formats (VUID-vkCreateDevice-ppEnabledExtensionNames-01387). By @AdrianEddy.
 - Gate the debug printing of ray queries and ray tracing on the device's version or its `VK_KHR_shader_non_semantic_info`, not the loader's version (VUID-VkShaderModuleCreateInfo-pCode-08742). By @AdrianEddy.
+- Split indirect mesh task draws into one command per draw without `multiDrawIndirect` or beyond `maxDrawIndirectCount`, as the other indirect draws do (VUID-vkCmdDrawMeshTasksIndirectEXT-drawCount-02718, -02719). By @AdrianEddy.
 
 #### Metal
 

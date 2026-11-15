@@ -170,6 +170,52 @@ impl super::CommandEncoder {
     }
 }
 
+impl super::CommandEncoder {
+    /// The indirect draws of `draw_count` records of `stride` bytes from `offset`, as
+    /// [`indirect_draws`] splits them for this device.
+    fn indirect_draws(
+        &self,
+        offset: wgt::BufferAddress,
+        draw_count: u32,
+        stride: u32,
+    ) -> impl Iterator<Item = (wgt::BufferAddress, u32)> {
+        indirect_draws(
+            offset,
+            draw_count,
+            stride,
+            self.device.private_caps.multi_draw_indirect,
+            self.device.private_caps.max_draw_indirect_count,
+        )
+    }
+}
+
+/// The commands, by offset and count, that draw `draw_count` indirect records of `stride` bytes
+/// from `offset`: one command for them all on a device with `multiDrawIndirect` and at most
+/// `max_draw_indirect_count` of them; otherwise one command per record. Several draws in one
+/// command need `multiDrawIndirect`, and at most `maxDrawIndirectCount`
+/// (VUID-vkCmdDrawIndirect-drawCount-02718, -02719, and their twins of the indexed and the mesh
+/// task draws).
+fn indirect_draws(
+    offset: wgt::BufferAddress,
+    draw_count: u32,
+    stride: u32,
+    multi_draw_indirect: bool,
+    max_draw_indirect_count: u32,
+) -> impl Iterator<Item = (wgt::BufferAddress, u32)> {
+    let together = multi_draw_indirect && draw_count <= max_draw_indirect_count;
+    let (commands, count) = if together {
+        (u32::from(draw_count != 0), draw_count)
+    } else {
+        (draw_count, 1)
+    };
+    (0..commands).map(move |i| {
+        (
+            offset + wgt::BufferAddress::from(i) * wgt::BufferAddress::from(stride),
+            count,
+        )
+    })
+}
+
 impl crate::CommandEncoder for super::CommandEncoder {
     type A = super::Api;
 
@@ -1241,34 +1287,13 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
-        if draw_count >= 1
-            && self.device.private_caps.multi_draw_indirect
-            && draw_count <= self.device.private_caps.max_draw_indirect_count
-        {
+        let stride = size_of::<wgt::DrawIndirectArgs>() as u32;
+        for (offset, count) in self.indirect_draws(offset, draw_count, stride) {
             unsafe {
-                self.device.raw.cmd_draw_indirect(
-                    self.active,
-                    buffer.raw,
-                    offset,
-                    draw_count,
-                    size_of::<wgt::DrawIndirectArgs>() as u32,
-                )
+                self.device
+                    .raw
+                    .cmd_draw_indirect(self.active, buffer.raw, offset, count, stride)
             };
-        } else {
-            for i in 0..draw_count {
-                let indirect_offset = offset
-                    + i as wgt::BufferAddress
-                        * size_of::<wgt::DrawIndirectArgs>() as wgt::BufferAddress;
-                unsafe {
-                    self.device.raw.cmd_draw_indirect(
-                        self.active,
-                        buffer.raw,
-                        indirect_offset,
-                        1,
-                        size_of::<wgt::DrawIndirectArgs>() as u32,
-                    )
-                };
-            }
         }
     }
     unsafe fn draw_indexed_indirect(
@@ -1277,34 +1302,17 @@ impl crate::CommandEncoder for super::CommandEncoder {
         offset: wgt::BufferAddress,
         draw_count: u32,
     ) {
-        if draw_count >= 1
-            && self.device.private_caps.multi_draw_indirect
-            && draw_count <= self.device.private_caps.max_draw_indirect_count
-        {
+        let stride = size_of::<wgt::DrawIndexedIndirectArgs>() as u32;
+        for (offset, count) in self.indirect_draws(offset, draw_count, stride) {
             unsafe {
                 self.device.raw.cmd_draw_indexed_indirect(
                     self.active,
                     buffer.raw,
                     offset,
-                    draw_count,
-                    size_of::<wgt::DrawIndexedIndirectArgs>() as u32,
+                    count,
+                    stride,
                 )
             };
-        } else {
-            for i in 0..draw_count {
-                let indirect_offset = offset
-                    + i as wgt::BufferAddress
-                        * size_of::<wgt::DrawIndexedIndirectArgs>() as wgt::BufferAddress;
-                unsafe {
-                    self.device.raw.cmd_draw_indexed_indirect(
-                        self.active,
-                        buffer.raw,
-                        indirect_offset,
-                        1,
-                        size_of::<wgt::DrawIndexedIndirectArgs>() as u32,
-                    )
-                };
-            }
         }
     }
     unsafe fn draw_mesh_tasks_indirect(
@@ -1314,15 +1322,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
         draw_count: u32,
     ) {
         if let Some(ref t) = self.device.extension_fns.mesh_shading {
-            unsafe {
-                t.cmd_draw_mesh_tasks_indirect(
-                    self.active,
-                    buffer.raw,
-                    offset,
-                    draw_count,
-                    size_of::<wgt::DispatchIndirectArgs>() as u32,
-                );
-            };
+            let stride = size_of::<wgt::DispatchIndirectArgs>() as u32;
+            for (offset, count) in self.indirect_draws(offset, draw_count, stride) {
+                unsafe {
+                    t.cmd_draw_mesh_tasks_indirect(self.active, buffer.raw, offset, count, stride);
+                };
+            }
         } else {
             panic!("Feature `MESH_SHADING` not enabled");
         }
