@@ -121,9 +121,6 @@ feature_structures! {
     PhysicalDeviceMultiviewFeaturesKHR {
         multiview, multiview_geometry_shader, multiview_tessellation_shader,
     }
-    PhysicalDeviceSamplerYcbcrConversionFeatures {
-        sampler_ycbcr_conversion,
-    }
     PhysicalDeviceTextureCompressionASTCHDRFeaturesEXT {
         texture_compression_astc_hdr,
     }

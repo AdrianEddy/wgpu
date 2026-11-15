@@ -8,8 +8,9 @@ use core::ffi::CStr;
 use ash::{ext, khr, vk};
 
 use super::{
-    enables_swapchain_maintenance1, missing_downlevel_features, PhysicalDeviceFeatures,
-    PhysicalDeviceProperties, KHR_SURFACE_MAINTENANCE1, KHR_SWAPCHAIN_MAINTENANCE1,
+    enables_swapchain_maintenance1, missing_downlevel_features, uses_device_addresses,
+    FormatSupport, PhysicalDeviceFeatures, PhysicalDeviceProperties, KHR_SURFACE_MAINTENANCE1,
+    KHR_SWAPCHAIN_MAINTENANCE1,
 };
 use crate::vulkan::PrivateCapabilities;
 
@@ -614,4 +615,287 @@ fn a_device_lacks_the_downlevel_features_it_was_not_created_with() {
         &PrivateCapabilities::default(),
     );
     assert!(missing_downlevel_features(DOWNLEVEL_FLAGS, &opened.core).is_empty());
+}
+
+/// The wgpu features of a device of the physical device `caps`, which supports no format that a
+/// feature depends on, with the extensions `extensions` and the features `features`, and a queue
+/// without timestamps.
+fn derived(
+    caps: &PhysicalDeviceProperties,
+    extensions: &[&CStr],
+    features: &PhysicalDeviceFeatures,
+) -> wgt::Features {
+    features
+        .to_wgpu(
+            caps,
+            |extension| extensions.contains(&extension),
+            &FormatSupport::default(),
+            &vk::QueueFamilyProperties::default(),
+        )
+        .0
+}
+
+/// A Vulkan 1.3 physical device with every subgroup operation in every stage, and one cooperative
+/// matrix configuration.
+fn subgroups_and_matrices() -> PhysicalDeviceProperties {
+    PhysicalDeviceProperties {
+        subgroup: Some(
+            vk::PhysicalDeviceSubgroupProperties::default()
+                .supported_operations(vk::SubgroupFeatureFlags::from_raw(!0))
+                .supported_stages(vk::ShaderStageFlags::ALL),
+        ),
+        cooperative_matrix_properties: alloc::vec![wgt::CooperativeMatrixProperties {
+            m_size: 16,
+            n_size: 16,
+            k_size: 16,
+            ab_type: wgt::CooperativeScalarType::F16,
+            cr_type: wgt::CooperativeScalarType::F32,
+            saturating_accumulation: false,
+        }],
+        ..device_of_version(vk::API_VERSION_1_3, &[])
+    }
+}
+
+/// Each wgpu feature, the extensions that give it, and the features of a device that has them with
+/// every member that the feature needs off (`.0`) and on (`.1`).
+fn member_cases() -> alloc::vec::Vec<(
+    wgt::Features,
+    &'static [&'static CStr],
+    PhysicalDeviceFeatures,
+    PhysicalDeviceFeatures,
+)> {
+    let acceleration_structures: &[&CStr] = &[
+        khr::deferred_host_operations::NAME,
+        khr::acceleration_structure::NAME,
+        khr::buffer_device_address::NAME,
+        khr::ray_query::NAME,
+        khr::ray_tracing_pipeline::NAME,
+    ];
+    let ray_tracing = |on: bool| PhysicalDeviceFeatures {
+        acceleration_structure: Some(
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+                .acceleration_structure(on),
+        ),
+        buffer_device_address: Some(
+            vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default().buffer_device_address(on),
+        ),
+        ray_query: Some(vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(on)),
+        ray_tracing_pipeline: Some(
+            vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default().ray_tracing_pipeline(on),
+        ),
+        ..PhysicalDeviceFeatures::default()
+    };
+    alloc::vec![
+        (
+            wgt::Features::TEXTURE_INT64_ATOMIC,
+            &[ext::shader_image_atomic_int64::NAME][..],
+            PhysicalDeviceFeatures {
+                shader_image_atomic_int64: Some(
+                    vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT::default(),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+            PhysicalDeviceFeatures {
+                shader_image_atomic_int64: Some(
+                    vk::PhysicalDeviceShaderImageAtomicInt64FeaturesEXT::default()
+                        .shader_image_int64_atomics(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+        ),
+        (
+            wgt::Features::EXPERIMENTAL_RAY_QUERY,
+            acceleration_structures,
+            ray_tracing(false),
+            ray_tracing(true),
+        ),
+        (
+            wgt::Features::EXPERIMENTAL_RAY_TRACING_PIPELINES,
+            acceleration_structures,
+            ray_tracing(false),
+            ray_tracing(true),
+        ),
+        (
+            wgt::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
+            &[khr::ray_tracing_position_fetch::NAME][..],
+            PhysicalDeviceFeatures {
+                position_fetch: Some(
+                    vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default(),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+            PhysicalDeviceFeatures {
+                position_fetch: Some(
+                    vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
+                        .ray_tracing_position_fetch(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+        ),
+        (
+            wgt::Features::EXPERIMENTAL_MESH_SHADER,
+            &[ext::mesh_shader::NAME][..],
+            PhysicalDeviceFeatures {
+                mesh_shader: Some(vk::PhysicalDeviceMeshShaderFeaturesEXT::default()),
+                ..PhysicalDeviceFeatures::default()
+            },
+            PhysicalDeviceFeatures {
+                mesh_shader: Some(
+                    vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+                        .mesh_shader(true)
+                        .task_shader(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+        ),
+        (
+            wgt::Features::EXPERIMENTAL_COOPERATIVE_MATRIX,
+            &[khr::cooperative_matrix::NAME][..],
+            PhysicalDeviceFeatures {
+                cooperative_matrix: Some(vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()),
+                vulkan_memory_model: Some(
+                    vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
+                        .vulkan_memory_model(true)
+                        .vulkan_memory_model_device_scope(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+            PhysicalDeviceFeatures {
+                cooperative_matrix: Some(
+                    vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default()
+                        .cooperative_matrix(true),
+                ),
+                vulkan_memory_model: Some(
+                    vk::PhysicalDeviceVulkanMemoryModelFeatures::default()
+                        .vulkan_memory_model(true)
+                        .vulkan_memory_model_device_scope(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+        ),
+        (
+            wgt::Features::SUBGROUP,
+            &[][..],
+            PhysicalDeviceFeatures {
+                subgroup_size_control: Some(
+                    vk::PhysicalDeviceSubgroupSizeControlFeatures::default(),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+            PhysicalDeviceFeatures {
+                subgroup_size_control: Some(
+                    vk::PhysicalDeviceSubgroupSizeControlFeatures::default()
+                        .subgroup_size_control(true),
+                ),
+                ..PhysicalDeviceFeatures::default()
+            },
+        ),
+    ]
+}
+
+/// A feature is derived from the members of the feature structures that enable what it uses: a
+/// device with the feature's extensions and structures, but without those members, lacks it, as
+/// a device created elsewhere may (the structures of an adapter that lists the extensions have
+/// them). Before, `TEXTURE_INT64_ATOMIC` read a member it had just set, and the ray tracing,
+/// mesh shader, cooperative matrix and subgroup features followed their extensions alone.
+#[test]
+fn a_feature_needs_the_members_that_enable_it() {
+    let caps = subgroups_and_matrices();
+    let mut wrong = alloc::vec::Vec::new();
+    for (feature, extensions, off, on) in member_cases() {
+        if derived(&caps, extensions, &off).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} without its members"));
+        }
+        if !derived(&caps, extensions, &on).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} lacking with its members"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A feature promoted to core needs its extension on a device older than the promotion, and the
+/// two-plane formats need no structure at all: they come with `VK_KHR_sampler_ycbcr_conversion`
+/// or Vulkan 1.1, and nothing wgpu-hal does with them needs `samplerYcbcrConversion`. Before, a
+/// Vulkan 1.0 device with the multiview structure but without `VK_KHR_multiview` had `MULTIVIEW`,
+/// and a Vulkan 1.1 device without the conversion structure lacked `TEXTURE_FORMAT_NV12`.
+#[test]
+fn a_promoted_feature_needs_its_extension_before_its_promotion() {
+    let multiview = PhysicalDeviceFeatures {
+        multiview: Some(vk::PhysicalDeviceMultiviewFeatures::default().multiview(true)),
+        ..PhysicalDeviceFeatures::default()
+    };
+    let vulkan_1_0 = device_of_version(vk::API_VERSION_1_0, &[]);
+    let vulkan_1_1 = device_of_version(vk::API_VERSION_1_1, &[]);
+    assert!(!derived(&vulkan_1_0, &[], &multiview).contains(wgt::Features::MULTIVIEW));
+    assert!(derived(&vulkan_1_0, &[khr::multiview::NAME], &multiview)
+        .contains(wgt::Features::MULTIVIEW));
+    assert!(derived(&vulkan_1_1, &[], &multiview).contains(wgt::Features::MULTIVIEW));
+
+    let formats = FormatSupport {
+        nv12: true,
+        p010: true,
+        ..FormatSupport::default()
+    };
+    let both = wgt::Features::TEXTURE_FORMAT_NV12 | wgt::Features::TEXTURE_FORMAT_P010;
+    let two_plane = |caps: &PhysicalDeviceProperties, extensions: &[&CStr]| {
+        PhysicalDeviceFeatures::default()
+            .to_wgpu(
+                caps,
+                |extension| extensions.contains(&extension),
+                &formats,
+                &vk::QueueFamilyProperties::default(),
+            )
+            .0
+            .intersection(both)
+    };
+    assert!(two_plane(&vulkan_1_0, &[]).is_empty());
+    assert_eq!(
+        two_plane(&vulkan_1_0, &[khr::sampler_ycbcr_conversion::NAME]),
+        both
+    );
+    assert_eq!(two_plane(&vulkan_1_1, &[]), both);
+}
+
+/// On a device with `VK_KHR_portability_subset`, the features that the subset leaves out need the
+/// subset's members; a device without the extension has them. Before, a device with the extension
+/// but without the subset's structure had them.
+#[test]
+fn a_portability_subset_device_needs_its_members() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let subset = [khr::portability_subset::NAME];
+    let features = wgt::Features::TEXTURE_COMPONENT_SWIZZLE | wgt::Features::MULTISAMPLE_ARRAY;
+    let none = PhysicalDeviceFeatures::default();
+    assert!(derived(&caps, &[], &none).contains(features));
+    assert!(!derived(&caps, &subset, &none).intersects(features));
+    let with = PhysicalDeviceFeatures {
+        portability_subset: Some(
+            vk::PhysicalDevicePortabilitySubsetFeaturesKHR::default()
+                .image_view_format_swizzle(true)
+                .multisample_array_image(true),
+        ),
+        ..PhysicalDeviceFeatures::default()
+    };
+    assert!(derived(&caps, &subset, &with).contains(features));
+}
+
+/// A device allocates memory with device addresses only with `VK_KHR_buffer_device_address` and
+/// its `bufferDeviceAddress`. Before, the extension alone sufficed, and a device created elsewhere
+/// with the extension but without the feature allocated against
+/// VUID-VkMemoryAllocateInfo-flags-03331.
+#[test]
+fn device_addresses_need_the_feature_as_well_as_the_extension() {
+    let extension = [khr::buffer_device_address::NAME];
+    let on = PhysicalDeviceFeatures {
+        buffer_device_address: Some(
+            vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default().buffer_device_address(true),
+        ),
+        ..PhysicalDeviceFeatures::default()
+    };
+    let off = PhysicalDeviceFeatures {
+        buffer_device_address: Some(vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default()),
+        ..PhysicalDeviceFeatures::default()
+    };
+    assert!(uses_device_addresses(&extension, &on));
+    assert!(!uses_device_addresses(&extension, &off));
+    assert!(!uses_device_addresses(&[], &on));
 }
