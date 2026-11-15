@@ -459,6 +459,7 @@ struct RayTracingDeviceExtensionFunctions {
 /// Set of internal capabilities, which don't show up in the exposed
 /// device geometry, but affect the code paths taken internally.
 #[derive(Clone, Debug)]
+#[cfg_attr(test, derive(Default))]
 struct PrivateCapabilities {
     image_view_usage: bool,
     timeline_semaphores: bool,

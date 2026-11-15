@@ -7,6 +7,7 @@ use wgpu_sync::Mutex;
 use crate::{vulkan::semaphore_list::SemaphoreList, AllocationSizes};
 
 use super::semaphore_list::SemaphoreListMode;
+use feature_structures::{enable_core_features, FeatureStructure};
 
 fn depth_stencil_required_flags() -> vk::FormatFeatureFlags {
     vk::FormatFeatureFlags::SAMPLED_IMAGE | vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT
@@ -113,9 +114,9 @@ mod ray_tracing_invocation_reorder {
     unsafe impl Sync for PropertiesEXT {}
 }
 #[expect(rustdoc::private_intra_doc_links)]
-/// Features supported by a [`vk::PhysicalDevice`] and its extensions.
+/// Features of a [`vk::PhysicalDevice`] and its extensions.
 ///
-/// This is used in two phases:
+/// This is used in three ways:
 ///
 /// - When enumerating adapters, this represents the features offered by the
 ///   adapter. [`Instance::expose_adapter`] calls `vkGetPhysicalDeviceFeatures2`
@@ -129,7 +130,14 @@ mod ray_tracing_invocation_reorder {
 ///   constructs an value of this type indicating which Vulkan features to
 ///   enable, based on the `wgpu_types::Features` requested.
 ///
+/// - Given to [`Adapter::device_from_raw`], this represents the features the
+///   device was created with: those wgpu-hal enabled, when it opened the device,
+///   or, for a device created elsewhere, those its creator's `VkDeviceCreateInfo`
+///   enabled ([`PhysicalDeviceFeatures::from_device_create_info`]). wgpu-hal takes
+///   its paths from them, not from the features the adapter offers.
+///
 /// [`Instance::expose_adapter`]: super::Instance::expose_adapter
+/// [`Adapter::device_from_raw`]: super::Adapter::device_from_raw
 #[derive(Debug, Default)]
 pub struct PhysicalDeviceFeatures {
     /// Basic Vulkan 1.0 features.
@@ -245,7 +253,8 @@ pub struct PhysicalDeviceFeatures {
 
     /// Features provided by `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1`,
     /// whose structures are the same.
-    swapchain_maintenance1: Option<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>>,
+    pub(super) swapchain_maintenance1:
+        Option<vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT<'static>>,
 }
 
 /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR`, which `ash` 0.38 does not define.
@@ -287,7 +296,338 @@ fn enables_swapchain_maintenance1(
             .is_some_and(|features| features.swapchain_maintenance1 == vk::TRUE)
 }
 
+/// The member of [`vk::PhysicalDeviceFeatures`] that holds one core feature.
+type CoreFeature = fn(&mut vk::PhysicalDeviceFeatures) -> &mut vk::Bool32;
+
+/// The core features behind the downlevel flags that wgpu-core relies on a device having, each
+/// with its name in the Vulkan specification. An adapter has a flag where it offers the feature,
+/// wgpu-hal enables the feature on the devices it opens where the adapter has the flag, and
+/// wgpu-core validates the API's use against the adapter's flags. `fullDrawIndexUint32`, behind
+/// `FULL_DRAW_INDEX_UINT32`, is not among them: wgpu-hal does not enable it, and wgpu-core
+/// validates nothing against that flag.
+const DOWNLEVEL_CORE_FEATURES: [(wgt::DownlevelFlags, &str, CoreFeature); 6] = [
+    (
+        wgt::DownlevelFlags::INDEPENDENT_BLEND,
+        "independentBlend",
+        |features| &mut features.independent_blend,
+    ),
+    (
+        wgt::DownlevelFlags::MULTISAMPLED_SHADING,
+        "sampleRateShading",
+        |features| &mut features.sample_rate_shading,
+    ),
+    (
+        wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES,
+        "imageCubeArray",
+        |features| &mut features.image_cube_array,
+    ),
+    (
+        wgt::DownlevelFlags::ANISOTROPIC_FILTERING,
+        "samplerAnisotropy",
+        |features| &mut features.sampler_anisotropy,
+    ),
+    (
+        wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
+        "fragmentStoresAndAtomics",
+        |features| &mut features.fragment_stores_and_atomics,
+    ),
+    (
+        wgt::DownlevelFlags::DEPTH_BIAS_CLAMP,
+        "depthBiasClamp",
+        |features| &mut features.depth_bias_clamp,
+    ),
+];
+
+/// The names of the [`DOWNLEVEL_CORE_FEATURES`] whose flag `downlevel_flags` has and that `core`
+/// lacks.
+fn missing_downlevel_features(
+    downlevel_flags: wgt::DownlevelFlags,
+    core: &vk::PhysicalDeviceFeatures,
+) -> Vec<&'static str> {
+    let mut core = *core;
+    DOWNLEVEL_CORE_FEATURES
+        .iter()
+        .filter(|&&(flag, _, feature)| {
+            downlevel_flags.contains(flag) && *feature(&mut core) == vk::FALSE
+        })
+        .map(|&(_, name, _)| name)
+        .collect()
+}
+
+/// The structure at `structure`, if it is of type `T`. The copy may hold the caller's `p_next`: it
+/// is read, not kept.
+///
+/// # Safety
+///
+/// `structure` is a valid Vulkan structure.
+unsafe fn read_if_of_type<T: vk::TaggedStructure + Copy>(
+    structure: *const vk::BaseInStructure<'_>,
+) -> Option<T> {
+    // SAFETY: A valid structure, as our caller guarantees: one of type `T` if its `s_type` says so.
+    unsafe { ((*structure).s_type == T::STRUCTURE_TYPE).then(|| structure.cast::<T>().read()) }
+}
+
+/// Enables in `member`, which it inserts if absent, each feature that the structure at `structure`
+/// enables, if the structure is of `member`'s type, and returns whether it was. A chain that gives
+/// a structure twice, against VUID-VkDeviceCreateInfo-sType-unique, enables what either enables.
+///
+/// # Safety
+///
+/// `structure` is a valid Vulkan structure.
+unsafe fn enable_if_of_type<T: FeatureStructure>(
+    member: &mut Option<T>,
+    structure: *const vk::BaseInStructure<'_>,
+) -> bool {
+    // SAFETY: A valid structure, as our caller guarantees.
+    let Some(copy) = (unsafe { read_if_of_type::<T>(structure) }) else {
+        return false;
+    };
+    member.get_or_insert_with(T::default).enable(&copy);
+    true
+}
+
+/// Sets each listed member of the `$member` structure of `$features`, inserting the structure if
+/// it is absent, where `$source` sets it.
+macro_rules! enable_members {
+    ($features:expr, $member:ident, $source:expr, [$($field:ident),* $(,)?]) => {{
+        let target = $features.$member.get_or_insert_with(Default::default);
+        $(target.$field |= $source.$field;)*
+    }};
+}
+
 impl PhysicalDeviceFeatures {
+    /// The features that a device was created with, from the `VkPhysicalDeviceFeatures2` that its
+    /// creator gave `vkCreateDevice`: its core features, and the structures of its `p_next` chain
+    /// that wgpu-hal knows, whether a `VkPhysicalDeviceVulkan11Features`,
+    /// `VkPhysicalDeviceVulkan12Features` or `VkPhysicalDeviceVulkan13Features` or an extension's
+    /// own structure gives them. Other structures are skipped. Give the result to
+    /// [`Adapter::device_from_raw`] with the device.
+    ///
+    /// A `VkPhysicalDeviceFeatures2` within the chain gives its core features as well, so a device
+    /// created with `VkDeviceCreateInfo::pEnabledFeatures`, or with its creator's own
+    /// `VkPhysicalDeviceFeatures2` anywhere in `VkDeviceCreateInfo::pNext`, has the features of a
+    /// `VkPhysicalDeviceFeatures2` whose `features` are the former (none where it is null) and
+    /// whose `p_next` is that chain: [`Self::from_device_create_info`] takes those. On a chain that
+    /// gives a feature twice, which Vulkan forbids, a feature is enabled where any copy enables it.
+    ///
+    /// # Safety
+    ///
+    /// `enabled.p_next` is null or a valid chain of Vulkan structures.
+    ///
+    /// [`Adapter::device_from_raw`]: super::Adapter::device_from_raw
+    pub unsafe fn from_enabled(enabled: &vk::PhysicalDeviceFeatures2<'_>) -> Self {
+        let mut features = Self {
+            core: enabled.features,
+            ..Self::default()
+        };
+        let mut next = enabled
+            .p_next
+            .cast_const()
+            .cast::<vk::BaseInStructure<'_>>();
+        while !next.is_null() {
+            // SAFETY: Each structure of a valid chain, as our caller guarantees.
+            unsafe {
+                if let Some(nested) = read_if_of_type::<vk::PhysicalDeviceFeatures2<'_>>(next) {
+                    enable_core_features(&mut features.core, &nested.features);
+                } else if let Some(vulkan11) =
+                    read_if_of_type::<vk::PhysicalDeviceVulkan11Features<'_>>(next)
+                {
+                    features.enable_vulkan11(&vulkan11);
+                } else if let Some(vulkan12) =
+                    read_if_of_type::<vk::PhysicalDeviceVulkan12Features<'_>>(next)
+                {
+                    features.enable_vulkan12(&vulkan12);
+                } else if let Some(vulkan13) =
+                    read_if_of_type::<vk::PhysicalDeviceVulkan13Features<'_>>(next)
+                {
+                    features.enable_vulkan13(&vulkan13);
+                } else {
+                    let _ = enable_if_of_type(&mut features.descriptor_indexing, next)
+                        || enable_if_of_type(&mut features.timeline_semaphore, next)
+                        || enable_if_of_type(&mut features.image_robustness, next)
+                        || enable_if_of_type(&mut features.robustness2, next)
+                        || enable_if_of_type(&mut features.multiview, next)
+                        || enable_if_of_type(&mut features.sampler_ycbcr_conversion, next)
+                        || enable_if_of_type(&mut features.astc_hdr, next)
+                        || enable_if_of_type(&mut features.shader_float16_int8, next)
+                        || enable_if_of_type(&mut features._16bit_storage, next)
+                        || enable_if_of_type(&mut features.acceleration_structure, next)
+                        || enable_if_of_type(&mut features.buffer_device_address, next)
+                        || enable_if_of_type(&mut features.ray_query, next)
+                        || enable_if_of_type(&mut features.ray_tracing_pipeline, next)
+                        || enable_if_of_type(&mut features.zero_initialize_workgroup_memory, next)
+                        || enable_if_of_type(&mut features.position_fetch, next)
+                        || enable_if_of_type(&mut features.shader_atomic_int64, next)
+                        || enable_if_of_type(&mut features.shader_image_atomic_int64, next)
+                        || enable_if_of_type(&mut features.shader_atomic_float, next)
+                        || enable_if_of_type(&mut features.subgroup_size_control, next)
+                        || enable_if_of_type(&mut features.maintenance4, next)
+                        || enable_if_of_type(&mut features.mesh_shader, next)
+                        || enable_if_of_type(&mut features.shader_integer_dot_product, next)
+                        || enable_if_of_type(&mut features.shader_barycentrics, next)
+                        || enable_if_of_type(&mut features.portability_subset, next)
+                        || enable_if_of_type(&mut features.cooperative_matrix, next)
+                        || enable_if_of_type(&mut features.vulkan_memory_model, next)
+                        || enable_if_of_type(&mut features.shader_draw_parameters, next)
+                        || enable_if_of_type(&mut features.swapchain_maintenance1, next);
+                }
+                next = (*next).p_next;
+            }
+        }
+        features
+    }
+
+    /// The features that a device was created with, from the `VkDeviceCreateInfo` that its creator
+    /// gave `vkCreateDevice`: its `pEnabledFeatures`, or the `VkPhysicalDeviceFeatures2` anywhere in
+    /// its `pNext` chain, and the structures of that chain that wgpu-hal knows
+    /// ([`Self::from_enabled`]). Give the result to [`Adapter::device_from_raw`] with the device.
+    ///
+    /// # Safety
+    ///
+    /// `info.p_enabled_features` is null or points to a valid `VkPhysicalDeviceFeatures`, and
+    /// `info.p_next` is null or a valid chain of Vulkan structures.
+    ///
+    /// [`Adapter::device_from_raw`]: super::Adapter::device_from_raw
+    pub unsafe fn from_device_create_info(info: &vk::DeviceCreateInfo<'_>) -> Self {
+        // SAFETY: Null or valid, as our caller guarantees.
+        let core = unsafe { info.p_enabled_features.as_ref() }
+            .copied()
+            .unwrap_or_default();
+        let enabled = vk::PhysicalDeviceFeatures2 {
+            features: core,
+            p_next: info.p_next.cast_mut(),
+            ..Default::default()
+        };
+        // SAFETY: A valid chain, as our caller guarantees.
+        unsafe { Self::from_enabled(&enabled) }
+    }
+
+    /// Enables the members of the structures that `vulkan11` includes.
+    fn enable_vulkan11(&mut self, vulkan11: &vk::PhysicalDeviceVulkan11Features<'_>) {
+        enable_members!(
+            self,
+            _16bit_storage,
+            vulkan11,
+            [
+                storage_buffer16_bit_access,
+                uniform_and_storage_buffer16_bit_access,
+                storage_push_constant16,
+                storage_input_output16,
+            ]
+        );
+        enable_members!(
+            self,
+            multiview,
+            vulkan11,
+            [
+                multiview,
+                multiview_geometry_shader,
+                multiview_tessellation_shader,
+            ]
+        );
+        enable_members!(
+            self,
+            sampler_ycbcr_conversion,
+            vulkan11,
+            [sampler_ycbcr_conversion]
+        );
+        enable_members!(
+            self,
+            shader_draw_parameters,
+            vulkan11,
+            [shader_draw_parameters]
+        );
+    }
+
+    /// Enables the members of the structures that `vulkan12` includes.
+    fn enable_vulkan12(&mut self, vulkan12: &vk::PhysicalDeviceVulkan12Features<'_>) {
+        enable_members!(
+            self,
+            shader_atomic_int64,
+            vulkan12,
+            [shader_buffer_int64_atomics, shader_shared_int64_atomics]
+        );
+        enable_members!(
+            self,
+            shader_float16_int8,
+            vulkan12,
+            [shader_float16, shader_int8]
+        );
+        enable_members!(
+            self,
+            descriptor_indexing,
+            vulkan12,
+            [
+                shader_input_attachment_array_dynamic_indexing,
+                shader_uniform_texel_buffer_array_dynamic_indexing,
+                shader_storage_texel_buffer_array_dynamic_indexing,
+                shader_uniform_buffer_array_non_uniform_indexing,
+                shader_sampled_image_array_non_uniform_indexing,
+                shader_storage_buffer_array_non_uniform_indexing,
+                shader_storage_image_array_non_uniform_indexing,
+                shader_input_attachment_array_non_uniform_indexing,
+                shader_uniform_texel_buffer_array_non_uniform_indexing,
+                shader_storage_texel_buffer_array_non_uniform_indexing,
+                descriptor_binding_uniform_buffer_update_after_bind,
+                descriptor_binding_sampled_image_update_after_bind,
+                descriptor_binding_storage_image_update_after_bind,
+                descriptor_binding_storage_buffer_update_after_bind,
+                descriptor_binding_uniform_texel_buffer_update_after_bind,
+                descriptor_binding_storage_texel_buffer_update_after_bind,
+                descriptor_binding_update_unused_while_pending,
+                descriptor_binding_partially_bound,
+                descriptor_binding_variable_descriptor_count,
+                runtime_descriptor_array,
+            ]
+        );
+        enable_members!(self, timeline_semaphore, vulkan12, [timeline_semaphore]);
+        enable_members!(
+            self,
+            buffer_device_address,
+            vulkan12,
+            [
+                buffer_device_address,
+                buffer_device_address_capture_replay,
+                buffer_device_address_multi_device,
+            ]
+        );
+        enable_members!(
+            self,
+            vulkan_memory_model,
+            vulkan12,
+            [
+                vulkan_memory_model,
+                vulkan_memory_model_device_scope,
+                vulkan_memory_model_availability_visibility_chains,
+            ]
+        );
+    }
+
+    /// Enables the members of the structures that `vulkan13` includes.
+    fn enable_vulkan13(&mut self, vulkan13: &vk::PhysicalDeviceVulkan13Features<'_>) {
+        enable_members!(self, image_robustness, vulkan13, [robust_image_access]);
+        enable_members!(
+            self,
+            subgroup_size_control,
+            vulkan13,
+            [subgroup_size_control, compute_full_subgroups]
+        );
+        enable_members!(self, astc_hdr, vulkan13, [texture_compression_astc_hdr]);
+        enable_members!(
+            self,
+            zero_initialize_workgroup_memory,
+            vulkan13,
+            [shader_zero_initialize_workgroup_memory]
+        );
+        enable_members!(
+            self,
+            shader_integer_dot_product,
+            vulkan13,
+            [shader_integer_dot_product]
+        );
+        enable_members!(self, maintenance4, vulkan13, [maintenance4]);
+    }
+
     pub fn get_core(&self) -> vk::PhysicalDeviceFeatures {
         self.core
     }
@@ -437,79 +777,71 @@ impl PhysicalDeviceFeatures {
         let needs_partially_bound =
             requested_features.intersects(wgt::Features::PARTIALLY_BOUND_BINDING_ARRAY);
 
-        Self {
-            // vk::PhysicalDeviceFeatures is a struct composed of Bool32's while
-            // Features is a bitfield so we need to map everything manually
-            core: vk::PhysicalDeviceFeatures::default()
-                .robust_buffer_access(private_caps.robust_buffer_access)
-                .independent_blend(downlevel_flags.contains(wgt::DownlevelFlags::INDEPENDENT_BLEND))
-                .sample_rate_shading(
-                    downlevel_flags.contains(wgt::DownlevelFlags::MULTISAMPLED_SHADING),
-                )
-                .image_cube_array(
-                    downlevel_flags.contains(wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES),
-                )
-                .draw_indirect_first_instance(
-                    requested_features.contains(wgt::Features::INDIRECT_FIRST_INSTANCE),
-                )
-                //.dual_src_blend(requested_features.contains(wgt::Features::DUAL_SRC_BLENDING))
-                .multi_draw_indirect(phd_features.core.multi_draw_indirect != 0)
-                .fill_mode_non_solid(requested_features.intersects(
+        // vk::PhysicalDeviceFeatures is a struct composed of Bool32's while
+        // Features is a bitfield so we need to map everything manually
+        let mut core = vk::PhysicalDeviceFeatures::default()
+            .robust_buffer_access(private_caps.robust_buffer_access)
+            .draw_indirect_first_instance(
+                requested_features.contains(wgt::Features::INDIRECT_FIRST_INSTANCE),
+            )
+            //.dual_src_blend(requested_features.contains(wgt::Features::DUAL_SRC_BLENDING))
+            .multi_draw_indirect(phd_features.core.multi_draw_indirect != 0)
+            .fill_mode_non_solid(
+                requested_features.intersects(
                     wgt::Features::POLYGON_MODE_LINE | wgt::Features::POLYGON_MODE_POINT,
-                ))
-                //.depth_bounds(requested_features.contains(wgt::Features::DEPTH_BOUNDS))
-                //.alpha_to_one(requested_features.contains(wgt::Features::ALPHA_TO_ONE))
-                //.multi_viewport(requested_features.contains(wgt::Features::MULTI_VIEWPORTS))
-                .sampler_anisotropy(
-                    downlevel_flags.contains(wgt::DownlevelFlags::ANISOTROPIC_FILTERING),
-                )
-                .texture_compression_etc2(
-                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2),
-                )
-                .texture_compression_astc_ldr(
-                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC),
-                )
-                .texture_compression_bc(
-                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
-                    // BC provides formats for Sliced 3D
-                )
-                //.occlusion_query_precise(requested_features.contains(wgt::Features::PRECISE_OCCLUSION_QUERY))
-                .pipeline_statistics_query(
-                    requested_features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY),
-                )
-                .vertex_pipeline_stores_and_atomics(
-                    requested_features.contains(wgt::Features::VERTEX_WRITABLE_STORAGE),
-                )
-                .fragment_stores_and_atomics(
-                    downlevel_flags.contains(wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE),
-                )
-                //.shader_image_gather_extended(
-                //.shader_storage_image_extended_formats(
-                .shader_uniform_buffer_array_dynamic_indexing(
-                    requested_features.contains(wgt::Features::BUFFER_BINDING_ARRAY),
-                )
-                .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
-                    wgt::Features::BUFFER_BINDING_ARRAY
-                        | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
-                ))
-                .shader_sampled_image_array_dynamic_indexing(
-                    requested_features.contains(wgt::Features::TEXTURE_BINDING_ARRAY),
-                )
-                .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
-                    wgt::Features::TEXTURE_BINDING_ARRAY
-                        | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
-                ))
-                //.shader_storage_image_array_dynamic_indexing(
-                .shader_clip_distance(requested_features.contains(wgt::Features::CLIP_DISTANCES))
-                //.shader_cull_distance(requested_features.contains(wgt::Features::SHADER_CULL_DISTANCE))
-                .shader_float64(requested_features.contains(wgt::Features::SHADER_F64))
-                .shader_int64(requested_features.contains(wgt::Features::SHADER_INT64))
-                .shader_int16(requested_features.contains(wgt::Features::SHADER_I16))
-                //.shader_resource_residency(requested_features.contains(wgt::Features::SHADER_RESOURCE_RESIDENCY))
-                .geometry_shader(requested_features.contains(wgt::Features::PRIMITIVE_INDEX))
-                .depth_clamp(requested_features.contains(wgt::Features::DEPTH_CLIP_CONTROL))
-                .depth_bias_clamp(downlevel_flags.contains(wgt::DownlevelFlags::DEPTH_BIAS_CLAMP))
-                .dual_src_blend(requested_features.contains(wgt::Features::DUAL_SOURCE_BLENDING)),
+                ),
+            )
+            //.depth_bounds(requested_features.contains(wgt::Features::DEPTH_BOUNDS))
+            //.alpha_to_one(requested_features.contains(wgt::Features::ALPHA_TO_ONE))
+            //.multi_viewport(requested_features.contains(wgt::Features::MULTI_VIEWPORTS))
+            .texture_compression_etc2(
+                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2),
+            )
+            .texture_compression_astc_ldr(
+                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC),
+            )
+            .texture_compression_bc(
+                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
+                // BC provides formats for Sliced 3D
+            )
+            //.occlusion_query_precise(requested_features.contains(wgt::Features::PRECISE_OCCLUSION_QUERY))
+            .pipeline_statistics_query(
+                requested_features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY),
+            )
+            .vertex_pipeline_stores_and_atomics(
+                requested_features.contains(wgt::Features::VERTEX_WRITABLE_STORAGE),
+            )
+            //.shader_image_gather_extended(
+            //.shader_storage_image_extended_formats(
+            .shader_uniform_buffer_array_dynamic_indexing(
+                requested_features.contains(wgt::Features::BUFFER_BINDING_ARRAY),
+            )
+            .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
+                wgt::Features::BUFFER_BINDING_ARRAY | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
+            ))
+            .shader_sampled_image_array_dynamic_indexing(
+                requested_features.contains(wgt::Features::TEXTURE_BINDING_ARRAY),
+            )
+            .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
+                wgt::Features::TEXTURE_BINDING_ARRAY
+                    | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
+            ))
+            //.shader_storage_image_array_dynamic_indexing(
+            .shader_clip_distance(requested_features.contains(wgt::Features::CLIP_DISTANCES))
+            //.shader_cull_distance(requested_features.contains(wgt::Features::SHADER_CULL_DISTANCE))
+            .shader_float64(requested_features.contains(wgt::Features::SHADER_F64))
+            .shader_int64(requested_features.contains(wgt::Features::SHADER_INT64))
+            .shader_int16(requested_features.contains(wgt::Features::SHADER_I16))
+            //.shader_resource_residency(requested_features.contains(wgt::Features::SHADER_RESOURCE_RESIDENCY))
+            .geometry_shader(requested_features.contains(wgt::Features::PRIMITIVE_INDEX))
+            .depth_clamp(requested_features.contains(wgt::Features::DEPTH_CLIP_CONTROL))
+            .dual_src_blend(requested_features.contains(wgt::Features::DUAL_SOURCE_BLENDING));
+        for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
+            *feature(&mut core) = downlevel_flags.contains(flag).into();
+        }
+
+        Self {
+            core,
             descriptor_indexing: if requested_features.intersects(INDEXING_FEATURES) {
                 Some(
                     vk::PhysicalDeviceDescriptorIndexingFeaturesEXT::default()
@@ -885,19 +1217,14 @@ impl PhysicalDeviceFeatures {
             caps.supports_extension(khr::swapchain_mutable_format::NAME)
                 || !caps.supports_extension(khr::swapchain::NAME),
         );
-        dl_flags.set(Df::CUBE_ARRAY_TEXTURES, self.core.image_cube_array != 0);
-        dl_flags.set(Df::ANISOTROPIC_FILTERING, self.core.sampler_anisotropy != 0);
-        dl_flags.set(
-            Df::FRAGMENT_WRITABLE_STORAGE,
-            self.core.fragment_stores_and_atomics != 0,
-        );
-        dl_flags.set(Df::MULTISAMPLED_SHADING, self.core.sample_rate_shading != 0);
-        dl_flags.set(Df::INDEPENDENT_BLEND, self.core.independent_blend != 0);
+        let mut core = self.core;
+        for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
+            dl_flags.set(flag, *feature(&mut core) != 0);
+        }
         dl_flags.set(
             Df::FULL_DRAW_INDEX_UINT32,
             self.core.full_draw_index_uint32 != 0,
         );
-        dl_flags.set(Df::DEPTH_BIAS_CLAMP, self.core.depth_bias_clamp != 0);
 
         features.set(
             F::TIMESTAMP_QUERY
@@ -1388,7 +1715,7 @@ pub struct PhysicalDeviceProperties {
     /// Which is the version of Vulkan supported for device-level functionality.
     ///
     /// It is associated with a `VkPhysicalDevice` and its children.
-    device_api_version: u32,
+    pub(super) device_api_version: u32,
 
     /// Supported cooperative matrix configurations.
     ///
@@ -2733,20 +3060,22 @@ impl super::Instance {
 
         let alignments = phd_capabilities.to_hal_alignments(has_robust_buffer_access2);
 
-        let private_caps = super::PrivateCapabilities {
-            image_view_usage: phd_capabilities.device_api_version >= vk::API_VERSION_1_1
-                || phd_capabilities.supports_extension(khr::maintenance2::NAME),
-            // VeriSilicon's proprietary driver, as on NXP's i.MX 8 SoCs, advertises timeline
-            // semaphores but crashes in `vkQueueSubmit` when wgpu uses them. It reports
-            // `VK_DRIVER_ID_MESA_RADV` as its driver ID, so only the vendor ID identifies it.
-            timeline_semaphores: phd_capabilities.properties.vendor_id != db::verisilicon::VENDOR
-                && !workarounds.contains(super::Workarounds::DISABLE_TIMELINE_SEMAPHORES)
-                && match phd_features.timeline_semaphore {
-                    Some(features) => features.timeline_semaphore == vk::TRUE,
-                    None => phd_features
-                        .timeline_semaphore
-                        .is_some_and(|ext| ext.timeline_semaphore != 0),
-                },
+        let mut private_caps = super::PrivateCapabilities {
+            // These are set below, from the extensions the adapter supports and the features it
+            // offers, as a device's are from those it was created with.
+            image_view_usage: false,
+            timeline_semaphores: false,
+            multi_draw_indirect: false,
+            robust_buffer_access: false,
+            robust_image_access: false,
+            robust_buffer_access2: false,
+            robust_image_access2: false,
+            zero_initialize_workgroup_memory: false,
+            image_format_list: false,
+            incremental_present: false,
+            shader_integer_dot_product: false,
+            shader_int8: false,
+            store_op_none: false,
             texture_d24: supports_format(
                 &self.shared.raw,
                 phd,
@@ -2768,42 +3097,16 @@ impl super::Instance {
                 vk::ImageTiling::OPTIMAL,
                 depth_stencil_required_flags(),
             ),
-            multi_draw_indirect: phd_features.core.multi_draw_indirect != 0,
             max_draw_indirect_count: phd_capabilities.properties.limits.max_draw_indirect_count,
             non_coherent_map_mask: phd_capabilities.properties.limits.non_coherent_atom_size - 1,
             can_present: true,
             device_luid: phd_capabilities
                 .id
                 .and_then(|id| (id.device_luid_valid == vk::TRUE).then_some(id.device_luid)),
-            //TODO: make configurable
-            robust_buffer_access: phd_features.core.robust_buffer_access != 0,
-            robust_image_access: phd_features
-                .robustness2
-                .is_some_and(|f| f.robust_image_access2 != 0)
-                || phd_features
-                    .image_robustness
-                    .is_some_and(|ext| ext.robust_image_access != 0),
-            robust_buffer_access2: has_robust_buffer_access2,
-            robust_image_access2: phd_features
-                .robustness2
-                .as_ref()
-                .map(|r| r.robust_image_access2 == 1)
-                .unwrap_or_default(),
-            zero_initialize_workgroup_memory: phd_features
-                .zero_initialize_workgroup_memory
-                .is_some_and(|ext| ext.shader_zero_initialize_workgroup_memory == vk::TRUE),
-            image_format_list: phd_capabilities.device_api_version >= vk::API_VERSION_1_2
-                || phd_capabilities.supports_extension(khr::image_format_list::NAME),
             maximum_samplers: phd_capabilities
                 .properties
                 .limits
                 .max_sampler_allocation_count,
-            shader_integer_dot_product: phd_features
-                .shader_integer_dot_product
-                .is_some_and(|ext| ext.shader_integer_dot_product != 0),
-            shader_int8: phd_features
-                .shader_float16_int8
-                .is_some_and(|features| features.shader_int8 != 0),
             multiview_instance_index_limit: phd_capabilities
                 .multiview
                 .map(|a| a.max_multiview_instance_index)
@@ -2815,15 +3118,13 @@ impl super::Instance {
                 .unwrap_or(false),
             ray_tracing_pipeline_group_data_size: alignments.ray_tracing_pipeline_group_data_size,
             shader_binding_table_alignment: alignments.ray_tracing_pipeline_data_offset_alignment,
-            store_op_none: phd_capabilities.device_api_version >= vk::API_VERSION_1_3
-                || (phd_capabilities.device_api_version >= vk::API_VERSION_1_2
-                    && phd_capabilities.supports_extension(khr::dynamic_rendering::NAME))
-                || phd_capabilities.supports_extension(khr::load_store_op_none::NAME)
-                || phd_capabilities.supports_extension(ash::qcom::render_pass_store_ops::NAME)
-                || phd_capabilities.supports_extension(ext::load_store_op_none::NAME),
-            incremental_present: phd_capabilities
-                .supports_extension(khr::incremental_present::NAME),
         };
+        private_caps.set_extension_and_feature_capabilities(
+            &phd_capabilities,
+            |extension| phd_capabilities.supports_extension(extension),
+            &phd_features,
+            workarounds,
+        );
         let capabilities = crate::Capabilities {
             limits: phd_capabilities.to_wgpu_limits(),
             alignments,
@@ -2880,9 +3181,93 @@ impl super::Instance {
     }
 }
 
+impl super::PrivateCapabilities {
+    /// Sets the capabilities that depend on which extensions and features a device has: for an
+    /// adapter, those it supports and offers; for a device, those it was created with.
+    /// `has_extension` tells whether the device has a device extension. `workarounds` are the
+    /// adapter's.
+    fn set_extension_and_feature_capabilities(
+        &mut self,
+        phd_capabilities: &PhysicalDeviceProperties,
+        has_extension: impl Fn(&'static CStr) -> bool,
+        features: &PhysicalDeviceFeatures,
+        workarounds: super::Workarounds,
+    ) {
+        use crate::auxil::db;
+
+        let api_version = phd_capabilities.device_api_version;
+        self.image_view_usage =
+            api_version >= vk::API_VERSION_1_1 || has_extension(khr::maintenance2::NAME);
+        // VeriSilicon's proprietary driver, as on NXP's i.MX 8 SoCs, advertises timeline
+        // semaphores but crashes in `vkQueueSubmit` when wgpu uses them. It reports
+        // `VK_DRIVER_ID_MESA_RADV` as its driver ID, so only the vendor ID identifies it.
+        // A timeline semaphore needs its functions, from Vulkan 1.2 or its extension; a structure
+        // given without either (against the structure pointer chain rule) leaves binary fences.
+        self.timeline_semaphores = phd_capabilities.properties.vendor_id != db::verisilicon::VENDOR
+            && !workarounds.contains(super::Workarounds::DISABLE_TIMELINE_SEMAPHORES)
+            && (api_version >= vk::API_VERSION_1_2 || has_extension(khr::timeline_semaphore::NAME))
+            && features
+                .timeline_semaphore
+                .is_some_and(|features| features.timeline_semaphore == vk::TRUE);
+        self.multi_draw_indirect = features.core.multi_draw_indirect != 0;
+        //TODO: make configurable
+        self.robust_buffer_access = features.core.robust_buffer_access != 0;
+        // `VK_EXT_robustness2` is relied on only where the physical device reports its properties:
+        // the uniform bounds-check alignment that wgpu-core pads lazy initialization to comes from
+        // them (`to_hal_alignments`), and the workaround for outdated Intel drivers
+        // (`is_intel_igpu_outdated_for_robustness2`) clears them as it hides the extension. A
+        // device created with robustness2 there keeps Naga's bounds checks.
+        let robustness2 = features
+            .robustness2
+            .filter(|_| phd_capabilities.robustness2.is_some());
+        self.robust_image_access = robustness2
+            .is_some_and(|features| features.robust_image_access2 != 0)
+            || features
+                .image_robustness
+                .is_some_and(|features| features.robust_image_access != 0);
+        self.robust_buffer_access2 =
+            robustness2.is_some_and(|features| features.robust_buffer_access2 == vk::TRUE);
+        self.robust_image_access2 =
+            robustness2.is_some_and(|features| features.robust_image_access2 == vk::TRUE);
+        self.zero_initialize_workgroup_memory = features
+            .zero_initialize_workgroup_memory
+            .is_some_and(|features| features.shader_zero_initialize_workgroup_memory == vk::TRUE);
+        self.image_format_list =
+            api_version >= vk::API_VERSION_1_2 || has_extension(khr::image_format_list::NAME);
+        self.shader_integer_dot_product = features
+            .shader_integer_dot_product
+            .is_some_and(|features| features.shader_integer_dot_product != 0);
+        self.shader_int8 = features
+            .shader_float16_int8
+            .is_some_and(|features| features.shader_int8 != 0);
+        self.store_op_none = api_version >= vk::API_VERSION_1_3
+            || (api_version >= vk::API_VERSION_1_2 && has_extension(khr::dynamic_rendering::NAME))
+            || has_extension(khr::load_store_op_none::NAME)
+            || has_extension(ash::qcom::render_pass_store_ops::NAME)
+            || has_extension(ext::load_store_op_none::NAME);
+        self.incremental_present = has_extension(khr::incremental_present::NAME);
+    }
+}
+
 impl super::Adapter {
     pub fn raw_physical_device(&self) -> vk::PhysicalDevice {
         self.raw
+    }
+
+    /// The core features that this adapter's downlevel capabilities rely on a device having, and
+    /// that a device created with `enabled_features` lacks, by their names in the Vulkan
+    /// specification: `independentBlend`, `sampleRateShading`, `imageCubeArray`,
+    /// `samplerAnisotropy`, `fragmentStoresAndAtomics` and `depthBiasClamp`, those of them that the
+    /// adapter offers.
+    ///
+    /// wgpu-hal has no path that does without them, and wgpu-core validates the use of the device
+    /// against the adapter's downlevel capabilities, so [`Self::device_from_raw`] refuses a device
+    /// that lacks one. The devices that wgpu-hal opens have them all.
+    pub fn missing_downlevel_features(
+        &self,
+        enabled_features: &PhysicalDeviceFeatures,
+    ) -> Vec<&'static str> {
+        missing_downlevel_features(self.downlevel_flags, &enabled_features.core)
     }
 
     pub fn get_physical_device_features(&self) -> &PhysicalDeviceFeatures {
@@ -2943,11 +3328,36 @@ impl super::Adapter {
         )
     }
 
+    /// Wraps `raw_device`, a device created from this adapter, as a wgpu-hal device.
+    ///
+    /// wgpu-hal takes its paths from the extensions and features that the device was created
+    /// with, `enabled_extensions` and `enabled_features`, never from what the adapter offers.
+    /// Where the device lacks a feature that wgpu-hal would use, it takes the path that does
+    /// without it: binary fences without `timelineSemaphore`, bounds checks that Naga injects
+    /// without `robustBufferAccess2` or `robustImageAccess`, zero-initialization that Naga
+    /// polyfills without `shaderZeroInitializeWorkgroupMemory`, and a swapchain teardown that waits
+    /// for the queue without `swapchainMaintenance1`, among others. The core features that
+    /// [`Self::missing_downlevel_features`] names have no such path.
+    ///
+    /// A device that wgpu-hal did not create gives `enabled_features` from the
+    /// `VkDeviceCreateInfo` that its creator gave `vkCreateDevice`, with
+    /// [`PhysicalDeviceFeatures::from_device_create_info`], or from its creator's
+    /// `VkPhysicalDeviceFeatures2` chain, with [`PhysicalDeviceFeatures::from_enabled`]. One
+    /// created as wgpu-hal creates its own gives the [`Self::physical_device_features`] it was
+    /// created with.
+    ///
     /// # Safety
     ///
-    /// - `raw_device` must be created from this adapter.
-    /// - `raw_device` must be created with `queue`, `enabled_extensions` and `physical_device_features()`.
-    /// - `enabled_extensions` must be a superset of `required_device_extensions()`.
+    /// - `raw_device` must be created from this adapter, with `queue`.
+    /// - `enabled_extensions` must be the device extensions `raw_device` was created with; those
+    ///   wgpu-hal does not know may be left out. On a Vulkan 1.0 device they must include
+    ///   `VK_KHR_maintenance1` and `VK_KHR_storage_buffer_storage_class`, and `VK_KHR_swapchain`
+    ///   for surfaces.
+    /// - `enabled_features` must be the features `raw_device` was created with.
+    /// - The device must support `features`: it must have the extensions that
+    ///   [`Self::required_device_extensions`] requires for them, beyond the optional ones it adds
+    ///   where the adapter supports them, and the features that
+    ///   [`Self::physical_device_features`] enables for them.
     /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of `raw_device`. If
     ///   `drop_callback` is [`Some`], `raw_device` must be valid until the callback is called.
     /// - Destroying the device requires that no other code uses the device or its queues, and
@@ -2955,15 +3365,18 @@ impl super::Adapter {
     ///
     /// # Panics
     ///
-    /// If `queue`'s flags include `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` and
-    /// `enabled_extensions` lacks `VK_KHR_internally_synchronized_queues`, or if `queue` has flags
-    /// and the device lacks `vkGetDeviceQueue2` (Vulkan 1.1).
+    /// Before taking `raw_device`: if [`Self::missing_downlevel_features`] names a feature that
+    /// `enabled_features` lacks, if `queue`'s flags include
+    /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` and `enabled_extensions` lacks
+    /// `VK_KHR_internally_synchronized_queues`, or if `queue` has flags and the device lacks
+    /// `vkGetDeviceQueue2` (Vulkan 1.1).
     #[allow(clippy::too_many_arguments)]
     pub unsafe fn device_from_raw(
         &self,
         raw_device: ash::Device,
         drop_callback: Option<crate::DropCallback>,
         enabled_extensions: &[&'static CStr],
+        enabled_features: &PhysicalDeviceFeatures,
         features: wgt::Features,
         limits: &wgt::Limits,
         memory_hints: &wgt::MemoryHints,
@@ -2975,6 +3388,14 @@ impl super::Adapter {
             create_flags,
             ref lock,
         } = queue;
+        let missing = self.missing_downlevel_features(enabled_features);
+        if !missing.is_empty() {
+            crate::hal_usage_error(format_args!(
+                "the device lacks {}, which the adapter offers, and on which wgpu-core relies \
+                 (Adapter::missing_downlevel_features)",
+                missing.join(", ")
+            ));
+        }
         let internally_synchronized =
             create_flags.contains(DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR);
         if internally_synchronized && !enabled_extensions.contains(&INTERNALLY_SYNCHRONIZED_QUEUES)
@@ -2983,6 +3404,15 @@ impl super::Adapter {
                 "an internally synchronized queue needs VK_KHR_internally_synchronized_queues",
             );
         }
+        // The device's own capabilities: those that depend on extensions and features from what
+        // it was created with, the others from its adapter.
+        let mut private_caps = self.private_caps.clone();
+        private_caps.set_extension_and_feature_capabilities(
+            &self.phd_capabilities,
+            |extension| enabled_extensions.contains(&extension),
+            enabled_features,
+            self.workarounds,
+        );
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -3111,17 +3541,11 @@ impl super::Adapter {
                 spv::Capability::StorageImageExtendedFormats,
             ];
 
-            if self
-                .downlevel_flags
-                .contains(wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES)
-            {
+            if enabled_features.core.image_cube_array != 0 {
                 capabilities.push(spv::Capability::SampledCubeArray);
             }
 
-            if self
-                .downlevel_flags
-                .contains(wgt::DownlevelFlags::MULTISAMPLED_SHADING)
-            {
+            if enabled_features.core.sample_rate_shading != 0 {
                 capabilities.push(spv::Capability::SampleRateShading);
             }
 
@@ -3248,7 +3672,7 @@ impl super::Adapter {
                 // TODO: expose this more generally
                 capabilities.push(spv::Capability::VulkanMemoryModel);
             }
-            if self.private_caps.shader_integer_dot_product {
+            if private_caps.shader_integer_dot_product {
                 // See <https://registry.khronos.org/vulkan/specs/1.3-extensions/man/html/VK_KHR_shader_integer_dot_product.html#_new_spir_v_capabilities>.
                 capabilities.extend(&[
                     spv::Capability::DotProductInputAllKHR,
@@ -3257,7 +3681,7 @@ impl super::Adapter {
                     spv::Capability::DotProductKHR,
                 ]);
             }
-            if self.private_caps.shader_int8 {
+            if private_caps.shader_int8 {
                 // See <https://registry.khronos.org/vulkan/specs/latest/man/html/VkPhysicalDeviceShaderFloat16Int8Features.html#extension-features-shaderInt8>.
                 capabilities.extend(&[spv::Capability::Int8]);
             }
@@ -3284,12 +3708,12 @@ impl super::Adapter {
                 capabilities: Some(capabilities.iter().cloned().collect()),
                 bounds_check_policies: naga::proc::BoundsCheckPolicies {
                     index: naga::proc::BoundsCheckPolicy::Restrict,
-                    buffer: if self.private_caps.robust_buffer_access2 {
+                    buffer: if private_caps.robust_buffer_access2 {
                         naga::proc::BoundsCheckPolicy::Unchecked
                     } else {
                         naga::proc::BoundsCheckPolicy::Restrict
                     },
-                    image_load: if self.private_caps.robust_image_access {
+                    image_load: if private_caps.robust_image_access {
                         naga::proc::BoundsCheckPolicy::Unchecked
                     } else {
                         naga::proc::BoundsCheckPolicy::Restrict
@@ -3297,10 +3721,7 @@ impl super::Adapter {
                     // TODO: support bounds checks on binding arrays
                     binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
                 },
-                zero_initialize_workgroup_memory: if self
-                    .private_caps
-                    .zero_initialize_workgroup_memory
-                {
+                zero_initialize_workgroup_memory: if private_caps.zero_initialize_workgroup_memory {
                     spv::ZeroInitializeWorkgroupMemoryMode::Native
                 } else {
                     spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
@@ -3308,7 +3729,7 @@ impl super::Adapter {
                 force_loop_bounding: true,
                 ray_query_initialization_tracking: true,
                 use_storage_input_output_16: features.contains(wgt::Features::SHADER_F16)
-                    && self.phd_features.supports_storage_input_output_16(),
+                    && enabled_features.supports_storage_input_output_16(),
                 fake_missing_bindings: false,
                 // We need to build this separately for each invocation, so just default it out here
                 binding_map: BTreeMap::default(),
@@ -3397,7 +3818,7 @@ impl super::Adapter {
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
             enabled_extensions: enabled_extensions.into(),
-            present_fences: enables_swapchain_maintenance1(&self.phd_features, enabled_extensions),
+            present_fences: enables_swapchain_maintenance1(enabled_features, enabled_extensions),
             extension_fns: super::DeviceExtensionFunctions {
                 debug_utils: debug_utils_fn,
                 draw_indirect_count: indirect_count_fn,
@@ -3412,13 +3833,13 @@ impl super::Adapter {
             pipeline_cache_validation_key,
             vendor_id: self.phd_capabilities.properties.vendor_id,
             timestamp_period: self.phd_capabilities.properties.limits.timestamp_period,
-            private_caps: self.private_caps.clone(),
+            sampler_cache: Mutex::new(super::sampler::SamplerCache::new(
+                private_caps.maximum_samplers,
+            )),
+            private_caps,
             features,
             workarounds: self.workarounds,
             render_passes: Mutex::new(Default::default()),
-            sampler_cache: Mutex::new(super::sampler::SamplerCache::new(
-                self.private_caps.maximum_samplers,
-            )),
             memory_allocations_counter: Default::default(),
 
             texture_identity_factory: super::ResourceIdentityFactory::new(),
@@ -3541,11 +3962,13 @@ impl super::Adapter {
             }
         }
 
+        // SAFETY: Created just now from this adapter, with these extensions and features.
         unsafe {
             self.device_from_raw(
                 raw_device,
                 None,
                 &enabled_extensions,
+                &enabled_phd_features,
                 features,
                 limits,
                 memory_hints,
@@ -4071,6 +4494,8 @@ fn query_cooperative_matrix_properties(
     );
     result
 }
+
+mod feature_structures;
 
 #[cfg(test)]
 mod tests;

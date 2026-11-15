@@ -5,6 +5,7 @@
 //! A run that must not use a GPU leaves them all out by their name, which contains
 //! `device_tests::`. They watch the Vulkan calls themselves, through [`call_log`].
 
+mod enabled_features;
 mod injected;
 mod present_fences;
 mod queue_lock;

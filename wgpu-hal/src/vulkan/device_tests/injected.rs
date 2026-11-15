@@ -84,6 +84,7 @@ pub(super) fn open(
             raw,
             None,
             &extensions,
+            &physical_features,
             features,
             &wgt::Limits::downlevel_defaults(),
             &wgt::MemoryHints::default(),
