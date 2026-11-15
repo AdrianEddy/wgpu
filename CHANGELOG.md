@@ -451,6 +451,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Enable `shaderStorageImageArrayDynamicIndexing` for `STORAGE_RESOURCE_BINDING_ARRAY`, and `shaderStorageBufferArrayDynamicIndexing` without `TEXTURE_BINDING_ARRAY`, which a second call overwrote. Texture and storage resource arrays need the dynamic indexing of the descriptors they array; buffer arrays enable uniform buffers' where offered. By @AdrianEddy.
 - A feature requested without the feature it extends enables what it needs: `SELECTIVE_MULTIVIEW`, `EXPERIMENTAL_MESH_SHADER_POINTS`, `EXPERIMENTAL_MESH_SHADER_MULTIVIEW` (which enables `multiview` too), `SUBGROUP_VERTEX`, `SUBGROUP_BARRIER`, `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS`, `ACCELERATION_STRUCTURE_BINDING_ARRAY`, and `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, whose extension requires `VK_KHR_acceleration_structure`. By @AdrianEddy.
 - Enable `VK_KHR_sampler_ycbcr_conversion` for `TEXTURE_FORMAT_P010` before Vulkan 1.1, and `VK_KHR_vulkan_memory_model` for `EXPERIMENTAL_COOPERATIVE_MATRIX` before Vulkan 1.2. By @AdrianEddy.
+- Offer `TEXTURE_COMPRESSION_BC_SLICED_3D` and `TEXTURE_COMPRESSION_ASTC_SLICED_3D` where every format of the family has 3D images as wgpu creates them: no Vulkan feature guarantees them. A device has them with its family's formats, which a request for them enables. By @AdrianEddy.
 
 #### Metal
 

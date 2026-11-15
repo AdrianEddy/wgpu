@@ -808,13 +808,15 @@ impl PhysicalDeviceFeatures {
                 .texture_compression_etc2(
                     requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2),
                 )
-                .texture_compression_astc_ldr(
-                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC),
-                )
-                .texture_compression_bc(
-                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
-                    // BC provides formats for Sliced 3D
-                )
+                // The sliced 3D features imply their families' (WebGPU's feature dependencies).
+                .texture_compression_astc_ldr(requested_features.intersects(
+                    wgt::Features::TEXTURE_COMPRESSION_ASTC
+                        | wgt::Features::TEXTURE_COMPRESSION_ASTC_SLICED_3D,
+                ))
+                .texture_compression_bc(requested_features.intersects(
+                    wgt::Features::TEXTURE_COMPRESSION_BC
+                        | wgt::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
+                ))
                 //.occlusion_query_precise(requested_features.contains(wgt::Features::PRECISE_OCCLUSION_QUERY))
                 .pipeline_statistics_query(
                     requested_features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY),
@@ -1279,9 +1281,18 @@ impl PhysicalDeviceFeatures {
             F::TEXTURE_COMPRESSION_BC,
             self.core.texture_compression_bc != 0,
         );
+        // The 3D images of compressed formats are a property of the physical device: no feature
+        // of the specification ties them to `textureCompressionBC` or
+        // `textureCompressionASTC_LDR`. A device has the sliced 3D features with its families'
+        // formats, as WebGPU's feature dependencies make `texture-compression-bc-sliced-3d` imply
+        // `texture-compression-bc` (and the same for ASTC).
         features.set(
             F::TEXTURE_COMPRESSION_BC_SLICED_3D,
-            self.core.texture_compression_bc != 0, // BC guarantees Sliced 3D
+            self.core.texture_compression_bc != 0 && formats.bc_3d,
+        );
+        features.set(
+            F::TEXTURE_COMPRESSION_ASTC_SLICED_3D,
+            self.core.texture_compression_astc_ldr != 0 && formats.astc_3d,
         );
         features.set(
             F::PIPELINE_STATISTICS_QUERY,
@@ -1418,10 +1429,6 @@ impl PhysicalDeviceFeatures {
                     .astc_hdr
                     .is_some_and(|astc_hdr| astc_hdr.texture_compression_astc_hdr != 0),
         );
-
-        if self.core.texture_compression_astc_ldr != 0 {
-            features.set(F::TEXTURE_COMPRESSION_ASTC_SLICED_3D, formats.astc_3d);
-        }
 
         // Note `storage_input_output16` is not required, we polyfill `f16` I/O using `f32`
         // types when this capability is not available
@@ -1659,7 +1666,9 @@ pub(super) struct FormatSupport {
     float32_blendable: bool,
     /// The 16-bit normalized formats ([`is_format_16bit_norm_supported`]).
     norm16: bool,
-    /// The physical device offers `textureCompressionASTC_LDR`, and the ASTC formats have 3D
+    /// The physical device offers `textureCompressionBC`, and every BC format has 3D images.
+    bc_3d: bool,
+    /// The physical device offers `textureCompressionASTC_LDR`, and every ASTC LDR format has 3D
     /// images.
     astc_3d: bool,
     /// `G8_B8R8_2PLANE_420_UNORM` samples and is copied.
@@ -1714,8 +1723,10 @@ impl FormatSupport {
             float32_filterable: is_float32_filterable_supported(instance, phd),
             float32_blendable: is_float32_blendable_supported(instance, phd),
             norm16: is_format_16bit_norm_supported(instance, phd),
+            bc_3d: offered.core.texture_compression_bc != 0
+                && supports_3d_images(instance, phd, &BC_FORMATS),
             astc_3d: offered.core.texture_compression_astc_ldr != 0
-                && supports_astc_3d(instance, phd),
+                && supports_3d_images(instance, phd, &ASTC_LDR_FORMATS),
             nv12: planar_format(vk::Format::G8_B8R8_2PLANE_420_UNORM),
             p010: planar_format(vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16),
         }
@@ -4371,50 +4382,87 @@ pub(super) fn supports_format(
     }
 }
 
-fn supports_astc_3d(instance: &ash::Instance, phd: vk::PhysicalDevice) -> bool {
-    [
-        vk::Format::ASTC_4X4_UNORM_BLOCK,
-        vk::Format::ASTC_4X4_SRGB_BLOCK,
-        vk::Format::ASTC_5X4_UNORM_BLOCK,
-        vk::Format::ASTC_5X4_SRGB_BLOCK,
-        vk::Format::ASTC_5X5_UNORM_BLOCK,
-        vk::Format::ASTC_5X5_SRGB_BLOCK,
-        vk::Format::ASTC_6X5_UNORM_BLOCK,
-        vk::Format::ASTC_6X5_SRGB_BLOCK,
-        vk::Format::ASTC_6X6_UNORM_BLOCK,
-        vk::Format::ASTC_6X6_SRGB_BLOCK,
-        vk::Format::ASTC_8X5_UNORM_BLOCK,
-        vk::Format::ASTC_8X5_SRGB_BLOCK,
-        vk::Format::ASTC_8X6_UNORM_BLOCK,
-        vk::Format::ASTC_8X6_SRGB_BLOCK,
-        vk::Format::ASTC_8X8_UNORM_BLOCK,
-        vk::Format::ASTC_8X8_SRGB_BLOCK,
-        vk::Format::ASTC_10X5_UNORM_BLOCK,
-        vk::Format::ASTC_10X5_SRGB_BLOCK,
-        vk::Format::ASTC_10X6_UNORM_BLOCK,
-        vk::Format::ASTC_10X6_SRGB_BLOCK,
-        vk::Format::ASTC_10X8_UNORM_BLOCK,
-        vk::Format::ASTC_10X8_SRGB_BLOCK,
-        vk::Format::ASTC_10X10_UNORM_BLOCK,
-        vk::Format::ASTC_10X10_SRGB_BLOCK,
-        vk::Format::ASTC_12X10_UNORM_BLOCK,
-        vk::Format::ASTC_12X10_SRGB_BLOCK,
-        vk::Format::ASTC_12X12_UNORM_BLOCK,
-        vk::Format::ASTC_12X12_SRGB_BLOCK,
-    ]
-    .into_iter()
-    .all(|format| {
-        unsafe {
-            instance.get_physical_device_image_format_properties(
-                phd,
-                format,
-                vk::ImageType::TYPE_3D,
-                vk::ImageTiling::OPTIMAL,
-                vk::ImageUsageFlags::SAMPLED,
-                vk::ImageCreateFlags::empty(),
-            )
-        }
-        .is_ok()
+/// The BC formats, as wgpu maps them.
+const BC_FORMATS: [vk::Format; 14] = [
+    vk::Format::BC1_RGBA_UNORM_BLOCK,
+    vk::Format::BC1_RGBA_SRGB_BLOCK,
+    vk::Format::BC2_UNORM_BLOCK,
+    vk::Format::BC2_SRGB_BLOCK,
+    vk::Format::BC3_UNORM_BLOCK,
+    vk::Format::BC3_SRGB_BLOCK,
+    vk::Format::BC4_UNORM_BLOCK,
+    vk::Format::BC4_SNORM_BLOCK,
+    vk::Format::BC5_UNORM_BLOCK,
+    vk::Format::BC5_SNORM_BLOCK,
+    vk::Format::BC6H_UFLOAT_BLOCK,
+    vk::Format::BC6H_SFLOAT_BLOCK,
+    vk::Format::BC7_UNORM_BLOCK,
+    vk::Format::BC7_SRGB_BLOCK,
+];
+
+/// The ASTC LDR formats.
+const ASTC_LDR_FORMATS: [vk::Format; 28] = [
+    vk::Format::ASTC_4X4_UNORM_BLOCK,
+    vk::Format::ASTC_4X4_SRGB_BLOCK,
+    vk::Format::ASTC_5X4_UNORM_BLOCK,
+    vk::Format::ASTC_5X4_SRGB_BLOCK,
+    vk::Format::ASTC_5X5_UNORM_BLOCK,
+    vk::Format::ASTC_5X5_SRGB_BLOCK,
+    vk::Format::ASTC_6X5_UNORM_BLOCK,
+    vk::Format::ASTC_6X5_SRGB_BLOCK,
+    vk::Format::ASTC_6X6_UNORM_BLOCK,
+    vk::Format::ASTC_6X6_SRGB_BLOCK,
+    vk::Format::ASTC_8X5_UNORM_BLOCK,
+    vk::Format::ASTC_8X5_SRGB_BLOCK,
+    vk::Format::ASTC_8X6_UNORM_BLOCK,
+    vk::Format::ASTC_8X6_SRGB_BLOCK,
+    vk::Format::ASTC_8X8_UNORM_BLOCK,
+    vk::Format::ASTC_8X8_SRGB_BLOCK,
+    vk::Format::ASTC_10X5_UNORM_BLOCK,
+    vk::Format::ASTC_10X5_SRGB_BLOCK,
+    vk::Format::ASTC_10X6_UNORM_BLOCK,
+    vk::Format::ASTC_10X6_SRGB_BLOCK,
+    vk::Format::ASTC_10X8_UNORM_BLOCK,
+    vk::Format::ASTC_10X8_SRGB_BLOCK,
+    vk::Format::ASTC_10X10_UNORM_BLOCK,
+    vk::Format::ASTC_10X10_SRGB_BLOCK,
+    vk::Format::ASTC_12X10_UNORM_BLOCK,
+    vk::Format::ASTC_12X10_SRGB_BLOCK,
+    vk::Format::ASTC_12X12_UNORM_BLOCK,
+    vk::Format::ASTC_12X12_SRGB_BLOCK,
+];
+
+/// Whether every one of `formats` has 3D images with optimal tiling on `phd` as wgpu-hal creates
+/// them for its textures (VUID-VkImageCreateInfo-imageCreateMaxMipLevels-02251): sampled and
+/// copied, and with `MUTABLE_FORMAT` where they have view formats. A successful query also
+/// guarantees extents up to `maxImageDimension3D` ("Allowed Extent Values").
+fn supports_3d_images(
+    instance: &ash::Instance,
+    phd: vk::PhysicalDevice,
+    formats: &[vk::Format],
+) -> bool {
+    let usage = vk::ImageUsageFlags::SAMPLED
+        | vk::ImageUsageFlags::TRANSFER_SRC
+        | vk::ImageUsageFlags::TRANSFER_DST;
+    formats.iter().all(|&format| {
+        [
+            vk::ImageCreateFlags::empty(),
+            vk::ImageCreateFlags::MUTABLE_FORMAT,
+        ]
+        .into_iter()
+        .all(|flags| {
+            unsafe {
+                instance.get_physical_device_image_format_properties(
+                    phd,
+                    format,
+                    vk::ImageType::TYPE_3D,
+                    vk::ImageTiling::OPTIMAL,
+                    usage,
+                    flags,
+                )
+            }
+            .is_ok()
+        })
     })
 }
 
