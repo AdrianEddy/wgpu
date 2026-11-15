@@ -206,6 +206,9 @@ feature_structures! {
     PhysicalDeviceSwapchainMaintenance1FeaturesEXT {
         swapchain_maintenance1,
     }
+    PhysicalDeviceShaderSubgroupExtendedTypesFeatures {
+        shader_subgroup_extended_types,
+    }
 }
 
 /// `VK_EXT_ray_tracing_invocation_reorder`'s, which `ash` 0.38 does not define.

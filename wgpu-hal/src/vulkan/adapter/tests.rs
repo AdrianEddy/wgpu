@@ -1450,6 +1450,7 @@ fn members(
         vulkan_memory_model: 3,
         shader_draw_parameters: 1,
         swapchain_maintenance1: 1,
+        shader_subgroup_extended_types: 1,
     );
     all
 }
@@ -1497,6 +1498,7 @@ const EVERY_EXTENSION: &[&CStr] = &[
     khr::fragment_shader_barycentric::NAME,
     khr::cooperative_matrix::NAME,
     khr::vulkan_memory_model::NAME,
+    khr::shader_subgroup_extended_types::NAME,
 ];
 
 /// A physical device of Vulkan `version` that offers everything: every extension of
@@ -1551,6 +1553,7 @@ fn offers_everything(
         vulkan_memory_model: Some(Default::default()),
         shader_draw_parameters: Some(Default::default()),
         swapchain_maintenance1: None,
+        shader_subgroup_extended_types: Some(Default::default()),
         ..PhysicalDeviceFeatures::default()
     };
     for (_, members) in members(&mut offered) {
@@ -1971,6 +1974,74 @@ fn promoted_structures_are_queried_at_their_version() {
     let (extensions, enabled) = opened(&caps, &offered, hdr);
     assert!(!extensions.contains(&ext::texture_compression_astc_hdr::NAME));
     assert!(derived(&caps, &extensions, &enabled).contains(hdr));
+}
+
+/// Subgroup operations take the 16- and 64-bit types that `SHADER_F16`, `SHADER_I16` and
+/// `SHADER_INT64` give shaders only with `shaderSubgroupExtendedTypes`: an adapter with one of them
+/// but without it offers no subgroup feature, a device created with one but without it has none,
+/// and opening a device with a subgroup feature and one of them enables it, while a subgroup feature
+/// alone does not.
+#[test]
+fn subgroups_with_16_and_64_bit_types_need_extended_types() {
+    let (caps, mut offered, formats, queue) = offers_everything(vk::API_VERSION_1_2);
+    let derive = |extensions: &[&'static CStr], features: &PhysicalDeviceFeatures| {
+        features
+            .to_wgpu(
+                &caps,
+                |extension| extensions.contains(&extension),
+                &formats,
+                &queue,
+            )
+            .0
+    };
+    let types = wgt::Features::SHADER_F16 | wgt::Features::SHADER_I16 | wgt::Features::SHADER_INT64;
+    let offer = |offered: &PhysicalDeviceFeatures| {
+        offered
+            .to_wgpu(
+                &caps,
+                |extension| caps.supports_extension(extension),
+                &formats,
+                &queue,
+            )
+            .0
+    };
+    let offers = offer(&offered);
+    assert!(
+        offers.contains(wgt::Features::SUBGROUP | types),
+        "{offers:?}"
+    );
+    offered
+        .shader_subgroup_extended_types
+        .as_mut()
+        .unwrap()
+        .shader_subgroup_extended_types = vk::FALSE;
+    let without = offer(&offered);
+    assert!(
+        without.contains(types) && !without.intersects(super::SUBGROUP_FEATURES),
+        "{without:?}"
+    );
+    offered
+        .shader_subgroup_extended_types
+        .as_mut()
+        .unwrap()
+        .shader_subgroup_extended_types = vk::TRUE;
+
+    let (_, alone) = opened(&caps, &offered, wgt::Features::SUBGROUP);
+    assert!(alone.shader_subgroup_extended_types.is_none());
+    let (extensions, both) = opened(
+        &caps,
+        &offered,
+        wgt::Features::SUBGROUP | wgt::Features::SHADER_F16,
+    );
+    assert_eq!(
+        both.shader_subgroup_extended_types
+            .unwrap()
+            .shader_subgroup_extended_types,
+        vk::TRUE
+    );
+    assert!(
+        derive(&extensions, &both).contains(wgt::Features::SUBGROUP | wgt::Features::SHADER_F16)
+    );
 }
 
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
