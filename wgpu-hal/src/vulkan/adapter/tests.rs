@@ -1995,6 +1995,59 @@ fn subgroups_with_16_and_64_bit_types_need_extended_types() {
     );
 }
 
+/// Naga lets subgroup operations into task and mesh shaders, so a device with mesh shaders has
+/// the subgroup features only where its subgroup stages include the task and mesh stages; one
+/// without mesh shaders has them without those stages.
+#[test]
+fn subgroups_with_mesh_shaders_need_the_task_and_mesh_stages() {
+    let (mut caps, offered, formats, queue) = offers_everything(vk::API_VERSION_1_3);
+    let mesh = wgt::Features::EXPERIMENTAL_MESH_SHADER;
+    for (stages, subgroups) in [
+        (vk::ShaderStageFlags::ALL, true),
+        (
+            vk::ShaderStageFlags::VERTEX
+                | vk::ShaderStageFlags::FRAGMENT
+                | vk::ShaderStageFlags::COMPUTE,
+            false,
+        ),
+    ] {
+        caps.subgroup = Some(
+            vk::PhysicalDeviceSubgroupProperties::default()
+                .supported_operations(vk::SubgroupFeatureFlags::from_raw(!0))
+                .supported_stages(stages),
+        );
+        let derive = |extensions: &[&'static CStr], features: &PhysicalDeviceFeatures| {
+            features
+                .to_wgpu(
+                    &caps,
+                    |extension| extensions.contains(&extension),
+                    &formats,
+                    &queue,
+                )
+                .0
+        };
+        let offers = offered
+            .to_wgpu(
+                &caps,
+                |extension| caps.supports_extension(extension),
+                &formats,
+                &queue,
+            )
+            .0;
+        assert!(offers.contains(mesh), "{stages:?}");
+        assert_eq!(
+            offers.contains(wgt::Features::SUBGROUP),
+            subgroups,
+            "{stages:?}"
+        );
+        let (extensions, enabled) = opened(&caps, &offered, wgt::Features::SUBGROUP);
+        assert!(
+            derive(&extensions, &enabled).contains(wgt::Features::SUBGROUP),
+            "{stages:?}: without mesh shaders"
+        );
+    }
+}
+
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
 /// each is chained.
 #[test]

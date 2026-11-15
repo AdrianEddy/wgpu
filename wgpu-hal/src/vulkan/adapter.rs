@@ -1580,11 +1580,12 @@ impl PhysicalDeviceFeatures {
                     .is_some_and(|mesh| mesh.multiview_mesh_shader != 0),
         );
 
-        // Subgroup operations take every type that the device's other features give shaders, as
-        // WebGPU's `subgroups` takes `f16` with `shader-f16`: 16- and 64-bit operands need
-        // `shaderSubgroupExtendedTypes` (VUID-RuntimeSpirv-None-06275). A device with one of
-        // those types but without it has no subgroup feature, as Dawn offers no `subgroups` with
-        // `shader-f16` but without it.
+        // Subgroup operations take every type, and run in every stage, that the device's other
+        // features give shaders, as WebGPU's `subgroups` takes `f16` with `shader-f16`: 16- and
+        // 64-bit operands need `shaderSubgroupExtendedTypes` (VUID-RuntimeSpirv-None-06275), and
+        // Naga lets them into task and mesh shaders, which the device's subgroup stages must then
+        // include (VUID-RuntimeSpirv-None-06343). A device that lacks either has no subgroup
+        // feature, as Dawn offers no `subgroups` with `shader-f16` but without extended types.
         let subgroup_types = !features.intersects(EXTENDED_TYPE_FEATURES)
             || (promoted(
                 vk::API_VERSION_1_2,
@@ -1592,7 +1593,13 @@ impl PhysicalDeviceFeatures {
             ) && self
                 .shader_subgroup_extended_types
                 .is_some_and(|types| types.shader_subgroup_extended_types != 0));
-        if !subgroup_types {
+        let subgroup_stages = !features.contains(F::EXPERIMENTAL_MESH_SHADER)
+            || caps.subgroup.is_some_and(|subgroup| {
+                subgroup
+                    .supported_stages
+                    .contains(vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT)
+            });
+        if !(subgroup_types && subgroup_stages) {
             features.remove(SUBGROUP_FEATURES);
         }
 
