@@ -2254,6 +2254,12 @@ impl Texture {
             });
         }
 
+        // A cube array view needs cube array textures, as Vulkan's `imageCubeArray`
+        // (VUID-VkImageViewCreateInfo-viewType-01004).
+        if resolved_dimension == wgt::TextureViewDimension::CubeArray {
+            device.require_downlevel_flags(wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES)?;
+        }
+
         match resolved_dimension {
             wgt::TextureViewDimension::D1
             | wgt::TextureViewDimension::D2
@@ -2990,6 +2996,8 @@ pub enum CreateTextureViewError {
     InvalidResource(#[from] InvalidResourceError),
     #[error(transparent)]
     MissingFeatures(#[from] MissingFeatures),
+    #[error(transparent)]
+    MissingDownlevelFlags(#[from] MissingDownlevelFlags),
 
     #[error(
         "Trying to create a view of format {requested_format:?} on aspect {aspect:?} of format {texture:?}, \
@@ -3018,6 +3026,7 @@ impl WebGpuError for CreateTextureViewError {
     fn webgpu_error_type(&self) -> ErrorType {
         match self {
             Self::Device(e) => e.webgpu_error_type(),
+            Self::MissingDownlevelFlags(e) => e.webgpu_error_type(),
 
             Self::InvalidTextureViewDimension { .. }
             | Self::InvalidResource(_)

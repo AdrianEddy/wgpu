@@ -322,3 +322,73 @@ fn a_device_with_ffmpegs_features_works_through_wgpu() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// On each adapter with `CUBE_ARRAY_TEXTURES`, a device created without `imageCubeArray` lacks the
+/// flag, and wgpu-core refuses a cube array view of a cube-compatible texture, naming the flag,
+/// while it takes a cube view; the validation layer reports nothing. Before, wgpu-core validated
+/// no view against the flag, and wgpu-hal created the view without the feature
+/// (VUID-VkImageViewCreateInfo-viewType-01004).
+#[test]
+fn a_cube_array_view_needs_cube_array_textures() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let flags = wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG;
+    let Some((instance, messenger)) = super::instance(flags) else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    for adapter in super::adapters(&instance) {
+        let name = adapter.get_info().name;
+        let flag = wgpu::DownlevelFlags::CUBE_ARRAY_TEXTURES;
+        if !adapter.get_downlevel_capabilities().flags.contains(flag) {
+            println!("skipped {name:?}: no cube array textures");
+            continue;
+        }
+        let (core, _) = offered(&adapter);
+        let (device, _queue) = open(&adapter, core.image_cube_array(false));
+        if device.downlevel_capabilities().flags.contains(flag) {
+            wrong.push(format!("{name:?}: the device has CUBE_ARRAY_TEXTURES"));
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 12,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = |dimension, layers| {
+            validation_error(&device, || {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    dimension: Some(dimension),
+                    array_layer_count: Some(layers),
+                    ..Default::default()
+                });
+            })
+        };
+        let cube_array = view(wgpu::TextureViewDimension::CubeArray, 12);
+        println!("{name:?}: cube array view: {cube_array:?}");
+        if !cube_array
+            .as_deref()
+            .is_some_and(|error| error.contains("CUBE_ARRAY_TEXTURES"))
+        {
+            wrong.push(format!("{name:?}: a cube array view: {cube_array:?}"));
+        }
+        if let Some(error) = view(wgpu::TextureViewDimension::Cube, 6) {
+            wrong.push(format!("{name:?}: a cube view refused: {error}"));
+        }
+        drop((texture, device));
+        if let Some(messenger) = &messenger {
+            let messages = messenger.take();
+            if !messages.is_empty() {
+                wrong.push(format!("{name:?}: {messages:#?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
