@@ -86,7 +86,7 @@ void main()
     _35 += _13[7u]._m1._m0;
     _35 += uint(_13[0u]._m2.length());
     _35 += uint(_13[_19._m0._m0]._m2.length());
-    _35 += uint(_13[_41]._m2.length());
+    _35 += uint(_13[nonuniformEXT(_41)]._m2.length());
     _35 += uint(_13[7u]._m2.length());
     _35 += uint(_13[0u]._m2[0u]);
     int _128;

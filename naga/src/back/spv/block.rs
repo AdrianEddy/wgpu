@@ -2652,8 +2652,9 @@ impl BlockContext<'_> {
 
             expr_handle = match self.ir_function.expressions[expr_handle] {
                 crate::Expression::Access { base, index } => {
-                    is_non_uniform_binding_array |=
-                        self.is_nonuniform_binding_array_access(base, index);
+                    let non_uniform = self.is_nonuniform_binding_array_access(base, index);
+                    is_non_uniform_binding_array |= non_uniform;
+                    self.require_binding_array_indexing(base, non_uniform)?;
 
                     let index = GuardedIndex::Expression(index);
                     let index_id =
@@ -2781,7 +2782,80 @@ impl BlockContext<'_> {
         Ok(expr_pointer)
     }
 
-    fn is_nonuniform_binding_array_access(
+    /// Declares what indexing the binding array `base` by a non-constant value needs: its
+    /// descriptors' dynamic indexing capability
+    /// (VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127 to -10130) and, for a non-uniform index,
+    /// their non-uniform indexing capability (VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134 to
+    /// -10137). Does nothing if `base` is not a binding array, or holds acceleration structures,
+    /// for which SPIR-V has no such capability.
+    ///
+    /// Uniform buffer arrays declare theirs where the options make them available, and are
+    /// written without them elsewhere: wgpu accepts uniform buffer arrays on devices without
+    /// those features.
+    pub(super) fn require_binding_array_indexing(
+        &mut self,
+        base: Handle<crate::Expression>,
+        non_uniform: bool,
+    ) -> Result<(), Error> {
+        use spirv::Capability as C;
+        let crate::Expression::GlobalVariable(var) = self.ir_function.expressions[base] else {
+            return Ok(());
+        };
+        let gvar = &self.ir_module.global_variables[var];
+        let crate::TypeInner::BindingArray { base: element, .. } =
+            self.ir_module.types[gvar.ty].inner
+        else {
+            return Ok(());
+        };
+        let (dynamic, non_uniform_capability, uniform) =
+            match (gvar.space, &self.ir_module.types[element].inner) {
+                (crate::AddressSpace::Uniform, _) => (
+                    C::UniformBufferArrayDynamicIndexing,
+                    C::UniformBufferArrayNonUniformIndexing,
+                    true,
+                ),
+                (crate::AddressSpace::Storage { .. }, _) => (
+                    C::StorageBufferArrayDynamicIndexing,
+                    C::StorageBufferArrayNonUniformIndexing,
+                    false,
+                ),
+                (
+                    _,
+                    &crate::TypeInner::Image {
+                        class: crate::ImageClass::Storage { .. },
+                        ..
+                    },
+                ) => (
+                    C::StorageImageArrayDynamicIndexing,
+                    C::StorageImageArrayNonUniformIndexing,
+                    false,
+                ),
+                (_, &crate::TypeInner::Image { .. } | &crate::TypeInner::Sampler { .. }) => (
+                    C::SampledImageArrayDynamicIndexing,
+                    C::SampledImageArrayNonUniformIndexing,
+                    false,
+                ),
+                _ => return Ok(()),
+            };
+        if uniform {
+            let _ = self.writer.require_all(&[dynamic]);
+            if non_uniform {
+                let _ = self.writer.require_all(&[non_uniform_capability]);
+            }
+        } else {
+            self.writer
+                .require_any("a dynamically indexed binding array", &[dynamic])?;
+            if non_uniform {
+                self.writer.require_any(
+                    "a non-uniformly indexed binding array",
+                    &[non_uniform_capability],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn is_nonuniform_binding_array_access(
         &mut self,
         base: Handle<crate::Expression>,
         index: Handle<crate::Expression>,

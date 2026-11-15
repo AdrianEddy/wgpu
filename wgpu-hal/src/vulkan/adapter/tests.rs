@@ -9,9 +9,10 @@ use core::ffi::CStr;
 use ash::{ext, khr, vk};
 
 use super::{
-    device_downlevel_capabilities, enables_swapchain_maintenance1, uses_device_addresses,
-    uses_non_semantic_info, FormatSupport, PhysicalDeviceFeatures, PhysicalDeviceProperties,
-    DOWNLEVEL_CORE_FEATURES, KHR_SURFACE_MAINTENANCE1, KHR_SWAPCHAIN_MAINTENANCE1,
+    binding_array_indexing_capabilities, device_downlevel_capabilities,
+    enables_swapchain_maintenance1, uses_device_addresses, uses_non_semantic_info, FormatSupport,
+    PhysicalDeviceFeatures, PhysicalDeviceProperties, DOWNLEVEL_CORE_FEATURES,
+    KHR_SURFACE_MAINTENANCE1, KHR_SWAPCHAIN_MAINTENANCE1,
 };
 use crate::vulkan::PrivateCapabilities;
 
@@ -2279,6 +2280,33 @@ fn non_semantic_info_follows_the_device() {
     assert!(!uses_non_semantic_info(vk::API_VERSION_1_2, &[]));
     assert!(uses_non_semantic_info(vk::API_VERSION_1_2, &extension));
     assert!(uses_non_semantic_info(vk::API_VERSION_1_3, &[]));
+}
+
+/// Naga may declare the binding-array indexing capabilities of the features a device was created
+/// with, and no other: each of the four dynamic indexing features and the four non-uniform
+/// indexing features allows exactly its capability.
+#[test]
+fn binding_array_indexing_follows_the_enabled_features() {
+    use naga::back::spv::Capability as C;
+    let none = PhysicalDeviceFeatures::default();
+    assert_eq!(binding_array_indexing_capabilities(&none).count(), 0);
+    let mut sampled = PhysicalDeviceFeatures::default();
+    sampled.core.shader_sampled_image_array_dynamic_indexing = vk::TRUE;
+    sampled.descriptor_indexing = Some(
+        vk::PhysicalDeviceDescriptorIndexingFeatures::default()
+            .shader_storage_buffer_array_non_uniform_indexing(true),
+    );
+    assert_eq!(
+        binding_array_indexing_capabilities(&sampled).collect::<alloc::vec::Vec<_>>(),
+        [
+            C::SampledImageArrayDynamicIndexing,
+            C::StorageBufferArrayNonUniformIndexing
+        ]
+    );
+    let (_, mut all, _, _) = offers_everything(vk::API_VERSION_1_3);
+    assert_eq!(binding_array_indexing_capabilities(&all).count(), 8);
+    all.descriptor_indexing = None;
+    assert_eq!(binding_array_indexing_capabilities(&all).count(), 4);
 }
 
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:

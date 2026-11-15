@@ -398,6 +398,54 @@ fn device_downlevel_capabilities(
     }
 }
 
+/// The SPIR-V capabilities of indexing binding arrays by non-constant and by non-uniform values
+/// that a device created with `enabled_features` allows: those whose features it has (the SPIR-V
+/// environment's capability table). Naga declares them where its shaders index so.
+fn binding_array_indexing_capabilities(
+    enabled_features: &PhysicalDeviceFeatures,
+) -> impl Iterator<Item = naga::back::spv::Capability> + '_ {
+    use naga::back::spv::Capability as C;
+    let core = &enabled_features.core;
+    let indexing = enabled_features.descriptor_indexing.unwrap_or_default();
+    [
+        (
+            core.shader_uniform_buffer_array_dynamic_indexing,
+            C::UniformBufferArrayDynamicIndexing,
+        ),
+        (
+            core.shader_sampled_image_array_dynamic_indexing,
+            C::SampledImageArrayDynamicIndexing,
+        ),
+        (
+            core.shader_storage_buffer_array_dynamic_indexing,
+            C::StorageBufferArrayDynamicIndexing,
+        ),
+        (
+            core.shader_storage_image_array_dynamic_indexing,
+            C::StorageImageArrayDynamicIndexing,
+        ),
+        (
+            indexing.shader_uniform_buffer_array_non_uniform_indexing,
+            C::UniformBufferArrayNonUniformIndexing,
+        ),
+        (
+            indexing.shader_sampled_image_array_non_uniform_indexing,
+            C::SampledImageArrayNonUniformIndexing,
+        ),
+        (
+            indexing.shader_storage_buffer_array_non_uniform_indexing,
+            C::StorageBufferArrayNonUniformIndexing,
+        ),
+        (
+            indexing.shader_storage_image_array_non_uniform_indexing,
+            C::StorageImageArrayNonUniformIndexing,
+        ),
+    ]
+    .into_iter()
+    .filter(|&(enabled, _)| enabled != 0)
+    .map(|(_, capability)| capability)
+}
+
 /// Whether a device of Vulkan `device_api_version`, created with `enabled_extensions`, may take
 /// SPIR-V that declares `SPV_KHR_non_semantic_info`, which Naga's debug printing does: with Vulkan
 /// 1.3, or with `VK_KHR_shader_non_semantic_info` enabled (VUID-VkShaderModuleCreateInfo-pCode-08742).
@@ -3819,6 +3867,8 @@ impl super::Adapter {
             if features.contains(wgt::Features::BGRA8UNORM_STORAGE) {
                 capabilities.push(spv::Capability::StorageImageWriteWithoutFormat);
             }
+            // The binding-array indexing that Naga declares, as the device was created with it.
+            capabilities.extend(binding_array_indexing_capabilities(enabled_features));
 
             if features.contains(wgt::Features::EXPERIMENTAL_RAY_QUERY) {
                 capabilities.push(spv::Capability::RayQueryKHR);

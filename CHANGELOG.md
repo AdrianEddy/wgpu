@@ -395,6 +395,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - In the MSL backend, `subgroupBallot` now keeps lanes 32-63, which were lost on GPUs with 64-wide SIMD groups (AMD GPUs on macOS). By @ErkoRisthein in [#10797](https://github.com/gfx-rs/wgpu/pull/10797).
 - Report a WGSL error instead of panicking when the condition of a `const_assert` is a composite value, such as `const_assert(vec2i());`. By @MilosLord in [#10897](https://github.com/gfx-rs/wgpu/pull/10897).
 - Fix WGSL `continuing` blocks falsely rejecting declarations that shadow variables from the loop body (e.g., `loop { let x = a; continuing { let x = b; } }`) as redefinitions. By @ekarad1um in [#10980](https://github.com/gfx-rs/wgpu/pull/10980).
+- SPIR-V: declare the `*ArrayDynamicIndexing` and `*ArrayNonUniformIndexing` capabilities that dynamically and non-uniformly indexed binding arrays use (VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127 to -10130, VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134 to -10137), and decorate `arrayLength`'s access chain `NonUniform`. Users of `spv::Options::capabilities` must allow them; uniform buffer arrays are written without theirs where not allowed. By @AdrianEddy.
 
 #### Validation
 
@@ -472,6 +473,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Convert a `One` swizzle of a depth-stencil view to `A` on every device: `depthStencilSwizzleOneSupport` is part of `maintenance5`, which wgpu-hal does not enable. By @AdrianEddy.
 - Query memory budgets only where the physical device offers `VK_EXT_memory_budget` as well as the device having enabled it, so that the RADV workaround holds for devices created elsewhere. By @AdrianEddy.
 - Refuse to create a swapchain, with a `SurfaceError`, on a device created without `VK_KHR_swapchain` or whose queue family cannot present to the surface (VUID-vkQueuePresentKHR-pSwapchains-01292), instead of panicking or presenting from the wrong family. By @AdrianEddy.
+- Allow Naga the binding-array indexing capabilities of the features a device was created with. By @AdrianEddy.
 
 #### Metal
 

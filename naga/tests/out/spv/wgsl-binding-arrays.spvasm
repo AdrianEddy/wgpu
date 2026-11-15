@@ -4,7 +4,11 @@
 ; Bound: 412
 OpCapability Shader
 OpCapability ImageQuery
+OpCapability SampledImageArrayDynamicIndexing
+OpCapability SampledImageArrayNonUniformIndexing
 OpCapability ShaderNonUniform
+OpCapability StorageImageArrayDynamicIndexing
+OpCapability StorageImageArrayNonUniformIndexing
 OpExtension "SPV_EXT_descriptor_indexing"
 %1 = OpExtInstImport "GLSL.std.450"
 OpMemoryModel Logical GLSL450
