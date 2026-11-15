@@ -413,6 +413,8 @@ struct AdapterShared {
     disabilities: PrivateDisabilities,
     private_caps: PrivateCapabilities,
     private_texture_format_caps: PrivateTextureFormatCapabilities,
+    /// The downlevel capabilities of the adapter and of its devices.
+    downlevel: wgt::DownlevelCapabilities,
     settings: Settings,
     presentation_timer: time::PresentationTimer,
     instance_flags: wgt::InstanceFlags,
@@ -443,6 +445,7 @@ impl AdapterShared {
             disabilities: PrivateDisabilities::new(&device),
             private_caps,
             private_texture_format_caps,
+            downlevel: capabilities_query.downlevel(),
             device,
             settings: Settings::default(),
             presentation_timer: time::PresentationTimer::new(),

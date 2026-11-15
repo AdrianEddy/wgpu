@@ -135,6 +135,7 @@ impl super::Adapter {
             self.memory_budget_thresholds,
             self.compiler_container.clone(),
             self.options.clone(),
+            self.downlevel.clone(),
         )?;
         let idle_fence: Direct3D12::ID3D12Fence =
             unsafe { device.raw.CreateFence(0, Direct3D12::D3D12_FENCE_FLAG_NONE) }
@@ -1154,6 +1155,7 @@ impl super::Adapter {
                 memory_budget_thresholds,
                 compiler_container,
                 options: backend_options,
+                downlevel: capabilities.downlevel.clone(),
             },
             info,
             features,

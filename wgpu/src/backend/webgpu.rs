@@ -2045,6 +2045,11 @@ impl dispatch::DeviceInterface for WebDevice {
             .clone()
     }
 
+    fn downlevel_capabilities(&self) -> crate::DownlevelCapabilities {
+        // WebGPU is assumed to be fully compliant, as its adapters are.
+        crate::DownlevelCapabilities::default()
+    }
+
     fn adapter_info(&self) -> crate::AdapterInfo {
         self.cached_properties
             .adapter_info

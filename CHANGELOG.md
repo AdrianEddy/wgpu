@@ -142,6 +142,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Added `Features::UNRESTRICTED_BYTES_PER_ROW`: `bytes_per_row` in `copy_buffer_to_texture` and `copy_texture_to_buffer` need only be a multiple of the texel block copy size, not of 256. Supported on Vulkan, Metal, GL, and DX12 with `UnrestrictedBufferTextureCopyPitchSupported`. By @michael-dm in [#10619](https://github.com/gfx-rs/wgpu/pull/10619).
 - The format string of `debugPrintf` is now checked for correctness. By @evilpie in [#9641](https://github.com/gfx-rs/wgpu/pull/9641).
 - Added `wgt::Features::CORE_FEATURES_AND_LIMITS`, which is reported only when the adapter supports WebGPU default limits and its downlevel capabilities are WebGPU-compliant. By @sagudev in [#10293](https://github.com/gfx-rs/wgpu/pull/10293).
+- Add `Device::downlevel_capabilities`, against which wgpu validates the device's use. A device created from a raw device may have fewer than its adapter, never more. By @AdrianEddy.
 
 #### Naga
 
@@ -215,6 +216,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - `Queue::submit` now returns `Option<SubmissionIndex>`, and returns `None` if the submission failed. A `None` result means the submission never reached the driver, so fences/events/semaphores attached to HAL queues will never be signalled. By @teoxoy in [#10218](https://github.com/gfx-rs/wgpu/pull/10218).
 - `Device::poll` now always returns `PollError::CantWait` if called with `PollType::Wait` on the WebGPU backend. By @teoxoy in [#10218](https://github.com/gfx-rs/wgpu/pull/10218).
 - `Device::poll` now returns the new `PollError::DeviceLost` when it finds the device lost, instead of panicking. `PollError` is exhaustive, so code that matches it needs the new arm. `wgpu_core::device::WaitIdleError::to_poll_error` now returns a `PollError` for every error, not an `Option`. By @AdrianEddy.
+- BREAKING: `wgpu::custom::DeviceInterface` requires `downlevel_capabilities`. By @AdrianEddy.
 
 #### naga
 
@@ -241,12 +243,13 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
   - family_index, queue_index,
   + DeviceQueue::new(family_index, queue_index),
   ```
-- BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` takes the features the device was created with, `enabled_features`: the `PhysicalDeviceFeatures` that `PhysicalDeviceFeatures::from_device_create_info` reads from the `VkDeviceCreateInfo` its creator gave `vkCreateDevice` (or `PhysicalDeviceFeatures::from_enabled` from its `VkPhysicalDeviceFeatures2` chain), Vulkan 1.1 to 1.3 structures included, or that `physical_device_features` gave to create it. wgpu-hal took the device's internal capabilities, whether its presents signal fences, and its shader options from the features the adapter offers, as if the device had enabled them all. It now takes them from the device's, and takes the path that needs no feature the device lacks. It refuses a device that lacks a core feature behind the adapter's downlevel flags, which `Adapter::missing_downlevel_features` names. By @AdrianEddy.
+- BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` takes the features the device was created with, `enabled_features`: the `PhysicalDeviceFeatures` that `PhysicalDeviceFeatures::from_device_create_info` reads from the `VkDeviceCreateInfo` its creator gave `vkCreateDevice` (or `PhysicalDeviceFeatures::from_enabled` from its `VkPhysicalDeviceFeatures2` chain), Vulkan 1.1 to 1.3 structures included, or that `physical_device_features` gave to create it. wgpu-hal took the device's internal capabilities, whether its presents signal fences, and its shader options from the features the adapter offers, as if the device had enabled them all. It now takes them from the device's, and takes the path that needs no feature the device lacks. By @AdrianEddy.
   ```diff
   - device_from_raw(raw_device, drop_callback, &enabled_extensions, features, ..)
   + device_from_raw(raw_device, drop_callback, &enabled_extensions, &enabled_features, features, ..)
   ```
 - `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
+- BREAKING: `wgpu_hal::Device` requires `downlevel_capabilities`, and wgpu-core validates each device against its own. A Vulkan device created without `independentBlend`, `sampleRateShading`, `imageCubeArray`, `samplerAnisotropy`, `fragmentStoresAndAtomics`, `depthBiasClamp` or `fullDrawIndexUint32` opens without the matching downlevel flag, instead of being refused, and `Adapter::device_downlevel_capabilities` gives its flags; `Adapter::missing_downlevel_features` is gone. wgpu-hal's own devices enable `fullDrawIndexUint32` where offered. A device has no downlevel flag that its adapter lacks. By @AdrianEddy.
 
 ### Bug Fixes
 

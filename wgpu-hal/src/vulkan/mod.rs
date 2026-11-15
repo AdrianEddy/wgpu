@@ -408,7 +408,9 @@ pub struct Adapter {
     known_memory_flags: vk::MemoryPropertyFlags,
     phd_capabilities: adapter::PhysicalDeviceProperties,
     phd_features: PhysicalDeviceFeatures,
-    downlevel_flags: wgt::DownlevelFlags,
+    /// The adapter's downlevel capabilities. A device's follow what it was created with
+    /// ([`Adapter::device_downlevel_capabilities`]).
+    downlevel: wgt::DownlevelCapabilities,
     private_caps: PrivateCapabilities,
     workarounds: Workarounds,
 }
@@ -645,6 +647,8 @@ struct DeviceShared {
     private_caps: PrivateCapabilities,
     workarounds: Workarounds,
     features: wgt::Features,
+    /// The device's downlevel capabilities, from what it was created with.
+    downlevel: wgt::DownlevelCapabilities,
     render_passes: Mutex<FastHashMap<RenderPassKey, vk::RenderPass>>,
     sampler_cache: Mutex<sampler::SamplerCache>,
     memory_allocations_counter: InternalCounter,

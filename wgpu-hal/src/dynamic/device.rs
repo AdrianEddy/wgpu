@@ -177,6 +177,7 @@ pub trait DynDevice: DynResource {
     fn tlas_instance_to_bytes(&self, instance: TlasInstance, to_extend: &mut Vec<u8>);
 
     fn get_internal_counters(&self) -> wgt::HalCounters;
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport>;
 
     fn check_if_oom(&self) -> Result<(), DeviceError>;
@@ -611,6 +612,10 @@ impl<D: Device + DynResource> DynDevice for D {
 
     fn get_internal_counters(&self) -> wgt::HalCounters {
         D::get_internal_counters(self)
+    }
+
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
+        D::downlevel_capabilities(self)
     }
 
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {

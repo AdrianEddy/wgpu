@@ -149,8 +149,8 @@ const DOWNLEVEL_WARNING_MESSAGE: &str = concat!(
     "A subset of the features can still be used. ",
     "If you are running this program on native and not in a browser and wish to limit ",
     "the features you use to the supported subset, ",
-    "call Adapter::downlevel_properties or Device::downlevel_properties to get ",
-    "a listing of the features the current ",
+    "call Adapter::get_downlevel_capabilities or Device::downlevel_capabilities to get ",
+    "a listing of the capabilities the current ",
     "platform supports."
 );
 
@@ -160,8 +160,8 @@ const DOWNLEVEL_ERROR_MESSAGE: &str = concat!(
     "A subset of the features can still be used. ",
     "If you are running this program on native and not in a browser ",
     "and wish to work around this issue, call ",
-    "Adapter::downlevel_properties or Device::downlevel_properties ",
-    "to get a listing of the features the current platform supports."
+    "Device::downlevel_capabilities, against which the device's use is validated, ",
+    "to get a listing of the capabilities the device supports."
 );
 
 #[cfg(feature = "api_log_info")]

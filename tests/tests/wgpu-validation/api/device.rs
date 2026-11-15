@@ -178,6 +178,86 @@ fn destroying_a_device_while_another_thread_drops_its_buffers() {
     dropper.join().unwrap();
 }
 
+/// A device has no downlevel flag that its adapter lacks: an adapter whose downlevel capabilities
+/// a hal user narrows before giving it to wgpu validates its devices without the flags it removed,
+/// though its hal device reports them all. Without `CUBE_ARRAY_TEXTURES`, a shader with a cube
+/// array texture is a validation error.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_device_has_no_downlevel_flag_that_its_adapter_lacks() {
+    use core::future::Future as _;
+    use core::pin::pin;
+    use core::task;
+    use wgpu_hal::Instance as _;
+
+    let backend_options = wgpu::BackendOptions {
+        noop: wgpu::NoopBackendOptions::enabled(),
+        ..Default::default()
+    };
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::NOOP,
+        backend_options: backend_options.clone(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    // SAFETY: The noop backend has no requirements.
+    let hal_instance = unsafe {
+        wgpu_hal::noop::Context::init(&wgpu_hal::InstanceDescriptor {
+            name: "narrowed",
+            flags: wgpu::InstanceFlags::empty(),
+            memory_budget_thresholds: Default::default(),
+            backend_options,
+            telemetry: None,
+            display: None,
+        })
+    }
+    .unwrap();
+    // SAFETY: No requirements.
+    let mut exposed = unsafe { hal_instance.enumerate_adapters(None) }
+        .pop()
+        .unwrap();
+    let removed = wgpu::DownlevelFlags::CUBE_ARRAY_TEXTURES;
+    assert!(exposed.capabilities.downlevel.flags.contains(removed));
+    exposed.capabilities.downlevel.flags -= removed;
+    // SAFETY: An adapter of the noop backend that this instance enables.
+    let adapter = unsafe { instance.create_adapter_from_hal(exposed) };
+    let ctx = &mut task::Context::from_waker(task::Waker::noop());
+    let task::Poll::Ready(Ok((device, _queue))) =
+        pin!(adapter.request_device(&wgpu::DeviceDescriptor::default())).poll(ctx)
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        device.downlevel_capabilities().flags,
+        adapter.get_downlevel_capabilities().flags
+    );
+
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(
+            "@group(0) @binding(0) var cubes: texture_cube_array<f32>;".into(),
+        ),
+    });
+    let task::Poll::Ready(error) = pin!(scope.pop()).poll(ctx) else {
+        unreachable!()
+    };
+    assert!(
+        error.is_some(),
+        "a cube array texture in a shader of a device without CUBE_ARRAY_TEXTURES"
+    );
+    let task::Poll::Ready(info) = pin!(module.get_compilation_info()).poll(ctx) else {
+        unreachable!()
+    };
+    assert!(
+        info.messages.iter().any(|message| {
+            message.message_type == wgpu::CompilationMessageType::Error
+                && message.message.contains("CUBE_ARRAY_TEXTURES")
+        }),
+        "{:?}",
+        info.messages
+    );
+}
+
 /// Dropping the queue waits for its submissions on their fence before it waits for the queue to
 /// become idle, as `wgpu_hal::Queue::wait_for_idle` requires: the idle wait must not wait for one
 /// of them. The noop queue records an idle wait with a submission incomplete; here the GPU stalls,

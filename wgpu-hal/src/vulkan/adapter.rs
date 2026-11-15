@@ -220,61 +220,70 @@ fn uses_device_addresses(
 }
 
 /// The member of [`vk::PhysicalDeviceFeatures`] that holds one core feature.
-type CoreFeature = fn(&mut vk::PhysicalDeviceFeatures) -> &mut vk::Bool32;
+pub(super) type CoreFeature = fn(&mut vk::PhysicalDeviceFeatures) -> &mut vk::Bool32;
 
-/// The core features behind the downlevel flags that wgpu-core relies on a device having, each
-/// with its name in the Vulkan specification. An adapter has a flag where it offers the feature,
-/// wgpu-hal enables the feature on the devices it opens where the adapter has the flag, and
-/// wgpu-core validates the API's use against the adapter's flags. `fullDrawIndexUint32`, behind
-/// `FULL_DRAW_INDEX_UINT32`, is not among them: wgpu-hal does not enable it, and wgpu-core
-/// validates nothing against that flag.
-const DOWNLEVEL_CORE_FEATURES: [(wgt::DownlevelFlags, &str, CoreFeature); 6] = [
-    (
-        wgt::DownlevelFlags::INDEPENDENT_BLEND,
-        "independentBlend",
-        |features| &mut features.independent_blend,
-    ),
-    (
-        wgt::DownlevelFlags::MULTISAMPLED_SHADING,
-        "sampleRateShading",
-        |features| &mut features.sample_rate_shading,
-    ),
-    (
-        wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES,
-        "imageCubeArray",
-        |features| &mut features.image_cube_array,
-    ),
-    (
-        wgt::DownlevelFlags::ANISOTROPIC_FILTERING,
-        "samplerAnisotropy",
-        |features| &mut features.sampler_anisotropy,
-    ),
-    (
-        wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
-        "fragmentStoresAndAtomics",
-        |features| &mut features.fragment_stores_and_atomics,
-    ),
-    (
-        wgt::DownlevelFlags::DEPTH_BIAS_CLAMP,
-        "depthBiasClamp",
-        |features| &mut features.depth_bias_clamp,
-    ),
+/// The core features behind downlevel flags: `independentBlend`, `sampleRateShading`,
+/// `imageCubeArray`, `samplerAnisotropy`, `fragmentStoresAndAtomics` and `depthBiasClamp`, which
+/// wgpu-core validates the use of a device against, and `fullDrawIndexUint32`. An adapter has a
+/// flag where it offers the feature, wgpu-hal enables the feature on the devices it opens where
+/// the adapter has the flag, and a device has the flag where it was created with the feature.
+///
+/// `fullDrawIndexUint32` must be enabled to use index values above 2^24 - 1: "If a feature is
+/// supported by a physical device, it must be enabled when creating a VkDevice in order to use its
+/// associated functionality" (the Features chapter), though its limit, `maxDrawIndexedIndexValue`,
+/// is reported the same either way. wgpu-core cannot validate index values, so it refuses
+/// nothing without the flag.
+pub(super) const DOWNLEVEL_CORE_FEATURES: [(wgt::DownlevelFlags, CoreFeature); 7] = [
+    (wgt::DownlevelFlags::INDEPENDENT_BLEND, |features| {
+        &mut features.independent_blend
+    }),
+    (wgt::DownlevelFlags::MULTISAMPLED_SHADING, |features| {
+        &mut features.sample_rate_shading
+    }),
+    (wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES, |features| {
+        &mut features.image_cube_array
+    }),
+    (wgt::DownlevelFlags::ANISOTROPIC_FILTERING, |features| {
+        &mut features.sampler_anisotropy
+    }),
+    (wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE, |features| {
+        &mut features.fragment_stores_and_atomics
+    }),
+    (wgt::DownlevelFlags::DEPTH_BIAS_CLAMP, |features| {
+        &mut features.depth_bias_clamp
+    }),
+    (wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32, |features| {
+        &mut features.full_draw_index_uint32
+    }),
 ];
 
-/// The names of the [`DOWNLEVEL_CORE_FEATURES`] whose flag `downlevel_flags` has and that `core`
-/// lacks.
-fn missing_downlevel_features(
-    downlevel_flags: wgt::DownlevelFlags,
-    core: &vk::PhysicalDeviceFeatures,
-) -> Vec<&'static str> {
-    let mut core = *core;
-    DOWNLEVEL_CORE_FEATURES
-        .iter()
-        .filter(|&&(flag, _, feature)| {
-            downlevel_flags.contains(flag) && *feature(&mut core) == vk::FALSE
-        })
-        .map(|&(_, name, _)| name)
-        .collect()
+/// The downlevel flags that depend on what a device was created with: those of
+/// [`DOWNLEVEL_CORE_FEATURES`], and those of extensions. A device has its adapter's other flags.
+const DEVICE_DOWNLEVEL_FLAGS: wgt::DownlevelFlags = wgt::DownlevelFlags::INDEPENDENT_BLEND
+    .union(wgt::DownlevelFlags::MULTISAMPLED_SHADING)
+    .union(wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES)
+    .union(wgt::DownlevelFlags::ANISOTROPIC_FILTERING)
+    .union(wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE)
+    .union(wgt::DownlevelFlags::DEPTH_BIAS_CLAMP)
+    .union(wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32)
+    .union(wgt::DownlevelFlags::READ_ONLY_DEPTH_STENCIL)
+    .union(wgt::DownlevelFlags::SURFACE_VIEW_FORMATS);
+
+/// The downlevel capabilities of a device of the physical device `caps`, whose adapter has
+/// `adapter`, created with the features `enabled_features` and the extensions that
+/// `has_extension` says it has: the adapter's, but for the [`DEVICE_DOWNLEVEL_FLAGS`], which
+/// follow what the device was created with, and which it has no more of than its adapter.
+fn device_downlevel_capabilities(
+    adapter: &wgt::DownlevelCapabilities,
+    caps: &PhysicalDeviceProperties,
+    has_extension: impl Fn(&'static CStr) -> bool,
+    enabled_features: &PhysicalDeviceFeatures,
+) -> wgt::DownlevelCapabilities {
+    wgt::DownlevelCapabilities {
+        flags: adapter.flags.difference(DEVICE_DOWNLEVEL_FLAGS)
+            | (adapter.flags & enabled_features.device_downlevel_flags(caps, has_extension)),
+        ..adapter.clone()
+    }
 }
 
 /// The structure at `structure`, if it is of type `T`. The copy may hold the caller's `p_next`: it
@@ -762,7 +771,7 @@ impl PhysicalDeviceFeatures {
                 .geometry_shader(requested_features.contains(wgt::Features::PRIMITIVE_INDEX))
                 .depth_clamp(requested_features.contains(wgt::Features::DEPTH_CLIP_CONTROL))
                 .dual_src_blend(requested_features.contains(wgt::Features::DUAL_SOURCE_BLENDING));
-        for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
+        for (flag, feature) in DOWNLEVEL_CORE_FEATURES {
             *feature(&mut core) = downlevel_flags.contains(flag).into();
         }
 
@@ -1061,6 +1070,36 @@ impl PhysicalDeviceFeatures {
         }
     }
 
+    /// Of the [`DEVICE_DOWNLEVEL_FLAGS`], those of a device of the physical device that `caps`
+    /// describes, with the features `self` and the device extensions that `has_extension` says it
+    /// has.
+    fn device_downlevel_flags(
+        &self,
+        caps: &PhysicalDeviceProperties,
+        has_extension: impl Fn(&'static CStr) -> bool,
+    ) -> wgt::DownlevelFlags {
+        use wgt::DownlevelFlags as Df;
+        let mut flags = Df::empty();
+        // `VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL`
+        // and `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL`
+        // is required for separate read-only depth stencil.
+        flags.set(
+            Df::READ_ONLY_DEPTH_STENCIL,
+            caps.device_api_version >= vk::API_VERSION_1_1
+                || has_extension(khr::maintenance2::NAME),
+        );
+        flags.set(
+            Df::SURFACE_VIEW_FORMATS,
+            has_extension(khr::swapchain_mutable_format::NAME)
+                || !has_extension(khr::swapchain::NAME),
+        );
+        let mut core = self.core;
+        for (flag, feature) in DOWNLEVEL_CORE_FEATURES {
+            flags.set(flag, *feature(&mut core) != 0);
+        }
+        flags
+    }
+
     /// The wgpu [`Features`] and [`DownlevelFlags`] of a device of the physical device that `caps`
     /// and `formats` describe, with the features `self`, the device extensions that
     /// `has_extension` says it has, and a queue of the family that `queue_props` describes.
@@ -1120,28 +1159,7 @@ impl PhysicalDeviceFeatures {
             | Df::VERTEX_STORAGE
             | Df::VIEW_FORMATS;
 
-        // `VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_STENCIL_ATTACHMENT_OPTIMAL`
-        // and `VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_STENCIL_READ_ONLY_OPTIMAL`
-        // is required for separate read-only depth stencil.
-        dl_flags.set(
-            Df::READ_ONLY_DEPTH_STENCIL,
-            caps.device_api_version >= vk::API_VERSION_1_1
-                || has_extension(khr::maintenance2::NAME),
-        );
-
-        dl_flags.set(
-            Df::SURFACE_VIEW_FORMATS,
-            has_extension(khr::swapchain_mutable_format::NAME)
-                || !has_extension(khr::swapchain::NAME),
-        );
-        let mut core = self.core;
-        for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
-            dl_flags.set(flag, *feature(&mut core) != 0);
-        }
-        dl_flags.set(
-            Df::FULL_DRAW_INDEX_UINT32,
-            self.core.full_draw_index_uint32 != 0,
-        );
+        dl_flags |= self.device_downlevel_flags(caps, &has_extension);
 
         features.set(
             F::TIMESTAMP_QUERY
@@ -3085,14 +3103,15 @@ impl super::Instance {
             |extension| phd_capabilities.supports_extension(extension),
             &phd_features,
         );
+        let downlevel = wgt::DownlevelCapabilities {
+            flags: downlevel_flags,
+            limits: wgt::DownlevelLimits {},
+            shader_model: wgt::ShaderModel::Sm5, //TODO?
+        };
         let capabilities = crate::Capabilities {
             limits: phd_capabilities.to_wgpu_limits(),
             alignments,
-            downlevel: wgt::DownlevelCapabilities {
-                flags: downlevel_flags,
-                limits: wgt::DownlevelLimits {},
-                shader_model: wgt::ShaderModel::Sm5, //TODO?
-            },
+            downlevel: downlevel.clone(),
             cooperative_matrix_properties: phd_capabilities.cooperative_matrix_properties.clone(),
         };
 
@@ -3107,7 +3126,7 @@ impl super::Instance {
                 | vk::MemoryPropertyFlags::LAZILY_ALLOCATED,
             phd_capabilities,
             phd_features,
-            downlevel_flags,
+            downlevel,
             private_caps,
             workarounds,
         };
@@ -3199,20 +3218,30 @@ impl super::Adapter {
         self.raw
     }
 
-    /// The core features that this adapter's downlevel capabilities rely on a device having, and
-    /// that a device created with `enabled_features` lacks, by their names in the Vulkan
-    /// specification: `independentBlend`, `sampleRateShading`, `imageCubeArray`,
-    /// `samplerAnisotropy`, `fragmentStoresAndAtomics` and `depthBiasClamp`, those of them that the
-    /// adapter offers.
+    /// The downlevel capabilities of a device created from this adapter with the extensions
+    /// `enabled_extensions` and the features `enabled_features`, which [`Self::device_from_raw`]
+    /// gives the device: the adapter's, but for the flags that depend on what a device enables.
     ///
-    /// wgpu-hal has no path that does without them, and wgpu-core validates the use of the device
-    /// against the adapter's downlevel capabilities, so [`Self::device_from_raw`] refuses a device
-    /// that lacks one. The devices that wgpu-hal opens have them all.
-    pub fn missing_downlevel_features(
+    /// A device without `independentBlend`, `sampleRateShading`, `imageCubeArray`,
+    /// `samplerAnisotropy`, `fragmentStoresAndAtomics`, `depthBiasClamp` or
+    /// `fullDrawIndexUint32` lacks `INDEPENDENT_BLEND`, `MULTISAMPLED_SHADING`,
+    /// `CUBE_ARRAY_TEXTURES`, `ANISOTROPIC_FILTERING`, `FRAGMENT_WRITABLE_STORAGE`,
+    /// `DEPTH_BIAS_CLAMP` or `FULL_DRAW_INDEX_UINT32`, and wgpu-core validates its use against the
+    /// first six. `READ_ONLY_DEPTH_STENCIL` follows `VK_KHR_maintenance2` before Vulkan 1.1, and
+    /// `SURFACE_VIEW_FORMATS` `VK_KHR_swapchain_mutable_format`. A device has no flag that its
+    /// adapter lacks. The devices that wgpu-hal opens have their adapter's, unless a
+    /// [`Self::open_with_callback`] callback removes an extension that gives a flag.
+    pub fn device_downlevel_capabilities(
         &self,
+        enabled_extensions: &[&'static CStr],
         enabled_features: &PhysicalDeviceFeatures,
-    ) -> Vec<&'static str> {
-        missing_downlevel_features(self.downlevel_flags, &enabled_features.core)
+    ) -> wgt::DownlevelCapabilities {
+        device_downlevel_capabilities(
+            &self.downlevel,
+            &self.phd_capabilities,
+            |extension| enabled_extensions.contains(&extension),
+            enabled_features,
+        )
     }
 
     pub fn get_physical_device_features(&self) -> &PhysicalDeviceFeatures {
@@ -3268,7 +3297,7 @@ impl super::Adapter {
             &self.phd_features,
             enabled_extensions,
             features,
-            self.downlevel_flags,
+            self.downlevel.flags,
             &self.private_caps,
         )
     }
@@ -3281,8 +3310,9 @@ impl super::Adapter {
     /// without it: binary fences without `timelineSemaphore`, bounds checks that Naga injects
     /// without `robustBufferAccess2` or `robustImageAccess`, zero-initialization that Naga
     /// polyfills without `shaderZeroInitializeWorkgroupMemory`, and a swapchain teardown that waits
-    /// for the queue without `swapchainMaintenance1`, among others. The core features that
-    /// [`Self::missing_downlevel_features`] names have no such path.
+    /// for the queue without `swapchainMaintenance1`, among others. Without a core feature behind a
+    /// downlevel flag, the device lacks the flag ([`Self::device_downlevel_capabilities`]), and
+    /// wgpu-core refuses what would use the feature.
     ///
     /// A device that wgpu-hal did not create gives `enabled_features` from the
     /// `VkDeviceCreateInfo` that its creator gave `vkCreateDevice`, with
@@ -3310,8 +3340,7 @@ impl super::Adapter {
     ///
     /// # Panics
     ///
-    /// Before taking `raw_device`: if [`Self::missing_downlevel_features`] names a feature that
-    /// `enabled_features` lacks, if `queue`'s flags include
+    /// Before taking `raw_device`: if `queue`'s flags include
     /// `VK_DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_BIT_KHR` and `enabled_extensions` lacks
     /// `VK_KHR_internally_synchronized_queues`, or if `queue` has flags and the device lacks
     /// `vkGetDeviceQueue2` (Vulkan 1.1).
@@ -3333,14 +3362,6 @@ impl super::Adapter {
             create_flags,
             ref lock,
         } = queue;
-        let missing = self.missing_downlevel_features(enabled_features);
-        if !missing.is_empty() {
-            crate::hal_usage_error(format_args!(
-                "the device lacks {}, which the adapter offers, and on which wgpu-core relies \
-                 (Adapter::missing_downlevel_features)",
-                missing.join(", ")
-            ));
-        }
         let internally_synchronized =
             create_flags.contains(DEVICE_QUEUE_CREATE_INTERNALLY_SYNCHRONIZED_KHR);
         if internally_synchronized && !enabled_extensions.contains(&INTERNALLY_SYNCHRONIZED_QUEUES)
@@ -3357,6 +3378,7 @@ impl super::Adapter {
             |extension| enabled_extensions.contains(&extension),
             enabled_features,
         );
+        let downlevel = self.device_downlevel_capabilities(enabled_extensions, enabled_features);
         let mem_properties = {
             profiling::scope!("vkGetPhysicalDeviceMemoryProperties");
             unsafe {
@@ -3755,6 +3777,7 @@ impl super::Adapter {
             )),
             private_caps,
             features,
+            downlevel,
             workarounds: self.workarounds,
             render_passes: Mutex::new(Default::default()),
             memory_allocations_counter: Default::default(),
@@ -3814,6 +3837,9 @@ impl super::Adapter {
         self.private_caps.map_texture_format(texture_format)
     }
 
+    /// Removing an extension in the callback removes the downlevel flags it gives
+    /// ([`Self::device_downlevel_capabilities`]).
+    ///
     /// # Safety:
     /// - Same as `open` plus
     /// - The callback may not change anything that the device does not support.

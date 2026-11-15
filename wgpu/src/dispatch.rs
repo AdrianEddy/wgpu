@@ -142,6 +142,7 @@ pub trait AdapterInterface: CommonTraits {
 pub trait DeviceInterface: CommonTraits {
     fn features(&self) -> crate::Features;
     fn limits(&self) -> crate::Limits;
+    fn downlevel_capabilities(&self) -> crate::DownlevelCapabilities;
     fn adapter_info(&self) -> crate::AdapterInfo;
 
     fn create_shader_module(

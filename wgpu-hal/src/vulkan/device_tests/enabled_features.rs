@@ -1,7 +1,7 @@
 //! A device that wgpu-hal did not create gives `device_from_raw` the features it was created
 //! with, and wgpu-hal takes its paths from them: where the device lacks a feature that wgpu-hal
-//! would use, it takes the path that does without it, and it refuses a device that lacks a core
-//! feature behind the adapter's downlevel flags.
+//! would use, it takes the path that does without it, and where it lacks a core feature behind a
+//! downlevel flag, it opens without the flag.
 
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::{ffi::CStr, panic::AssertUnwindSafe, time::Duration};
@@ -13,8 +13,7 @@ use super::injected::InstrumentedLock;
 use crate::vulkan::call_log::Kind;
 use crate::{Device as _, Queue as _, Surface as _};
 
-/// The core features of `adapter`'s downlevel flags that it offers, which `device_from_raw`
-/// requires, and no other core feature.
+/// The core features of `adapter`'s downlevel flags that it offers, and no other core feature.
 fn downlevel_core(adapter: &super::super::Adapter) -> vk::PhysicalDeviceFeatures {
     let offered = adapter.get_physical_device_features().get_core();
     vk::PhysicalDeviceFeatures::default()
@@ -24,6 +23,7 @@ fn downlevel_core(adapter: &super::super::Adapter) -> vk::PhysicalDeviceFeatures
         .sampler_anisotropy(offered.sampler_anisotropy != 0)
         .fragment_stores_and_atomics(offered.fragment_stores_and_atomics != 0)
         .depth_bias_clamp(offered.depth_bias_clamp != 0)
+        .full_draw_index_uint32(offered.full_draw_index_uint32 != 0)
 }
 
 /// Creates a device on `adapter`, on queue 0 of family 0, with wgpu-hal's required extensions for
@@ -301,72 +301,170 @@ fn a_device_with_the_extension_but_not_swapchain_maintenance1_waits_for_the_queu
     }
 }
 
-/// On each adapter whose downlevel flags have `CUBE_ARRAY_TEXTURES`, a device created without
-/// `imageCubeArray`: `missing_downlevel_features` names it, and `device_from_raw` refuses the
-/// device, naming it, before taking it.
+/// Gives `device_from_raw` `raw`, created on `adapter` with `extensions` and `enabled`, catching a
+/// refusal: then destroys `raw` and returns the refusal's message.
+fn take(
+    adapter: &super::super::Adapter,
+    raw: ash::Device,
+    extensions: &[&'static CStr],
+    enabled: &vk::PhysicalDeviceFeatures2<'_>,
+) -> Result<crate::OpenDevice<super::super::Api>, String> {
+    // SAFETY: The chain is valid.
+    let enabled_features = unsafe { super::super::PhysicalDeviceFeatures::from_enabled(enabled) };
+    let taken = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: Created with these extensions and features; wgpu-hal destroys it once it takes
+        // it.
+        unsafe {
+            adapter.device_from_raw(
+                raw.clone(),
+                None,
+                extensions,
+                &enabled_features,
+                wgt::Features::empty(),
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+    }));
+    match taken {
+        Ok(open) => Ok(open.unwrap()),
+        Err(payload) => {
+            // `device_from_raw` refused the device before taking it: destroy it before its
+            // instance.
+            // SAFETY: Nothing uses it.
+            unsafe { raw.destroy_device(None) };
+            Err(payload
+                .downcast_ref::<String>()
+                .cloned()
+                .unwrap_or_default())
+        }
+    }
+}
+
+/// On each adapter, for each core feature behind a downlevel flag that the adapter offers, a
+/// device created without it: `device_from_raw` takes it, and the device has its adapter's
+/// downlevel capabilities without exactly that feature's flag, as
+/// `Adapter::device_downlevel_capabilities` says. Before, `device_from_raw` refused such a device.
 #[test]
-fn a_device_without_a_downlevel_feature_of_its_adapter_is_refused() {
+fn a_device_without_a_downlevel_feature_opens_without_its_flag() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
     let Some(instance) = super::plain_instance() else {
         return;
     };
+    let mut wrong = Vec::new();
     // SAFETY: No requirements.
     for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
         let adapter = &exposed.adapter;
-        if !exposed
-            .capabilities
-            .downlevel
-            .flags
-            .contains(wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES)
-        {
-            std::println!("skipped {:?}: no cube array textures", exposed.info.name);
-            continue;
-        }
-        let enabled = vk::PhysicalDeviceFeatures2::default()
-            .features(downlevel_core(adapter).image_cube_array(false));
-        let (raw, extensions) = create(adapter, &instance, &enabled);
-        // SAFETY: No chain.
-        let enabled_features =
-            unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
-        assert_eq!(
-            adapter.missing_downlevel_features(&enabled_features),
-            ["imageCubeArray"]
-        );
-        let taken = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: Created above with these extensions and features. wgpu-hal refuses it
-            // before taking it.
-            unsafe {
-                adapter.device_from_raw(
-                    raw.clone(),
-                    None,
-                    &extensions,
-                    &enabled_features,
-                    wgt::Features::empty(),
-                    &wgt::Limits::downlevel_defaults(),
-                    &wgt::MemoryHints::default(),
-                    super::super::DeviceQueue::new(0, 0),
-                )
+        let offered = exposed.capabilities.downlevel.flags;
+        for (flag, feature) in super::super::adapter::DOWNLEVEL_CORE_FEATURES {
+            if !offered.contains(flag) {
+                std::println!("{:?}: skipped {flag:?}: not offered", exposed.info.name);
+                continue;
             }
-        }));
-        let payload = match taken {
-            // wgpu-hal took the device, and destroys it as the result drops.
-            Ok(open) => {
-                drop(open);
-                panic!(
-                    "device_from_raw took a device without imageCubeArray on {:?}",
+            let mut core = downlevel_core(adapter);
+            *feature(&mut core) = vk::FALSE;
+            let enabled = vk::PhysicalDeviceFeatures2::default().features(core);
+            let (raw, extensions) = create(adapter, &instance, &enabled);
+            // SAFETY: No chain.
+            let expected = adapter.device_downlevel_capabilities(&extensions, &unsafe {
+                super::super::PhysicalDeviceFeatures::from_enabled(&enabled)
+            });
+            match take(adapter, raw, &extensions, &enabled) {
+                Err(message) => wrong.push(alloc::format!(
+                    "{:?}: refused a device without {flag:?}: {message}",
                     exposed.info.name
-                );
+                )),
+                Ok(open) => {
+                    let flags = open.device.downlevel_capabilities().flags;
+                    std::println!("{:?}: without {flag:?}: {flags:?}", exposed.info.name);
+                    if flags != offered - flag || expected.flags != flags {
+                        wrong.push(alloc::format!(
+                            "{:?}: without {flag:?}, the device has {flags:?}, expected {:?}",
+                            exposed.info.name,
+                            offered - flag
+                        ));
+                    }
+                    drop(open);
+                }
             }
-            Err(payload) => payload,
-        };
-        // `device_from_raw` refused the device before taking it: destroy it before its instance.
-        // SAFETY: Nothing uses it.
-        unsafe { raw.destroy_device(None) };
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .unwrap_or_default();
-        std::println!("{:?}: refused: {message}", exposed.info.name);
-        assert!(message.contains("imageCubeArray"), "{message}");
+        }
     }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The core features that FFmpeg copies into the devices it creates (`device_features_copy_needed`
+/// in `libavutil/hwcontext_vulkan.c`), of those that `adapter` offers.
+fn ffmpeg_core(adapter: &super::super::Adapter) -> vk::PhysicalDeviceFeatures {
+    let offered = adapter.get_physical_device_features().get_core();
+    vk::PhysicalDeviceFeatures::default()
+        .shader_image_gather_extended(offered.shader_image_gather_extended != 0)
+        .shader_storage_image_read_without_format(
+            offered.shader_storage_image_read_without_format != 0,
+        )
+        .shader_storage_image_write_without_format(
+            offered.shader_storage_image_write_without_format != 0,
+        )
+        .fragment_stores_and_atomics(offered.fragment_stores_and_atomics != 0)
+        .vertex_pipeline_stores_and_atomics(offered.vertex_pipeline_stores_and_atomics != 0)
+        .shader_int64(offered.shader_int64 != 0)
+        .shader_int16(offered.shader_int16 != 0)
+        .shader_float64(offered.shader_float64 != 0)
+}
+
+/// On each adapter, a device created with FFmpeg's core features, the only one of the seven
+/// behind downlevel flags that it has being `fragmentStoresAndAtomics`: it opens, without the
+/// flags of the other six, and submits work. Before, `device_from_raw` refused it.
+#[test]
+fn a_device_with_ffmpegs_features_opens() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    let lacking = wgt::DownlevelFlags::INDEPENDENT_BLEND
+        | wgt::DownlevelFlags::MULTISAMPLED_SHADING
+        | wgt::DownlevelFlags::CUBE_ARRAY_TEXTURES
+        | wgt::DownlevelFlags::ANISOTROPIC_FILTERING
+        | wgt::DownlevelFlags::DEPTH_BIAS_CLAMP
+        | wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32;
+    let mut wrong = Vec::new();
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        let offered = exposed.capabilities.downlevel.flags;
+        let enabled = vk::PhysicalDeviceFeatures2::default().features(ffmpeg_core(adapter));
+        let (raw, extensions) = create(adapter, &instance, &enabled);
+        let open = match take(adapter, raw, &extensions, &enabled) {
+            Ok(open) => open,
+            Err(message) => {
+                wrong.push(alloc::format!(
+                    "{:?}: refused: {message}",
+                    exposed.info.name
+                ));
+                continue;
+            }
+        };
+        let (device, queue) = (open.device, open.queue);
+        let flags = device.downlevel_capabilities().flags;
+        std::println!("{:?}: {flags:?}", exposed.info.name);
+        if flags != offered - lacking {
+            wrong.push(alloc::format!(
+                "{:?}: the device has {flags:?}, expected {:?}",
+                exposed.info.name,
+                offered - lacking
+            ));
+        }
+        // SAFETY: The device's own fence, signaled by a submission that completes before it is
+        // destroyed.
+        unsafe {
+            let fence = device.create_fence().unwrap();
+            queue.submit(&[], &[], (&fence, 1)).unwrap();
+            assert!(device
+                .wait(&fence, 1, Some(Duration::from_secs(5)))
+                .unwrap());
+            device.destroy_fence(fence);
+        }
+        drop((queue, device));
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

@@ -981,6 +981,10 @@ impl dispatch::DeviceInterface for CoreDevice {
         self.wgpu_device.limits().clone()
     }
 
+    fn downlevel_capabilities(&self) -> crate::DownlevelCapabilities {
+        self.wgpu_device.downlevel().clone()
+    }
+
     fn adapter_info(&self) -> crate::AdapterInfo {
         self.wgpu_device.adapter_info()
     }
