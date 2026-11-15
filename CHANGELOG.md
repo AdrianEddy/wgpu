@@ -309,6 +309,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Fix `var<immediate>` members being read from the wrong offsets on DX12 when a nested struct is not 16-byte aligned. By @DouglasDwyer in [#10581](https://github.com/gfx-rs/wgpu/pull/10581).
 - Disallow usage of `ray_query` as a binding. By @szymros in [#10832](https://github.com/gfx-rs/wgpu/pull/10832)
 - Fix `@builtin(position).w` in fragment shaders on DX12. The HLSL backend now provides 1/w of the clip-space position, as WGSL specifies and the other backends already do, instead of w. By @abdymazhit in [#10733](https://github.com/gfx-rs/wgpu/pull/10733).
+- SPIR-V: declare the `*ArrayDynamicIndexing` and `*ArrayNonUniformIndexing` capabilities that dynamically and non-uniformly indexed binding arrays use (VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127 to -10130, VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134 to -10137), and decorate `arrayLength`'s access chain `NonUniform`. Users of `spv::Options::capabilities` must allow them; uniform buffer arrays are written without theirs where not allowed. By @AdrianEddy.
 
 #### Validation
 
@@ -376,6 +377,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Convert a `One` swizzle of a depth-stencil view to `A` on every device: `depthStencilSwizzleOneSupport` is part of `maintenance5`, which wgpu-hal does not enable. By @AdrianEddy.
 - Query memory budgets only where the physical device offers `VK_EXT_memory_budget` as well as the device having enabled it, so that the RADV workaround holds for devices created elsewhere. By @AdrianEddy.
 - Refuse to create a swapchain, with a `SurfaceError`, on a device created without `VK_KHR_swapchain` or whose queue family cannot present to the surface (VUID-vkQueuePresentKHR-pSwapchains-01292), instead of panicking or presenting from the wrong family. By @AdrianEddy.
+- Allow Naga the binding-array indexing capabilities of the features a device was created with. By @AdrianEddy.
 
 #### Metal
 

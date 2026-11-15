@@ -57,6 +57,116 @@ fn require_and_forbid(required: &[Ca], forbidden: &[Ca], source: &str) {
     }
 }
 
+/// The capabilities `source` uses, written with only `available` allowed, or the error.
+fn capabilities_with(
+    available: &[Ca],
+    source: &str,
+) -> Result<naga::FastIndexSet<Ca>, naga::back::spv::Error> {
+    use naga::back::spv;
+    use naga::valid;
+
+    let module = naga::front::wgsl::parse_str(source).unwrap();
+    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
+        .validate(&module)
+        .expect("validation failed");
+    let mut words = vec![];
+    let options = spv::Options {
+        capabilities: Some(
+            [Ca::Shader, Ca::ShaderNonUniform]
+                .iter()
+                .chain(available)
+                .copied()
+                .collect(),
+        ),
+        ..spv::Options::default()
+    };
+    let mut writer = spv::Writer::new(&options).unwrap();
+    writer.write(&module, &info, None, &None, &mut words)?;
+    Ok(writer.get_capabilities_used().clone())
+}
+
+const TEXTURE_ARRAY: &str = r#"
+    enable wgpu_binding_array;
+    @group(0) @binding(0) var textures: binding_array<texture_2d<f32>, 4>;
+    @group(0) @binding(1) var<uniform> index: u32;
+    @fragment
+    fn main(@location(0) @interpolate(flat) flat_index: u32) -> @location(0) vec4f {
+        return textureLoad(textures[INDEX], vec2i(0), 0);
+    }
+"#;
+
+/// A binding array indexed by a constant declares no indexing capability; by a dynamically
+/// uniform value, its descriptors' dynamic indexing; by a non-uniform one, also their
+/// non-uniform indexing.
+#[test]
+fn binding_array_indexing() {
+    let constant = TEXTURE_ARRAY.replace("INDEX", "2");
+    require_and_forbid(
+        &[],
+        &[
+            Ca::SampledImageArrayDynamicIndexing,
+            Ca::SampledImageArrayNonUniformIndexing,
+        ],
+        &constant,
+    );
+    let uniform = TEXTURE_ARRAY.replace("INDEX", "index");
+    require_and_forbid(
+        &[Ca::SampledImageArrayDynamicIndexing],
+        &[Ca::SampledImageArrayNonUniformIndexing],
+        &uniform,
+    );
+    let non_uniform = TEXTURE_ARRAY.replace("INDEX", "flat_index");
+    require(
+        &[
+            Ca::SampledImageArrayDynamicIndexing,
+            Ca::SampledImageArrayNonUniformIndexing,
+        ],
+        &non_uniform,
+    );
+    require(
+        &[Ca::StorageBufferArrayDynamicIndexing],
+        r#"
+        enable wgpu_binding_array;
+        struct Values { values: array<u32> }
+        @group(0) @binding(0) var<storage, read_write> buffers: binding_array<Values, 2>;
+        @group(0) @binding(1) var<uniform> index: u32;
+        @compute @workgroup_size(1)
+        fn main() {
+            buffers[index].values[0] = arrayLength(&buffers[index].values);
+        }
+    "#,
+    );
+}
+
+/// Where the options do not allow a binding array's indexing capability, writing fails, but for
+/// uniform buffer arrays, which are written without it.
+#[test]
+fn binding_array_indexing_needs_its_capability() {
+    let uniform = TEXTURE_ARRAY.replace("INDEX", "index");
+    assert!(matches!(
+        capabilities_with(&[], &uniform),
+        Err(naga::back::spv::Error::MissingCapabilities(..))
+    ));
+    let used = capabilities_with(&[Ca::SampledImageArrayDynamicIndexing], &uniform).unwrap();
+    assert!(used.contains(&Ca::SampledImageArrayDynamicIndexing));
+
+    let uniform_buffers = r#"
+        enable wgpu_binding_array;
+        struct Value { value: vec4f }
+        @group(0) @binding(0) var<uniform> values: binding_array<Value, 2>;
+        @group(0) @binding(1) var<uniform> index: u32;
+        @fragment
+        fn main() -> @location(0) vec4f {
+            return values[index].value;
+        }
+    "#;
+    let used = capabilities_with(&[], uniform_buffers).unwrap();
+    assert!(!used.contains(&Ca::UniformBufferArrayDynamicIndexing));
+    let used =
+        capabilities_with(&[Ca::UniformBufferArrayDynamicIndexing], uniform_buffers).unwrap();
+    assert!(used.contains(&Ca::UniformBufferArrayDynamicIndexing));
+}
+
 #[test]
 fn sampler1d() {
     require(

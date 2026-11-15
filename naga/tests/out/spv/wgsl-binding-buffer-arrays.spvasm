@@ -3,6 +3,8 @@
 ; Generator: rspirv
 ; Bound: 159
 OpCapability Shader
+OpCapability StorageBufferArrayDynamicIndexing
+OpCapability StorageBufferArrayNonUniformIndexing
 OpCapability ShaderNonUniform
 OpExtension "SPV_KHR_storage_buffer_storage_class"
 OpExtension "SPV_EXT_descriptor_indexing"
@@ -36,6 +38,7 @@ OpDecorate %24 Flat
 OpDecorate %27 Location 0
 OpDecorate %60 NonUniform
 OpDecorate %87 NonUniform
+OpDecorate %107 NonUniform
 OpDecorate %133 NonUniform
 %2 = OpTypeVoid
 %3 = OpTypeInt 32 0

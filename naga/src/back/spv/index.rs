@@ -92,7 +92,7 @@ impl BlockContext<'_> {
         block: &mut Block,
     ) -> Result<Word, Error> {
         // The index into the binding array, if any.
-        let binding_array_index_id: Option<Word>;
+        let binding_array_index_id: Option<(Word, bool)>;
 
         // The handle to the Naga IR global we're referring to.
         let global_handle: Handle<crate::GlobalVariable>;
@@ -118,8 +118,9 @@ impl BlockContext<'_> {
                         // binding array holding structs whose last members are
                         // runtime-sized arrays.
                         crate::Expression::GlobalVariable(handle) => {
+                            // A constant index: neither dynamic nor non-uniform.
                             let index_id = self.get_index_constant(index_outer);
-                            binding_array_index_id = Some(index_id);
+                            binding_array_index_id = Some((index_id, false));
                             global_handle = handle;
                             opt_last_member_index = Some(index);
                         }
@@ -138,7 +139,10 @@ impl BlockContext<'_> {
                         // runtime-sized arrays.
                         crate::Expression::GlobalVariable(handle) => {
                             let index_id = self.cached[index_outer];
-                            binding_array_index_id = Some(index_id);
+                            let non_uniform =
+                                self.is_nonuniform_binding_array_access(base_outer, index_outer);
+                            self.require_binding_array_indexing(base_outer, non_uniform)?;
+                            binding_array_index_id = Some((index_id, non_uniform));
                             global_handle = handle;
                             opt_last_member_index = Some(index);
                         }
@@ -222,7 +226,7 @@ impl BlockContext<'_> {
 
         let structure_id = match binding_array_index_id {
             // We are indexing inside a binding array, generate the access op.
-            Some(index_id) => {
+            Some((index_id, non_uniform)) => {
                 let element_type_id = match self.ir_module.types[global.ty].inner {
                     crate::TypeInner::BindingArray { base, size: _ } => {
                         let base_id = self.get_handle_type_id(base);
@@ -238,6 +242,12 @@ impl BlockContext<'_> {
                     gvar_id,
                     &[index_id],
                 ));
+                // The length is read through the element, which a non-uniform index makes
+                // non-uniform (VUID-RuntimeSpirv-NonUniform-06274).
+                if non_uniform {
+                    self.writer
+                        .decorate_non_uniform_binding_array_access(structure_id)?;
+                }
                 structure_id
             }
             None => gvar_id,
