@@ -9,8 +9,8 @@ use ash::{ext, khr, vk};
 
 use super::{
     device_downlevel_capabilities, enables_swapchain_maintenance1, uses_device_addresses,
-    FormatSupport, PhysicalDeviceFeatures, PhysicalDeviceProperties, DOWNLEVEL_CORE_FEATURES,
-    KHR_SURFACE_MAINTENANCE1, KHR_SWAPCHAIN_MAINTENANCE1,
+    uses_non_semantic_info, FormatSupport, PhysicalDeviceFeatures, PhysicalDeviceProperties,
+    DOWNLEVEL_CORE_FEATURES, KHR_SURFACE_MAINTENANCE1, KHR_SWAPCHAIN_MAINTENANCE1,
 };
 use crate::vulkan::PrivateCapabilities;
 
@@ -2197,6 +2197,17 @@ fn enabled_extensions_bring_the_extensions_they_depend_on() {
         }
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The debug printing that Naga adds to ray queries and ray tracing declares
+/// `SPV_KHR_non_semantic_info`, which a device takes with Vulkan 1.3 or with
+/// `VK_KHR_shader_non_semantic_info` enabled: the device's version, whatever the loader's.
+#[test]
+fn non_semantic_info_follows_the_device() {
+    let extension = [khr::shader_non_semantic_info::NAME];
+    assert!(!uses_non_semantic_info(vk::API_VERSION_1_2, &[]));
+    assert!(uses_non_semantic_info(vk::API_VERSION_1_2, &extension));
+    assert!(uses_non_semantic_info(vk::API_VERSION_1_3, &[]));
 }
 
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
