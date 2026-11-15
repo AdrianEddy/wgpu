@@ -1097,14 +1097,18 @@ impl PhysicalDeviceFeatures {
             shader_atomic_int64: if device_api_version >= vk::API_VERSION_1_2
                 || enabled_extensions.contains(&khr::shader_atomic_int64::NAME)
             {
-                let needed = requested_features.intersects(
+                // Minimum and maximum are storage-buffer atomics; all operations also take
+                // workgroup memory.
+                let buffer = requested_features.intersects(
                     wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS
                         | wgt::Features::SHADER_INT64_ATOMIC_MIN_MAX,
                 );
+                let shared =
+                    requested_features.contains(wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS);
                 Some(
                     vk::PhysicalDeviceShaderAtomicInt64Features::default()
-                        .shader_buffer_int64_atomics(needed)
-                        .shader_shared_int64_atomics(needed),
+                        .shader_buffer_int64_atomics(buffer)
+                        .shader_shared_int64_atomics(shared),
                 )
             } else {
                 None
@@ -1436,13 +1440,21 @@ impl PhysicalDeviceFeatures {
 
         features.set(F::PRIMITIVE_INDEX, self.core.geometry_shader != 0);
 
+        // 64-bit atomics in storage buffers need `shaderBufferInt64Atomics`, and in workgroup
+        // memory `shaderSharedInt64Atomics` (VUID-RuntimeSpirv-None-06278, -06279): minimum and
+        // maximum are storage-buffer operations, all operations take both.
+        let int64_atomics = promoted(vk::API_VERSION_1_2, khr::shader_atomic_int64::NAME);
+        let buffer_int64_atomics = int64_atomics
+            && self
+                .shader_atomic_int64
+                .is_some_and(|atomics| atomics.shader_buffer_int64_atomics != 0);
+        features.set(F::SHADER_INT64_ATOMIC_MIN_MAX, buffer_int64_atomics);
         features.set(
-            F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX,
-            promoted(vk::API_VERSION_1_2, khr::shader_atomic_int64::NAME)
-                && self.shader_atomic_int64.is_some_and(|atomics| {
-                    atomics.shader_buffer_int64_atomics != 0
-                        && atomics.shader_shared_int64_atomics != 0
-                }),
+            F::SHADER_INT64_ATOMIC_ALL_OPS,
+            buffer_int64_atomics
+                && self
+                    .shader_atomic_int64
+                    .is_some_and(|atomics| atomics.shader_shared_int64_atomics != 0),
         );
 
         features.set(

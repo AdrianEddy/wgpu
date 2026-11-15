@@ -2131,6 +2131,44 @@ fn subgroups_with_mesh_shaders_need_the_task_and_mesh_stages() {
     }
 }
 
+/// 64-bit atomic minimum and maximum are storage-buffer operations: they need
+/// `shaderBufferInt64Atomics` alone, and opening a device for them enables it alone; all
+/// operations also need, and enable, `shaderSharedInt64Atomics`.
+#[test]
+fn int64_atomic_min_max_needs_only_buffer_atomics() {
+    let (caps, mut offered, formats, queue) = offers_everything(vk::API_VERSION_1_2);
+    offered
+        .shader_atomic_int64
+        .as_mut()
+        .unwrap()
+        .shader_shared_int64_atomics = vk::FALSE;
+    let offers = offered
+        .to_wgpu(
+            &caps,
+            |extension| caps.supports_extension(extension),
+            &formats,
+            &queue,
+        )
+        .0;
+    assert!(offers.contains(wgt::Features::SHADER_INT64_ATOMIC_MIN_MAX));
+    assert!(!offers.contains(wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS));
+    for (feature, shared) in [
+        (wgt::Features::SHADER_INT64_ATOMIC_MIN_MAX, vk::FALSE),
+        (wgt::Features::SHADER_INT64_ATOMIC_ALL_OPS, vk::TRUE),
+    ] {
+        let (_, enabled) = opened(&caps, &offered, feature);
+        let atomics = enabled.shader_atomic_int64.unwrap();
+        assert_eq!(
+            (
+                atomics.shader_buffer_int64_atomics,
+                atomics.shader_shared_int64_atomics
+            ),
+            (vk::TRUE, shared),
+            "{feature:?}"
+        );
+    }
+}
+
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
 /// each is chained.
 #[test]
