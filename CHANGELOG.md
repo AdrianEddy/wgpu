@@ -250,6 +250,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
   ```
 - `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
 - BREAKING: `wgpu_hal::Device` requires `downlevel_capabilities`, and wgpu-core validates each device against its own. A Vulkan device created without `independentBlend`, `sampleRateShading`, `imageCubeArray`, `samplerAnisotropy`, `fragmentStoresAndAtomics`, `depthBiasClamp` or `fullDrawIndexUint32` opens without the matching downlevel flag, instead of being refused, and `Adapter::device_downlevel_capabilities` gives its flags; `Adapter::missing_downlevel_features` is gone. wgpu-hal's own devices enable `fullDrawIndexUint32` where offered. A device has no downlevel flag that its adapter lacks. By @AdrianEddy.
+- BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` refuses a requested feature that the device's extensions and features do not give, naming it, and `Adapter::device_features` gives those they give. By @AdrianEddy.
 
 ### Bug Fixes
 

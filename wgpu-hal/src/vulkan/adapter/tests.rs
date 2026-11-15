@@ -1333,3 +1333,581 @@ fn sliced_3d_compression_implies_its_formats() {
         assert!(!derive(&enabled).intersects(sliced | base), "{sliced:?}");
     }
 }
+
+/// The `count` `vk::Bool32` members of a feature structure, after its `s_type` and `p_next`.
+///
+/// # Safety
+///
+/// `structure` is a feature structure whose members are `count` `vk::Bool32`s.
+unsafe fn members_of<T>(structure: &mut T, count: usize) -> &mut [vk::Bool32] {
+    let header = size_of::<vk::BaseOutStructure<'static>>();
+    let bool32 = size_of::<vk::Bool32>();
+    // The members, then no more than the padding to the structure's alignment, which is never
+    // read: a structure built with `Default` leaves it unspecified.
+    assert!(header + count * bool32 <= size_of::<T>());
+    assert!(size_of::<T>() < header + (count + 2) * bool32);
+    let first: *mut u8 = core::ptr::from_mut(structure).cast();
+    // SAFETY: Our caller's contract; the members follow the header, and stay borrowed.
+    unsafe { core::slice::from_raw_parts_mut(first.add(header).cast(), count) }
+}
+
+/// Every member of `features`, by the name of its structure: the core features, then those of each
+/// structure present. The counts are those of `ash` 0.38's definitions.
+fn members(
+    features: &mut PhysicalDeviceFeatures,
+) -> alloc::vec::Vec<(&'static str, &mut [vk::Bool32])> {
+    let mut all = alloc::vec::Vec::new();
+    let core: *mut vk::PhysicalDeviceFeatures = &mut features.core;
+    assert_eq!(
+        size_of::<vk::PhysicalDeviceFeatures>(),
+        55 * size_of::<vk::Bool32>()
+    );
+    // SAFETY: `vk::PhysicalDeviceFeatures` is 55 `vk::Bool32` members, and stays borrowed.
+    all.push(("core", unsafe {
+        core::slice::from_raw_parts_mut(core.cast(), 55)
+    }));
+    macro_rules! structures {
+        ($($field:ident: $count:literal),* $(,)?) => {$(
+            if let Some(structure) = features.$field.as_mut() {
+                // SAFETY: A feature structure of `$count` members.
+                all.push((stringify!($field), unsafe { members_of(structure, $count) }));
+            }
+        )*};
+    }
+    structures!(
+        descriptor_indexing: 20,
+        timeline_semaphore: 1,
+        image_robustness: 1,
+        robustness2: 3,
+        multiview: 3,
+        astc_hdr: 1,
+        shader_float16_int8: 2,
+        _16bit_storage: 4,
+        acceleration_structure: 5,
+        buffer_device_address: 3,
+        ray_query: 1,
+        ray_tracing_pipeline: 5,
+        zero_initialize_workgroup_memory: 1,
+        position_fetch: 1,
+        shader_atomic_int64: 2,
+        shader_image_atomic_int64: 2,
+        shader_atomic_float: 12,
+        subgroup_size_control: 2,
+        maintenance4: 1,
+        mesh_shader: 5,
+        shader_integer_dot_product: 1,
+        shader_barycentrics: 1,
+        portability_subset: 15,
+        cooperative_matrix: 2,
+        vulkan_memory_model: 3,
+        shader_draw_parameters: 1,
+        swapchain_maintenance1: 1,
+    );
+    all
+}
+
+/// Every device extension that a wgpu feature, or wgpu-hal itself, depends on.
+const EVERY_EXTENSION: &[&CStr] = &[
+    khr::swapchain::NAME,
+    khr::swapchain_mutable_format::NAME,
+    khr::maintenance1::NAME,
+    khr::maintenance2::NAME,
+    khr::maintenance3::NAME,
+    khr::maintenance4::NAME,
+    khr::storage_buffer_storage_class::NAME,
+    khr::multiview::NAME,
+    khr::sampler_ycbcr_conversion::NAME,
+    khr::_16bit_storage::NAME,
+    khr::shader_draw_parameters::NAME,
+    khr::image_format_list::NAME,
+    khr::driver_properties::NAME,
+    khr::timeline_semaphore::NAME,
+    ext::descriptor_indexing::NAME,
+    khr::shader_float16_int8::NAME,
+    khr::spirv_1_4::NAME,
+    ext::image_robustness::NAME,
+    ext::robustness2::NAME,
+    ext::subgroup_size_control::NAME,
+    khr::shader_integer_dot_product::NAME,
+    khr::zero_initialize_workgroup_memory::NAME,
+    khr::dynamic_rendering::NAME,
+    khr::load_store_op_none::NAME,
+    khr::shader_non_semantic_info::NAME,
+    khr::draw_indirect_count::NAME,
+    khr::deferred_host_operations::NAME,
+    khr::acceleration_structure::NAME,
+    khr::buffer_device_address::NAME,
+    khr::ray_query::NAME,
+    khr::ray_tracing_pipeline::NAME,
+    khr::ray_tracing_position_fetch::NAME,
+    ext::conservative_rasterization::NAME,
+    ext::texture_compression_astc_hdr::NAME,
+    khr::shader_atomic_int64::NAME,
+    ext::shader_image_atomic_int64::NAME,
+    ext::shader_atomic_float::NAME,
+    ext::mesh_shader::NAME,
+    khr::fragment_shader_barycentric::NAME,
+    khr::cooperative_matrix::NAME,
+    khr::vulkan_memory_model::NAME,
+];
+
+/// A physical device of Vulkan `version` that offers everything: every extension of
+/// [`EVERY_EXTENSION`], every member of every feature structure, every subgroup operation in every
+/// stage, a cooperative matrix configuration, every format that a feature depends on, and a queue
+/// with timestamps. Returns it with what it offers, its format support and its queue.
+fn offers_everything(
+    version: u32,
+) -> (
+    PhysicalDeviceProperties,
+    PhysicalDeviceFeatures,
+    FormatSupport,
+    vk::QueueFamilyProperties,
+) {
+    let caps = PhysicalDeviceProperties {
+        device_api_version: version,
+        supported_extensions: EVERY_EXTENSION
+            .iter()
+            .map(|&name| {
+                vk::ExtensionProperties::default()
+                    .extension_name(name)
+                    .unwrap()
+            })
+            .collect(),
+        ..subgroups_and_matrices()
+    };
+    let mut offered = PhysicalDeviceFeatures {
+        descriptor_indexing: Some(Default::default()),
+        timeline_semaphore: Some(Default::default()),
+        image_robustness: Some(Default::default()),
+        robustness2: Some(Default::default()),
+        multiview: Some(Default::default()),
+        astc_hdr: Some(Default::default()),
+        shader_float16_int8: Some(Default::default()),
+        _16bit_storage: Some(Default::default()),
+        acceleration_structure: Some(Default::default()),
+        buffer_device_address: Some(Default::default()),
+        ray_query: Some(Default::default()),
+        ray_tracing_pipeline: Some(Default::default()),
+        zero_initialize_workgroup_memory: Some(Default::default()),
+        position_fetch: Some(Default::default()),
+        shader_atomic_int64: Some(Default::default()),
+        shader_image_atomic_int64: Some(Default::default()),
+        shader_atomic_float: Some(Default::default()),
+        subgroup_size_control: Some(Default::default()),
+        maintenance4: Some(Default::default()),
+        mesh_shader: Some(Default::default()),
+        shader_integer_dot_product: Some(Default::default()),
+        shader_barycentrics: Some(Default::default()),
+        portability_subset: None,
+        cooperative_matrix: Some(Default::default()),
+        vulkan_memory_model: Some(Default::default()),
+        shader_draw_parameters: Some(Default::default()),
+        swapchain_maintenance1: None,
+        ..PhysicalDeviceFeatures::default()
+    };
+    for (_, members) in members(&mut offered) {
+        members.fill(vk::TRUE);
+    }
+    let formats = FormatSupport {
+        s8: true,
+        d32: true,
+        d24_s8: true,
+        d32_s8: true,
+        rg11b10ufloat_renderable: true,
+        bgra8unorm_storage: true,
+        float32_filterable: true,
+        float32_blendable: true,
+        norm16: true,
+        bc_3d: true,
+        astc_3d: true,
+        nv12: true,
+        p010: true,
+    };
+    let queue = vk::QueueFamilyProperties::default().timestamp_valid_bits(64);
+    (caps, offered, formats, queue)
+}
+
+/// What wgpu-hal enables for `requested` on the physical device `caps`, which offers `offered`
+/// and has the downlevel flags `downlevel_flags`: the extensions and the features.
+fn enabled_for(
+    caps: &PhysicalDeviceProperties,
+    offered: &PhysicalDeviceFeatures,
+    requested: wgt::Features,
+    downlevel_flags: wgt::DownlevelFlags,
+) -> (alloc::vec::Vec<&'static CStr>, PhysicalDeviceFeatures) {
+    let extensions = caps
+        .get_required_extensions(requested)
+        .into_iter()
+        .filter(|&extension| caps.supports_extension(extension))
+        .collect::<alloc::vec::Vec<_>>();
+    let enabled = PhysicalDeviceFeatures::from_extensions_and_requested_features(
+        caps,
+        offered,
+        &extensions,
+        requested,
+        downlevel_flags,
+        &PrivateCapabilities::default(),
+    );
+    (extensions, enabled)
+}
+
+/// What a request enables beyond need, by the feature, the structure and member or extension, and
+/// the oldest Vulkan version at which it does so. The derivation does not require them:
+/// - Mesh shaders enable `maintenance4`, whose only gate is the `LocalSizeId` execution mode
+///   (VUID-RuntimeSpirv-LocalSizeId-06434), which Naga does not emit.
+/// - 16-bit types enable `storageInputOutput16` where offered: Naga uses it where present and
+///   passes 16-bit inputs and outputs through 32-bit types without it.
+/// - Buffer arrays enable `shaderUniformBufferArrayDynamicIndexing` (`core[33]`) where offered,
+///   for the uniform buffer arrays that wgpu-core lets through with them; by the owner's ruling,
+///   buffer arrays do not need it.
+/// - `VK_KHR_shader_atomic_int64` and `VK_EXT_texture_compression_astc_hdr` are enabled on the
+///   versions that have them in core.
+fn beyond_need(feature: wgt::Features, what: &str, version: u32) -> bool {
+    use wgt::Features as F;
+    let mesh = F::EXPERIMENTAL_MESH_SHADER
+        | F::EXPERIMENTAL_MESH_SHADER_POINTS
+        | F::EXPERIMENTAL_MESH_SHADER_MULTIVIEW;
+    (mesh.contains(feature) && what.starts_with("maintenance4["))
+        || (feature == F::BUFFER_BINDING_ARRAY && what == "core[33]")
+        || ((F::SHADER_F16 | F::SHADER_I16).contains(feature) && what == "_16bit_storage[3]")
+        || ((F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX).contains(feature)
+            && what == "VK_KHR_shader_atomic_int64"
+            && version >= vk::API_VERSION_1_2)
+        || (feature == F::TEXTURE_COMPRESSION_ASTC_HDR
+            && what == "VK_EXT_texture_compression_astc_hdr"
+            && version >= vk::API_VERSION_1_3)
+}
+
+/// On a physical device that offers everything, at Vulkan 1.0, 1.1, 1.2 and 1.3, every feature of
+/// the adapter round-trips: a device that wgpu-hal opens with it alone, or with all of them, has
+/// it, as `device_from_raw` requires. And every member and every extension that the request
+/// enables beyond what opening with no feature enables is needed: without it, the device lacks the
+/// feature, but for what [`beyond_need`] lists.
+#[test]
+fn every_feature_round_trips_and_needs_what_it_enables() {
+    let mut wrong = alloc::vec::Vec::new();
+    for version in [
+        vk::API_VERSION_1_0,
+        vk::API_VERSION_1_1,
+        vk::API_VERSION_1_2,
+        vk::API_VERSION_1_3,
+    ] {
+        let v = alloc::format!(
+            "Vulkan {}.{}",
+            vk::api_version_major(version),
+            vk::api_version_minor(version)
+        );
+        let (caps, offered, formats, queue) = offers_everything(version);
+        let derive = |extensions: &[&'static CStr], enabled: &PhysicalDeviceFeatures| {
+            enabled
+                .to_wgpu(
+                    &caps,
+                    |extension| extensions.contains(&extension),
+                    &formats,
+                    &queue,
+                )
+                .0
+        };
+        let (adapter_features, adapter_flags) = offered.to_wgpu(
+            &caps,
+            |extension| caps.supports_extension(extension),
+            &formats,
+            &queue,
+        );
+        let (all_extensions, all_enabled) =
+            enabled_for(&caps, &offered, adapter_features, adapter_flags);
+        let lacking = adapter_features - derive(&all_extensions, &all_enabled);
+        if !lacking.is_empty() {
+            wrong.push(alloc::format!("{v}: all together, lacking {lacking:?}"));
+        }
+        let (base_extensions, mut base) =
+            enabled_for(&caps, &offered, wgt::Features::empty(), adapter_flags);
+        let base_members = members(&mut base)
+            .into_iter()
+            .map(|(name, members)| (name, members.to_vec()))
+            .collect::<alloc::vec::Vec<_>>();
+        for (name, feature) in adapter_features.iter_names() {
+            let (extensions, mut enabled) = enabled_for(&caps, &offered, feature, adapter_flags);
+            if !derive(&extensions, &enabled).contains(feature) {
+                wrong.push(alloc::format!("{v}: {name} lacking alone"));
+                continue;
+            }
+            // Each member that the request adds.
+            let added = members(&mut enabled)
+                .into_iter()
+                .flat_map(|(structure, members)| {
+                    let before = base_members
+                        .iter()
+                        .find(|(base, _)| *base == structure)
+                        .map(|(_, members)| members.clone());
+                    members
+                        .iter()
+                        .enumerate()
+                        .filter(move |&(index, &member)| {
+                            member == vk::TRUE
+                                && before
+                                    .as_ref()
+                                    .is_none_or(|before| before[index] != vk::TRUE)
+                        })
+                        .map(move |(index, _)| (structure, index))
+                        .collect::<alloc::vec::Vec<_>>()
+                })
+                .collect::<alloc::vec::Vec<_>>();
+            for (structure, index) in added {
+                let what = alloc::format!("{structure}[{index}]");
+                let (extensions, mut without) =
+                    enabled_for(&caps, &offered, feature, adapter_flags);
+                for (name, members) in members(&mut without) {
+                    if name == structure {
+                        members[index] = vk::FALSE;
+                    }
+                }
+                let needed = !derive(&extensions, &without).contains(feature);
+                if needed == beyond_need(feature, &what, version) {
+                    wrong.push(alloc::format!(
+                        "{v}: {name} {} {what}",
+                        if needed {
+                            "needs, as listed beyond need,"
+                        } else {
+                            "does not need"
+                        }
+                    ));
+                }
+            }
+            // Each extension that the request adds.
+            for &extension in extensions
+                .iter()
+                .filter(|extension| !base_extensions.contains(extension))
+            {
+                let what = extension.to_str().unwrap();
+                let fewer = extensions
+                    .iter()
+                    .copied()
+                    .filter(|&other| other != extension)
+                    .collect::<alloc::vec::Vec<_>>();
+                let needed = !derive(&fewer, &enabled).contains(feature);
+                if needed == beyond_need(feature, what, version) {
+                    wrong.push(alloc::format!(
+                        "{v}: {name} {} {what}",
+                        if needed {
+                            "needs, as listed beyond need,"
+                        } else {
+                            "does not need"
+                        }
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// xorshift64*: deterministic, with no dependency.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x >> 12;
+        x ^= x << 25;
+        x ^= x >> 27;
+        self.0 = x;
+        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+
+    fn chance(&mut self, num: u64, den: u64) -> bool {
+        self.next() % den < num
+    }
+}
+
+/// A random partial adapter: of Vulkan 1.0 to 1.4, listing each extension wgpu-hal knows with
+/// probability 3/4 and `VK_KHR_portability_subset` with 1/4, with the feature structures that
+/// `PhysicalDeviceFeatures::queried` queries on it (none without
+/// `VK_KHR_get_physical_device_properties2`, with probability 1/8), random members, formats,
+/// subgroup properties, matrix configurations, driver and timestamp bits; the private
+/// capabilities derived as `Instance::expose_adapter` derives them. Returns its properties,
+/// offered features, format support, queue family and private capabilities, and whether
+/// `get_required_extensions` runs as on an Apple target, where it requests the portability subset.
+fn random_adapter(
+    rng: &mut Rng,
+) -> (
+    PhysicalDeviceProperties,
+    PhysicalDeviceFeatures,
+    FormatSupport,
+    vk::QueueFamilyProperties,
+    PrivateCapabilities,
+    bool,
+) {
+    let versions = [
+        vk::API_VERSION_1_0,
+        vk::API_VERSION_1_1,
+        vk::API_VERSION_1_2,
+        vk::API_VERSION_1_3,
+        vk::make_api_version(0, 1, 4, 0),
+    ];
+    let version = versions[(rng.next() % versions.len() as u64) as usize];
+    let mut extensions: alloc::vec::Vec<&CStr> = EVERY_EXTENSION
+        .iter()
+        .copied()
+        .filter(|_| rng.chance(3, 4))
+        .collect();
+    let portability = rng.chance(1, 4);
+    if portability {
+        extensions.push(khr::portability_subset::NAME);
+    }
+    let mut caps = device_of_version(version, &extensions);
+    if version >= vk::API_VERSION_1_1 {
+        let all = vk::SubgroupFeatureFlags::from_raw(!0);
+        caps.subgroup = Some(
+            vk::PhysicalDeviceSubgroupProperties::default()
+                .supported_operations(if rng.chance(3, 4) {
+                    all
+                } else {
+                    vk::SubgroupFeatureFlags::from_raw(rng.next() as u32 & all.as_raw())
+                })
+                .supported_stages(if rng.chance(1, 2) {
+                    vk::ShaderStageFlags::ALL
+                } else {
+                    vk::ShaderStageFlags::from_raw(rng.next() as u32)
+                }),
+        );
+    }
+    if rng.chance(1, 2) {
+        caps.cooperative_matrix_properties = subgroups_and_matrices().cooperative_matrix_properties;
+    }
+    if rng.chance(2, 3) {
+        caps.driver = Some(vk::PhysicalDeviceDriverProperties::default().driver_id(
+            if rng.chance(1, 4) {
+                vk::DriverId::MOLTENVK
+            } else {
+                vk::DriverId::MESA_RADV
+            },
+        ));
+    }
+    let mut offered = if rng.chance(7, 8) {
+        PhysicalDeviceFeatures::queried(&caps)
+    } else {
+        PhysicalDeviceFeatures::default()
+    };
+    for (_, members) in members(&mut offered) {
+        for member in members.iter_mut() {
+            *member = vk::Bool32::from(rng.chance(3, 4));
+        }
+    }
+    let formats = FormatSupport {
+        s8: rng.chance(3, 4),
+        d32: rng.chance(3, 4),
+        d24_s8: rng.chance(3, 4),
+        d32_s8: rng.chance(3, 4),
+        rg11b10ufloat_renderable: rng.chance(3, 4),
+        bgra8unorm_storage: rng.chance(3, 4),
+        float32_filterable: rng.chance(3, 4),
+        float32_blendable: rng.chance(3, 4),
+        norm16: rng.chance(3, 4),
+        bc_3d: rng.chance(3, 4),
+        astc_3d: rng.chance(3, 4),
+        nv12: rng.chance(3, 4),
+        p010: rng.chance(3, 4),
+    };
+    let queue = vk::QueueFamilyProperties::default()
+        .timestamp_valid_bits([0, 36, 64][(rng.next() % 3) as usize]);
+    let mut private_caps = PrivateCapabilities::default();
+    private_caps.set_extension_and_feature_capabilities(
+        &caps,
+        |extension| caps.supports_extension(extension),
+        &offered,
+    );
+    let apple = portability && rng.chance(1, 2);
+    (caps, offered, formats, queue, private_caps, apple)
+}
+
+/// Over 3000 random partial adapters, each feature that an adapter offers round-trips through
+/// wgpu-hal's own opening, alone and with every other: the device that `open` creates for it
+/// gives it, so `open` never refuses a request for what the adapter offers. Any change to what an
+/// adapter queries or offers, or to what `open` enables, runs through it.
+#[test]
+fn partial_adapters_round_trip() {
+    let mut rng = Rng(0x5EED_0001);
+    let mut wrong = alloc::vec::Vec::new();
+    let mut checked = 0usize;
+    for _ in 0..3000 {
+        let (caps, offered, formats, queue, private_caps, apple) = random_adapter(&mut rng);
+        let (features, downlevel) = offered.to_wgpu(
+            &caps,
+            |extension| caps.supports_extension(extension),
+            &formats,
+            &queue,
+        );
+        let open = |requested: wgt::Features| {
+            let mut extensions = caps
+                .get_required_extensions(requested)
+                .into_iter()
+                .filter(|&extension| caps.supports_extension(extension))
+                .collect::<alloc::vec::Vec<_>>();
+            if apple && !extensions.contains(&khr::portability_subset::NAME) {
+                extensions.push(khr::portability_subset::NAME);
+            }
+            let enabled = PhysicalDeviceFeatures::from_extensions_and_requested_features(
+                &caps,
+                &offered,
+                &extensions,
+                requested,
+                downlevel,
+                &private_caps,
+            );
+            let (device, _) = enabled.to_wgpu(
+                &caps,
+                |extension| extensions.contains(&extension),
+                &formats,
+                &queue,
+            );
+            device
+        };
+        for (name, feature) in features.iter_names() {
+            checked += 1;
+            if !open(feature).contains(feature) {
+                wrong.push(alloc::format!(
+                    "{name} alone, Vulkan 1.{}: {:?}",
+                    vk::api_version_minor(caps.device_api_version),
+                    caps.supported_extensions.len()
+                ));
+            }
+        }
+        let lacking = features - open(features);
+        if !lacking.is_empty() {
+            wrong.push(alloc::format!(
+                "all together, Vulkan 1.{}, lacking {lacking:?}",
+                vk::api_version_minor(caps.device_api_version)
+            ));
+        }
+    }
+    assert!(checked > 30_000, "{checked}");
+    assert!(wrong.is_empty(), "{:#?}", &wrong[..wrong.len().min(20)]);
+}
+
+/// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
+/// each is chained.
+#[test]
+fn every_queried_structure_is_chained() {
+    let mut caps = device_of_version(vk::API_VERSION_1_3, EVERY_EXTENSION);
+    caps.supported_extensions.push(
+        vk::ExtensionProperties::default()
+            .extension_name(khr::portability_subset::NAME)
+            .unwrap(),
+    );
+    let mut queried = PhysicalDeviceFeatures::queried(&caps);
+    // Every structure present, but `core`, which is not chained.
+    let present = members(&mut queried).len() - 1;
+    let features2 = queried.add_to_features2(vk::PhysicalDeviceFeatures2::default());
+    let mut chained = 0;
+    let mut next = features2
+        .p_next
+        .cast_const()
+        .cast::<vk::BaseInStructure<'_>>();
+    while !next.is_null() {
+        chained += 1;
+        // SAFETY: A chain of the structures of `queried`.
+        next = unsafe { (*next).p_next };
+    }
+    assert_eq!(chained, present);
+}
