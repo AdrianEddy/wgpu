@@ -463,6 +463,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Query the feature structures of extensions promoted to a device's version by version, as a device's features follow them: a Vulkan 1.3 device offers `TEXTURE_COMPRESSION_ASTC_HDR` without listing its extension, and opening one for it no longer enables the extension at 1.3. By @AdrianEddy.
 - `Adapter::device_from_raw` takes no step that can fail after taking the device: on an error, the device and its drop callback stay with the caller. By @AdrianEddy.
 - Subgroup operations on the 16- and 64-bit types of `SHADER_F16`, `SHADER_I16` and `SHADER_INT64` need `shaderSubgroupExtendedTypes`, which a device opened with both now enables; an adapter with one of those types but without it offers no subgroup feature (VUID-RuntimeSpirv-None-06275). By @AdrianEddy.
+- On a device with mesh shaders, the subgroup features need the task and mesh stages among `subgroupSupportedStages`: Naga lets subgroup operations into them (VUID-RuntimeSpirv-None-06343). By @AdrianEddy.
 
 #### Metal
 
