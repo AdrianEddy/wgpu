@@ -361,6 +361,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - A feature requested without the feature it extends enables what it needs: `SELECTIVE_MULTIVIEW`, `EXPERIMENTAL_MESH_SHADER_POINTS`, `EXPERIMENTAL_MESH_SHADER_MULTIVIEW` (which enables `multiview` too), `SUBGROUP_VERTEX`, `SUBGROUP_BARRIER`, `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS`, `ACCELERATION_STRUCTURE_BINDING_ARRAY`, and `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`, whose extension requires `VK_KHR_acceleration_structure`. By @AdrianEddy.
 - Enable `VK_KHR_sampler_ycbcr_conversion` for `TEXTURE_FORMAT_P010` before Vulkan 1.1, and `VK_KHR_vulkan_memory_model` for `EXPERIMENTAL_COOPERATIVE_MATRIX` before Vulkan 1.2. By @AdrianEddy.
 - Offer `TEXTURE_COMPRESSION_BC_SLICED_3D` and `TEXTURE_COMPRESSION_ASTC_SLICED_3D` where every format of the family has 3D images as wgpu creates them: no Vulkan feature guarantees them. A device has them with its family's formats, which a request for them enables. By @AdrianEddy.
+- Give a hole among a render pipeline's colour targets the first target's blend state: without `independentBlend`, every attachment's state must be identical, unused ones included (VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605). By @AdrianEddy.
 
 #### Metal
 

@@ -999,6 +999,47 @@ fn map_blend_op(operation: wgt::BlendOperation) -> vk::BlendOp {
     }
 }
 
+/// The blend state of the colour target `target`.
+fn map_color_target_blend(target: &wgt::ColorTargetState) -> vk::PipelineColorBlendAttachmentState {
+    let mut state = vk::PipelineColorBlendAttachmentState::default()
+        .color_write_mask(vk::ColorComponentFlags::from_raw(target.write_mask.bits()));
+    if let Some(ref blend) = target.blend {
+        let (color_op, color_src, color_dst) = map_blend_component(&blend.color);
+        let (alpha_op, alpha_src, alpha_dst) = map_blend_component(&blend.alpha);
+        state = state
+            .blend_enable(true)
+            .color_blend_op(color_op)
+            .src_color_blend_factor(color_src)
+            .dst_color_blend_factor(color_dst)
+            .alpha_blend_op(alpha_op)
+            .src_alpha_blend_factor(alpha_src)
+            .dst_alpha_blend_factor(alpha_dst);
+    }
+    state
+}
+
+/// The blend states of a pipeline's colour attachments, one per element of `targets`.
+///
+/// A hole among the targets is an unused attachment, whose writes are discarded, so its state is
+/// never read; it takes the first target's. Without `independentBlend`, every element of
+/// `pAttachments` must be identical, unused ones included
+/// (VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605), and wgpu-core compares only the
+/// targets.
+pub fn map_color_targets_blend(
+    targets: &[Option<wgt::ColorTargetState>],
+) -> Vec<vk::PipelineColorBlendAttachmentState> {
+    let hole = targets
+        .iter()
+        .flatten()
+        .next()
+        .map(map_color_target_blend)
+        .unwrap_or_default();
+    targets
+        .iter()
+        .map(|target| target.as_ref().map_or(hole, map_color_target_blend))
+        .collect()
+}
+
 pub fn map_blend_component(
     component: &wgt::BlendComponent,
 ) -> (vk::BlendOp, vk::BlendFactor, vk::BlendFactor) {
@@ -1172,6 +1213,48 @@ pub fn map_texture_component_swizzle(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A hole among the colour targets takes the first target's blend state, so that a pipeline
+    /// whose targets wgpu-core found to agree has identical attachment states, as a device without
+    /// `independentBlend` requires; with no target, the default.
+    #[test]
+    fn a_colour_target_hole_takes_the_first_targets_blend_state() {
+        let target = Some(wgt::ColorTargetState {
+            format: wgt::TextureFormat::Rgba8Unorm,
+            blend: Some(wgt::BlendState::ALPHA_BLENDING),
+            write_mask: wgt::ColorWrites::RED | wgt::ColorWrites::ALPHA,
+        });
+        let field = |state: &vk::PipelineColorBlendAttachmentState| {
+            (
+                state.blend_enable,
+                state.src_color_blend_factor,
+                state.dst_color_blend_factor,
+                state.color_blend_op,
+                state.src_alpha_blend_factor,
+                state.dst_alpha_blend_factor,
+                state.alpha_blend_op,
+                state.color_write_mask,
+            )
+        };
+        let expected = field(&map_color_target_blend(target.as_ref().unwrap()));
+        assert_eq!(expected.0, vk::TRUE);
+        for targets in [
+            alloc::vec![target.clone(), None],
+            alloc::vec![None, target.clone()],
+            alloc::vec![None, target.clone(), None, target.clone()],
+        ] {
+            let states = map_color_targets_blend(&targets);
+            assert_eq!(states.len(), targets.len());
+            assert!(
+                states.iter().all(|state| field(state) == expected),
+                "{targets:?}"
+            );
+        }
+        let none = map_color_targets_blend(&[None, None]);
+        assert!(none
+            .iter()
+            .all(|state| field(state) == field(&vk::PipelineColorBlendAttachmentState::default())));
+    }
 
     /// `map_vk_color_space` and `map_surface_color_space` must stay mutually
     /// inverse so that a color space reported in the surface capabilities is
