@@ -587,9 +587,10 @@ impl PhysicalDeviceFeatures {
     }
 
     /// The feature structures that wgpu-hal queries on the physical device that `caps` describes,
-    /// with every feature off: those of the extensions it lists, and of those promoted to its
-    /// version where noted. `InstanceShared::inspect` queries them with
-    /// `vkGetPhysicalDeviceFeatures2`, where the instance has it.
+    /// with every feature off: those of the extensions it lists, and of the extensions promoted to
+    /// its version, whose structures are core there. `InstanceShared::inspect` queries them with
+    /// `vkGetPhysicalDeviceFeatures2`, where the instance has it. So an adapter offers what a
+    /// device of it can be created with, which `device_from_raw` derives with the same rule.
     fn queried(caps: &PhysicalDeviceProperties) -> Self {
         fn query<T: Default>(condition: bool) -> Option<T> {
             condition.then(T::default)
@@ -598,22 +599,36 @@ impl PhysicalDeviceFeatures {
         let has = |extension| caps.supports_extension(extension);
         Self {
             core: vk::PhysicalDeviceFeatures::default(),
-            descriptor_indexing: query(has(ext::descriptor_indexing::NAME)),
-            // `VK_KHR_timeline_semaphore` is promoted to 1.2, but has no changes, so we can keep
-            // using the extension unconditionally.
-            timeline_semaphore: query(has(khr::timeline_semaphore::NAME)),
-            image_robustness: query(has(ext::image_robustness::NAME)),
+            // `VK_EXT_descriptor_indexing` is promoted to 1.2
+            descriptor_indexing: query(
+                version >= vk::API_VERSION_1_2 || has(ext::descriptor_indexing::NAME),
+            ),
+            // `VK_KHR_timeline_semaphore` is promoted to 1.2
+            timeline_semaphore: query(
+                version >= vk::API_VERSION_1_2 || has(khr::timeline_semaphore::NAME),
+            ),
+            // `VK_EXT_image_robustness` is promoted to 1.3
+            image_robustness: query(
+                version >= vk::API_VERSION_1_3 || has(ext::image_robustness::NAME),
+            ),
             robustness2: query(has(ext::robustness2::NAME)),
             // `VK_KHR_multiview` is promoted to 1.1
             multiview: query(version >= vk::API_VERSION_1_1 || has(khr::multiview::NAME)),
-            astc_hdr: query(has(ext::texture_compression_astc_hdr::NAME)),
+            // `VK_EXT_texture_compression_astc_hdr` is promoted to 1.3
+            astc_hdr: query(
+                version >= vk::API_VERSION_1_3 || has(ext::texture_compression_astc_hdr::NAME),
+            ),
             // `VK_KHR_shader_float16_int8` is promoted to 1.2
             shader_float16_int8: query(
                 version >= vk::API_VERSION_1_2 || has(khr::shader_float16_int8::NAME),
             ),
-            _16bit_storage: query(has(khr::_16bit_storage::NAME)),
+            // `VK_KHR_16bit_storage` is promoted to 1.1
+            _16bit_storage: query(version >= vk::API_VERSION_1_1 || has(khr::_16bit_storage::NAME)),
             acceleration_structure: query(has(khr::acceleration_structure::NAME)),
-            buffer_device_address: query(has(khr::buffer_device_address::NAME)),
+            // `VK_KHR_buffer_device_address` is promoted to 1.2
+            buffer_device_address: query(
+                version >= vk::API_VERSION_1_2 || has(khr::buffer_device_address::NAME),
+            ),
             ray_query: query(has(khr::ray_query::NAME)),
             ray_tracing_pipeline: query(has(khr::ray_tracing_pipeline::NAME)),
             // `VK_KHR_zero_initialize_workgroup_memory` is promoted to 1.3
@@ -863,7 +878,10 @@ impl PhysicalDeviceFeatures {
             } else {
                 None
             },
-            astc_hdr: if enabled_extensions.contains(&ext::texture_compression_astc_hdr::NAME) {
+            astc_hdr: if requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC_HDR)
+                && (device_api_version >= vk::API_VERSION_1_3
+                    || enabled_extensions.contains(&ext::texture_compression_astc_hdr::NAME))
+            {
                 Some(
                     vk::PhysicalDeviceTextureCompressionASTCHDRFeaturesEXT::default()
                         .texture_compression_astc_hdr(true),
@@ -2061,8 +2079,11 @@ impl PhysicalDeviceProperties {
         #[cfg(target_vendor = "apple")]
         extensions.push(khr::portability_subset::NAME);
 
-        // Require `VK_EXT_texture_compression_astc_hdr` if the associated feature was requested
-        if requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC_HDR) {
+        // Require `VK_EXT_texture_compression_astc_hdr` if the associated feature was requested,
+        // before Vulkan 1.3, which has it in core.
+        if requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC_HDR)
+            && self.device_api_version < vk::API_VERSION_1_3
+        {
             extensions.push(ext::texture_compression_astc_hdr::NAME);
         }
 

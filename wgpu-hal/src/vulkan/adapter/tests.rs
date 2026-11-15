@@ -1560,8 +1560,7 @@ fn enabled_for(
 /// - Buffer arrays enable `shaderUniformBufferArrayDynamicIndexing` (`core[33]`) where offered,
 ///   for the uniform buffer arrays that wgpu-core lets through with them; by the owner's ruling,
 ///   buffer arrays do not need it.
-/// - `VK_KHR_shader_atomic_int64` and `VK_EXT_texture_compression_astc_hdr` are enabled on the
-///   versions that have them in core.
+/// - `VK_KHR_shader_atomic_int64` is enabled on the versions that have it in core.
 fn beyond_need(feature: wgt::Features, what: &str, version: u32) -> bool {
     use wgt::Features as F;
     let mesh = F::EXPERIMENTAL_MESH_SHADER
@@ -1573,9 +1572,6 @@ fn beyond_need(feature: wgt::Features, what: &str, version: u32) -> bool {
         || ((F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX).contains(feature)
             && what == "VK_KHR_shader_atomic_int64"
             && version >= vk::API_VERSION_1_2)
-        || (feature == F::TEXTURE_COMPRESSION_ASTC_HDR
-            && what == "VK_EXT_texture_compression_astc_hdr"
-            && version >= vk::API_VERSION_1_3)
 }
 
 /// On a physical device that offers everything, at Vulkan 1.0, 1.1, 1.2 and 1.3, every feature of
@@ -1883,6 +1879,49 @@ fn partial_adapters_round_trip() {
     }
     assert!(checked > 30_000, "{checked}");
     assert!(wrong.is_empty(), "{:#?}", &wrong[..wrong.len().min(20)]);
+}
+
+/// An adapter queries the structures of the extensions promoted to its version, which are core
+/// there, without the extensions: a device of it can be created with them, and its features follow
+/// them. A Vulkan 1.3 device that does not list `VK_EXT_texture_compression_astc_hdr` offers
+/// `TEXTURE_COMPRESSION_ASTC_HDR` with the feature, and opens with it without the extension.
+#[test]
+fn promoted_structures_are_queried_at_their_version() {
+    for (version, expected) in [
+        (vk::API_VERSION_1_0, 0),
+        (vk::API_VERSION_1_1, 1),
+        (vk::API_VERSION_1_2, 4),
+        (vk::API_VERSION_1_3, 6),
+    ] {
+        let queried = PhysicalDeviceFeatures::queried(&device_of_version(version, &[]));
+        let promoted = [
+            queried._16bit_storage.is_some(),
+            queried.descriptor_indexing.is_some(),
+            queried.timeline_semaphore.is_some(),
+            queried.buffer_device_address.is_some(),
+            queried.image_robustness.is_some(),
+            queried.astc_hdr.is_some(),
+        ];
+        assert_eq!(
+            promoted.iter().filter(|&&queried| queried).count(),
+            expected,
+            "Vulkan 1.{}: {promoted:?}",
+            vk::api_version_minor(version)
+        );
+    }
+
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let mut offered = PhysicalDeviceFeatures::queried(&caps);
+    offered
+        .astc_hdr
+        .as_mut()
+        .unwrap()
+        .texture_compression_astc_hdr = vk::TRUE;
+    let hdr = wgt::Features::TEXTURE_COMPRESSION_ASTC_HDR;
+    assert!(derived(&caps, &[], &offered).contains(hdr));
+    let (extensions, enabled) = opened(&caps, &offered, hdr);
+    assert!(!extensions.contains(&ext::texture_compression_astc_hdr::NAME));
+    assert!(derived(&caps, &extensions, &enabled).contains(hdr));
 }
 
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
