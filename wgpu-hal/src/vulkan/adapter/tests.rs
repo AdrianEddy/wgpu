@@ -717,19 +717,24 @@ fn member_cases() -> alloc::vec::Vec<(
         ),
         (
             wgt::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
-            &[khr::ray_tracing_position_fetch::NAME][..],
+            &[
+                khr::deferred_host_operations::NAME,
+                khr::acceleration_structure::NAME,
+                khr::buffer_device_address::NAME,
+                khr::ray_tracing_position_fetch::NAME,
+            ][..],
             PhysicalDeviceFeatures {
                 position_fetch: Some(
                     vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default(),
                 ),
-                ..PhysicalDeviceFeatures::default()
+                ..ray_tracing(true)
             },
             PhysicalDeviceFeatures {
                 position_fetch: Some(
                     vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
                         .ray_tracing_position_fetch(true),
                 ),
-                ..PhysicalDeviceFeatures::default()
+                ..ray_tracing(true)
             },
         ),
         (
@@ -1011,4 +1016,96 @@ fn buffer_arrays_do_not_need_uniform_dynamic_indexing() {
             "offered: {offered}"
         );
     }
+}
+
+/// A Vulkan 1.2 physical device with every subgroup operation in every stage that lists the
+/// extensions of subgroup size control, mesh shaders and ray tracing.
+fn extending_device() -> PhysicalDeviceProperties {
+    PhysicalDeviceProperties {
+        subgroup: Some(
+            vk::PhysicalDeviceSubgroupProperties::default()
+                .supported_operations(vk::SubgroupFeatureFlags::from_raw(!0))
+                .supported_stages(vk::ShaderStageFlags::ALL),
+        ),
+        ..device_of_version(
+            vk::API_VERSION_1_2,
+            &[
+                ext::subgroup_size_control::NAME,
+                ext::mesh_shader::NAME,
+                khr::maintenance4::NAME,
+                khr::deferred_host_operations::NAME,
+                khr::acceleration_structure::NAME,
+                khr::buffer_device_address::NAME,
+                khr::ray_query::NAME,
+                khr::ray_tracing_position_fetch::NAME,
+            ],
+        )
+    }
+}
+
+/// The features that extend another, each of which a device opened with it alone has: wgpu-hal
+/// enables what it needs, as for the feature it extends. Before, they enabled nothing of their
+/// own, and a device opened with one of them alone lacked it.
+#[test]
+fn a_feature_that_extends_another_enables_what_it_needs() {
+    let caps = extending_device();
+    let mut wrong = alloc::vec::Vec::new();
+    for feature in [
+        wgt::Features::SELECTIVE_MULTIVIEW,
+        wgt::Features::EXPERIMENTAL_MESH_SHADER_POINTS,
+        wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW,
+        wgt::Features::SUBGROUP_VERTEX,
+        wgt::Features::SUBGROUP_BARRIER,
+        wgt::Features::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS,
+        wgt::Features::ACCELERATION_STRUCTURE_BINDING_ARRAY,
+        wgt::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
+    ] {
+        let (extensions, enabled) = opened(&caps, &PhysicalDeviceFeatures::default(), feature);
+        if !derived(&caps, &extensions, &enabled).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} lacking alone"));
+        }
+    }
+
+    // `multiviewMeshShader` needs `multiview` (VUID-VkPhysicalDeviceMeshShaderFeaturesEXT-
+    // multiviewMeshShader-07032), and `VK_KHR_ray_tracing_position_fetch` needs
+    // `VK_KHR_acceleration_structure` (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+    let (_, enabled) = opened(
+        &caps,
+        &PhysicalDeviceFeatures::default(),
+        wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW,
+    );
+    if enabled.multiview.unwrap().multiview != vk::TRUE {
+        wrong.push("multiviewMeshShader without multiview".into());
+    }
+    let (extensions, _) = opened(
+        &caps,
+        &PhysicalDeviceFeatures::default(),
+        wgt::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
+    );
+    if !extensions.contains(&khr::acceleration_structure::NAME) {
+        wrong.push("position fetch without VK_KHR_acceleration_structure".into());
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// Mesh shaders in multiview render passes need `multiview` as well as `multiviewMeshShader`.
+/// Before, a device with the latter but without the former had
+/// `EXPERIMENTAL_MESH_SHADER_MULTIVIEW`.
+#[test]
+fn mesh_shader_multiview_needs_multiview() {
+    let caps = extending_device();
+    let mesh = |multiview: bool| PhysicalDeviceFeatures {
+        mesh_shader: Some(
+            vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+                .mesh_shader(true)
+                .task_shader(true)
+                .multiview_mesh_shader(true),
+        ),
+        multiview: Some(vk::PhysicalDeviceMultiviewFeatures::default().multiview(multiview)),
+        ..PhysicalDeviceFeatures::default()
+    };
+    let extensions = [ext::mesh_shader::NAME];
+    let feature = wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW;
+    assert!(!derived(&caps, &extensions, &mesh(false)).contains(feature));
+    assert!(derived(&caps, &extensions, &mesh(true)).contains(feature));
 }

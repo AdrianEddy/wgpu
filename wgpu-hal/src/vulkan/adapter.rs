@@ -113,6 +113,34 @@ mod ray_tracing_invocation_reorder {
     unsafe impl Send for PropertiesEXT {}
     unsafe impl Sync for PropertiesEXT {}
 }
+
+/// The features that use multiview: `SELECTIVE_MULTIVIEW` and `EXPERIMENTAL_MESH_SHADER_MULTIVIEW`
+/// extend `MULTIVIEW`, and need the `multiview` feature as it does (the latter by
+/// VUID-VkPhysicalDeviceMeshShaderFeaturesEXT-multiviewMeshShader-07032).
+const MULTIVIEW_FEATURES: wgt::Features = wgt::Features::MULTIVIEW
+    .union(wgt::Features::SELECTIVE_MULTIVIEW)
+    .union(wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW);
+
+/// The features that use mesh shaders, each of which needs what `EXPERIMENTAL_MESH_SHADER` needs.
+const MESH_SHADER_FEATURES: wgt::Features = wgt::Features::EXPERIMENTAL_MESH_SHADER
+    .union(wgt::Features::EXPERIMENTAL_MESH_SHADER_POINTS)
+    .union(wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW);
+
+/// The subgroup features, each of which needs what `SUBGROUP` needs of the device.
+const SUBGROUP_FEATURES: wgt::Features = wgt::Features::SUBGROUP
+    .union(wgt::Features::SUBGROUP_VERTEX)
+    .union(wgt::Features::SUBGROUP_BARRIER);
+
+/// The features that use acceleration structures, and need their extensions and features.
+const ACCELERATION_STRUCTURE_FEATURES: wgt::Features = wgt::Features::EXPERIMENTAL_RAY_QUERY
+    .union(RAY_TRACING_PIPELINE_FEATURES)
+    .union(wgt::Features::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS)
+    .union(wgt::Features::ACCELERATION_STRUCTURE_BINDING_ARRAY)
+    .union(wgt::Features::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN);
+
+/// The features that use ray queries: binding arrays of acceleration structures are for them.
+const RAY_QUERY_FEATURES: wgt::Features = wgt::Features::EXPERIMENTAL_RAY_QUERY
+    .union(wgt::Features::ACCELERATION_STRUCTURE_BINDING_ARRAY);
 #[expect(rustdoc::private_intra_doc_links)]
 /// Features of a [`vk::PhysicalDevice`] and its extensions.
 ///
@@ -885,7 +913,7 @@ impl PhysicalDeviceFeatures {
             {
                 Some(
                     vk::PhysicalDeviceMultiviewFeatures::default()
-                        .multiview(requested_features.contains(wgt::Features::MULTIVIEW)),
+                        .multiview(requested_features.intersects(MULTIVIEW_FEATURES)),
                 )
             } else {
                 None
@@ -1031,7 +1059,7 @@ impl PhysicalDeviceFeatures {
                 None
             },
             mesh_shader: if enabled_extensions.contains(&ext::mesh_shader::NAME) {
-                let needed = requested_features.contains(wgt::Features::EXPERIMENTAL_MESH_SHADER);
+                let needed = requested_features.intersects(MESH_SHADER_FEATURES);
                 let multiview_needed =
                     requested_features.contains(wgt::Features::EXPERIMENTAL_MESH_SHADER_MULTIVIEW);
                 Some(
@@ -1046,7 +1074,7 @@ impl PhysicalDeviceFeatures {
             maintenance4: if device_api_version >= vk::API_VERSION_1_3
                 || enabled_extensions.contains(&khr::maintenance4::NAME)
             {
-                let needed = requested_features.contains(wgt::Features::EXPERIMENTAL_MESH_SHADER);
+                let needed = requested_features.intersects(MESH_SHADER_FEATURES);
                 Some(vk::PhysicalDeviceMaintenance4Features::default().maintenance4(needed))
             } else {
                 None
@@ -1319,13 +1347,6 @@ impl PhysicalDeviceFeatures {
             F::CONSERVATIVE_RASTERIZATION,
             has_extension(ext::conservative_rasterization::NAME),
         );
-        features.set(
-            F::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
-            has_extension(khr::ray_tracing_position_fetch::NAME)
-                && self
-                    .position_fetch
-                    .is_some_and(|fetch| fetch.ray_tracing_position_fetch != 0),
-        );
 
         let descriptor_indexing = self
             .descriptor_indexing
@@ -1480,12 +1501,20 @@ impl PhysicalDeviceFeatures {
                     features.descriptor_binding_acceleration_structure_update_after_bind != 0
                 });
 
+        features.set(F::EXPERIMENTAL_RAY_QUERY, supports_ray_query);
+        // Vertex formats of acceleration structures, which need acceleration structures alone.
         features.set(
-            F::EXPERIMENTAL_RAY_QUERY
-            // Although this doesn't really require ray queries, it does not make sense to be enabled if acceleration structures
-            // aren't enabled.
-                | F::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS,
-            supports_ray_query,
+            F::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS,
+            supports_acceleration_structures,
+        );
+        // `VK_KHR_ray_tracing_position_fetch` requires `VK_KHR_acceleration_structure`.
+        features.set(
+            F::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
+            supports_acceleration_structures
+                && has_extension(khr::ray_tracing_position_fetch::NAME)
+                && self
+                    .position_fetch
+                    .is_some_and(|fetch| fetch.ray_tracing_position_fetch != 0),
         );
 
         // Binding arrays of TLAS are supported on Vulkan when ray queries are supported.
@@ -1503,11 +1532,7 @@ impl PhysicalDeviceFeatures {
                 .ray_tracing_pipeline
                 .is_some_and(|features| features.ray_tracing_pipeline != 0)
         {
-            features.insert(
-                F::EXPERIMENTAL_RAY_TRACING_PIPELINES
-                        // Same reason as for ray queries.
-                        | F::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS,
-            );
+            features.insert(F::EXPERIMENTAL_RAY_TRACING_PIPELINES);
 
             // Hit objects only exist in ray tracing pipeline stages, so this is of no use
             // without `EXPERIMENTAL_RAY_TRACING_PIPELINES`.
@@ -1551,7 +1576,8 @@ impl PhysicalDeviceFeatures {
         );
         features.set(
             F::EXPERIMENTAL_MESH_SHADER_MULTIVIEW,
-            has_extension(ext::mesh_shader::NAME)
+            mesh_shader
+                && multiview
                 && self
                     .mesh_shader
                     .is_some_and(|mesh| mesh.multiview_mesh_shader != 0),
@@ -1869,8 +1895,8 @@ impl PhysicalDeviceProperties {
             // Require `VK_KHR_storage_buffer_storage_class`
             extensions.push(khr::storage_buffer_storage_class::NAME);
 
-            // Require `VK_KHR_multiview` if the associated feature was requested
-            if requested_features.contains(wgt::Features::MULTIVIEW) {
+            // Require `VK_KHR_multiview` if a feature that uses it was requested
+            if requested_features.intersects(MULTIVIEW_FEATURES) {
                 extensions.push(khr::multiview::NAME);
             }
 
@@ -1926,9 +1952,7 @@ impl PhysicalDeviceProperties {
 
             // `SPV_EXT_mesh_shader`, `SPV_KHR_ray_tracing` and
             // `SPV_EXT_shader_invocation_reorder` all require SPIR-V 1.4.
-            if requested_features
-                .intersects(wgt::Features::EXPERIMENTAL_MESH_SHADER | RAY_TRACING_PIPELINE_FEATURES)
-            {
+            if requested_features.intersects(MESH_SHADER_FEATURES | RAY_TRACING_PIPELINE_FEATURES) {
                 extensions.push(khr::spirv_1_4::NAME);
             }
 
@@ -1947,8 +1971,8 @@ impl PhysicalDeviceProperties {
                 extensions.push(ext::image_robustness::NAME);
             }
 
-            // Require `VK_EXT_subgroup_size_control` if the associated feature was requested
-            if requested_features.contains(wgt::Features::SUBGROUP) {
+            // Require `VK_EXT_subgroup_size_control` if a subgroup feature was requested
+            if requested_features.intersects(SUBGROUP_FEATURES) {
                 extensions.push(ext::subgroup_size_control::NAME);
             }
 
@@ -2062,17 +2086,18 @@ impl PhysicalDeviceProperties {
             extensions.push(khr::draw_indirect_count::NAME);
         }
 
-        // Require `VK_KHR_deferred_host_operations`, `VK_KHR_acceleration_structure` `VK_KHR_buffer_device_address` (for acceleration structures) if either `EXPERIMENTAL_RAY_QUERY` or `EXPERIMENTAL_RAY_TRACING_PIPELINES` were requested.
-        if requested_features
-            .intersects(wgt::Features::EXPERIMENTAL_RAY_QUERY | RAY_TRACING_PIPELINE_FEATURES)
-        {
+        // Require `VK_KHR_deferred_host_operations`, `VK_KHR_acceleration_structure` and
+        // `VK_KHR_buffer_device_address` if a feature that uses acceleration structures was
+        // requested. `VK_KHR_ray_tracing_position_fetch` requires `VK_KHR_acceleration_structure`
+        // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+        if requested_features.intersects(ACCELERATION_STRUCTURE_FEATURES) {
             extensions.push(khr::deferred_host_operations::NAME);
             extensions.push(khr::acceleration_structure::NAME);
             extensions.push(khr::buffer_device_address::NAME);
         }
 
-        // Require `VK_KHR_ray_query` if `EXPERIMENTAL_RAY_QUERY` was requested
-        if requested_features.contains(wgt::Features::EXPERIMENTAL_RAY_QUERY) {
+        // Require `VK_KHR_ray_query` if a feature that uses ray queries was requested
+        if requested_features.intersects(RAY_QUERY_FEATURES) {
             extensions.push(khr::ray_query::NAME);
         }
 
@@ -2123,7 +2148,7 @@ impl PhysicalDeviceProperties {
             extensions.push(ext::shader_atomic_float::NAME);
         }
 
-        if requested_features.contains(wgt::Features::EXPERIMENTAL_MESH_SHADER) {
+        if requested_features.intersects(MESH_SHADER_FEATURES) {
             extensions.push(ext::mesh_shader::NAME);
         }
 
