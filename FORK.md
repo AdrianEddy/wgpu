@@ -83,7 +83,23 @@ no release has, so it has no entry of its own.
 | 51 | `cf1981c2b` | feat(hal,core)!: give each device its own downlevel capabilities | The owner's decision "Per-device downlevel caps" (2026-11-15): `hal::Device::downlevel_capabilities` (breaking), wgpu-core validates each device against its own, and `wgpu::Device::downlevel_capabilities` reports them (`DeviceInterface`, breaking). A Vulkan device without one of the seven core features behind downlevel flags opens without its flag instead of being refused; wgpu-hal's own devices enable `fullDrawIndexUint32` where offered (review 5); a device has no flag its adapter lacks, in wgpu-hal and in wgpu-core. Unit and device tests fail with the adapter's capabilities, device tests with the refusal. | upstream carries an equivalent |
 | 52 | `e2ef9faba` | fix(core): refuse cube array views without CUBE_ARRAY_TEXTURES | Found for that decision: wgpu-core validated no view against the flag, so wgpu-hal created a cube array view on a device without `imageCubeArray` (`VUID-VkImageViewCreateInfo-viewType-01004`). Upstream has the same gap for adapters without the flag. Device test fails without it. | a release contains it |
 | 53 | `7279f1fc9` | feat(vulkan)!: refuse features a raw device was not created with | The owner's decision "Validate, mapping-aware": `device_from_raw` refuses a requested feature that the device's extensions and features do not give, naming it (breaking); `Adapter::device_features` gives those. wgpu-hal's own opening is checked before `vkCreateDevice`, an error rather than a panic, and a randomized round-trip search over partial adapters, against the structures that the adapter queries, keeps it passing. Unit and device tests fail without it. | upstream carries an equivalent |
-| 54 | (this commit) | docs: FORK.md: describe per-device downlevel capabilities | This file | the branch is dropped |
+| 54 | `b24e47dfa` | docs: FORK.md: describe per-device downlevel capabilities | This file | the branch is dropped |
+| 55 | `47fcb8c07` | fix(vulkan): give colour target holes the first target's blend state | Review 5 item 1: without `independentBlend`, every element of `pAttachments` must be identical, unused ones included (`VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605`), but a hole had the default state; since 51, every device created with FFmpeg's features reached it. A hole, whose writes are discarded, now takes the first target's state, on every device. Upstream has the same gap for adapters without the feature. Unit and device tests fail without it: the validation layer reports the differing attachments on every GPU. | a release contains it |
+| 56 | `1d9cc0991` | feat(hal,core)!: validate a hal device against what it was opened with | Review 5 item 3: wgpu-core took a hal device's features from the `DeviceDescriptor`, which nothing checked, so a device opened without features could be given line polygon mode. `hal::Device::features` (breaking) gives what a device was opened with, on every backend; `create_device_and_queue_from_hal` refuses a descriptor feature outside it, by name (`RequestDeviceError::FeaturesNotOpened`), and validates the rest as `request_device` does, but not against the adapter's features, which a raw device may exceed. Its limits likewise: `hal::Device::limits` (breaking) gives those a device was opened with, and the descriptor's limits are checked against them, not the adapter's, since a device created outside wgpu may have larger ones (cubecl-wgpu asks for `max_storage_buffer_binding_size` `u64::MAX` where the GPU has `shader64BitIndexing`). Validation tests fail without it. | upstream carries an equivalent |
+| 57 | `67a063f3c` | fix(vulkan): query promoted extensions' feature structures by version | Review 5 item 9 (E3): an adapter queried the structures of six promoted extensions only where the device listed the extension, while a device's features follow them by version too. A Vulkan 1.3 device with `textureCompressionASTC_HDR` that does not list its extension now offers `TEXTURE_COMPRESSION_ASTC_HDR`, and wgpu-hal's own opening chains it by version. Unit test fails without it. | a release contains it |
+| 58 | `bdd4f745a` | fix(vulkan): leave a device with its caller when device_from_raw fails | Review 5 item 7: `device_from_raw`'s errors left the device in one of three states, and a caller could not tell whether to destroy it. Every step that can fail now comes before the take: on an error, the device was not taken. Its device test checks a refused queue family, and passes without it too: no real device makes the moved steps fail. | a release contains it |
+| 59 | `10abc8b8e` | fix(vulkan): 16- and 64-bit subgroup operations need extended types | Review 5 item 8: Naga lets subgroup arithmetic take 16- and 64-bit operands, which needs `shaderSubgroupExtendedTypes` (`VUID-RuntimeSpirv-None-06275`), never tracked or enabled. A request of a subgroup feature with one of those types enables it, and an adapter with such a type but without it offers no subgroup feature, as Dawn offers no `subgroups` with `shader-f16` without it. Unit test fails without it. | a release contains it |
+| 60 | `3bec5363b` | fix(vulkan): subgroups in task and mesh shaders need those stages | Review 5 item 10 (N4): Naga allows subgroup operations in task and mesh shaders with `SUBGROUP` (`VUID-RuntimeSpirv-None-06343`); on a device with mesh shaders, the subgroup features now need those stages. The rule is in the derivation, beside 59's: Naga's capabilities stay aligned with wgpu's features (upstream #8207). Unit test fails without it. | a release contains it |
+| 61 | `23d5c09c2` | fix(vulkan): enable the portability subset wherever a device lists it | Review 5 item 10 (E5, N3): the subset's restrictions are the implementation's, whose devices must enable it (`VUID-VkDeviceCreateInfo-pProperties-04451`), and wgpu-hal enabled it only on Apple targets; it now enables it wherever it is listed. `POLYGON_MODE_POINT` there needs `pointPolygons` (`VUID-VkPipelineRasterizationStateCreateInfo-pointPolygons-04458`), which MoltenVK does not have. Unit tests fail without it; no portability implementation here. | a release contains it |
+| 62 | `a39b2d2cf` | fix(vulkan): 64-bit atomic minimum and maximum need only buffer atomics | Review 5 item 10 (N5): `SHADER_INT64_ATOMIC_MIN_MAX`, storage-buffer only, also needed and enabled `shaderSharedInt64Atomics`; only `SHADER_INT64_ATOMIC_ALL_OPS` does now (`VUID-RuntimeSpirv-None-06278`, `-06279`). Unit test fails without it. | a release contains it |
+| 63 | `f5a56a93f` | fix(vulkan): enable extension dependencies below Vulkan 1.2 | Review 5 item 10 (N6): ray queries, acceleration structures and the two-plane formats enabled extensions without those they require (`VUID-vkCreateDevice-ppEnabledExtensionNames-01387`), and the features did not need them. Unit test fails without it; synthetic devices only: none here is older than Vulkan 1.3. | a release contains it |
+| 64 | `2f5abb931` | fix(vulkan): gate ray tracing's debug printing on the device's version | Review 5 item 12 (E6): Naga's ray-tracing debug printing declares `SPV_KHR_non_semantic_info`, which needs Vulkan 1.3 or its extension on the device (`VUID-VkShaderModuleCreateInfo-pCode-08742`), but was gated on the loader's version. Unit test of the rule, without a device: none here is older than Vulkan 1.3. | a release contains it |
+| 65 | `eef1bc6de` | fix(vulkan): split indirect mesh task draws without multiDrawIndirect | Review 5 item 12 (H5): `draw_mesh_tasks_indirect` gave several draws to one command without `multiDrawIndirect` (`VUID-vkCmdDrawMeshTasksIndirectEXT-drawCount-02718`, `-02719`), reachable from a device created with mesh shaders but without it. The three indirect draws now split through one function. No test: every device here with mesh shaders has `multiDrawIndirect`. | a release contains it |
+| 66 | `2591e3546` | fix(vulkan): don't rely on maintenance5 for depth-stencil swizzles | Review 5 item 12 (H2): a `One` swizzle on a depth-stencil view relied on `depthStencilSwizzleOneSupport`, which `maintenance5` brings and wgpu-hal never enables. Every such swizzle now takes the conversion to `A`, which samples the same. No test: nothing a test can see changes. | a release contains it |
+| 67 | `8fb87e180` | fix(vulkan): keep the RADV memory budget workaround for raw devices | Review 5 item 12 (H3): a raw RADV device that enabled `VK_EXT_memory_budget`, which wgpu-hal hides there, was queried for budgets; they need the physical device's offer as well now. Unit test fails without it. | a release contains it |
+| 68 | `8413e2dc3` | fix(vulkan): refuse a swapchain the device cannot create or present | Review 5 item 12 (H4): a device created without `VK_KHR_swapchain` panicked in `create_swapchain`, and surface support was asked of queue family 0 (`VUID-vkQueuePresentKHR-pSwapchains-01292`). Both are refused with a `SurfaceError`, asking of the device's own family. Device test fails without it on RADV, the only driver here with `VK_EXT_headless_surface`: the old path called the unloaded swapchain functions and panicked. | a release contains it |
+| 69 | `ee5022307` | fix(naga,vulkan): declare binding-array indexing capabilities in SPIR-V | Review 5 item 5, the lane's decision 4: Naga's SPIR-V declared no `*ArrayDynamicIndexing` or `*ArrayNonUniformIndexing` capability (`VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127` to `-10130`, `VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134` to `-10137`), and `arrayLength` of a non-uniform element lacked its `NonUniform` decoration. Naga declares them where it indexes so, and wgpu-hal allows those of the features the device was created with, which 47 enables. Uniform buffer arrays declare theirs only where allowed (Residual behaviour). Two SPIR-V snapshots change. Naga tests fail without it. | a release contains it |
+| 70 | (this commit) | docs: FORK.md: describe the fixes for devices created elsewhere | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after it (their tests use
 it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25 as two docs PRs (its row); 26 and 27 with the PRs
@@ -121,6 +137,13 @@ derivation it reuses; upstream it goes with 43, as one change (above). 52 alone:
 only 51 makes it reachable on a device whose adapter has the flag. 53 after 46 to 51: without 46 to 50, wgpu-hal's own
 opening would refuse requests that it cannot satisfy by construction.
 
+Review 5's fixes, 55 to 69: each alone, except that 56 breaks the hal API and goes with 51's
+`hal::Device::downlevel_capabilities`; 58 goes after 43, whose error paths it orders; 60 after 59, beside whose rule
+it sits; and 69 with 47's enable half, without which every storage-texture binding array would declare a capability
+that upstream's devices never enable (`VUID-VkShaderModuleCreateInfo-pCode-08740`). 61's two changes are one: keying
+the subset on the implementation alone would make wgpu-hal's own opening on a non-Apple subset implementation refuse
+the requests it offers.
+
 ## The future of lazy adapter selection
 
 The owner's decision 1 of review 4: keep 35 until gfx-rs/wgpu#10775 is released. That PR, open when review 4 read
@@ -139,7 +162,7 @@ Either way, 35's core restructuring and 38's early stop stay, as a core-only cha
 `hal::Instance::request_adapter`: with `Backends::all()` and no LUID, a Vulkan adapter of the best rank still means
 that DX12 and GL are never asked.
 
-## Devices created elsewhere (commits 42, 43 and 45 to 53)
+## Devices created elsewhere (commits 42, 43, 45 to 53 and 55 to 69)
 
 `Adapter::device_from_raw` takes the extensions and the features that the device was created with, and wgpu-hal
 takes its paths from them, never from what the adapter offers (the owner's ruling on the consumers' decision 11):
@@ -174,6 +197,14 @@ takes its paths from them, never from what the adapter offers (the owner's rulin
   with the derivation that gives an adapter's offer, so that a caller requests only those.
   `CORE_FEATURES_AND_LIMITS` follows the device's downlevel capabilities, which a device without one of the seven
   lacks. wgpu-hal's own opening checks the device it would create before creating it, and fails with an error.
+- **The descriptor's features** are checked too (commit 56): `create_device_from_hal` refuses a feature of its
+  `DeviceDescriptor` that the hal device was not opened with (`hal::Device::features`), by name, and validates the
+  rest as `request_device` does, but not against the adapter's features: a raw device may have features its adapter
+  does not offer, such as timestamps on a queue family other than the one the adapter's offer is taken from.
+- **On an error, `device_from_raw` has not taken the device** (commit 58): the caller still owns it, and its drop
+  callback is dropped uncalled.
+- **A surface** is configured only on a device with `VK_KHR_swapchain` whose queue family can present to it (commit
+  68); a device created elsewhere without either gets a `SurfaceError`.
 - `fullDrawIndexUint32`, behind `DownlevelFlags::FULL_DRAW_INDEX_UINT32`, is enabled on wgpu-hal's own devices
   where offered, and a device has the flag only with it (the owner's decision on review 5): "If a feature is
   supported by a physical device, it must be enabled when creating a VkDevice in order to use its associated
@@ -198,26 +229,35 @@ reads exactly these, and wgpu-hal enables them for a request:
   `ACCELERATION_STRUCTURE_BINDING_ARRAY`: what ray queries need, with
   `descriptorBindingAccelerationStructureUpdateAfterBind`. `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS`: the
   first three extensions and features. `EXPERIMENTAL_RAY_HIT_VERTEX_RETURN`: those, with
-  `VK_KHR_ray_tracing_position_fetch` and `rayTracingPositionFetch`.
+  `VK_KHR_ray_tracing_position_fetch` and `rayTracingPositionFetch`. Before Vulkan 1.2, acceleration structures also
+  need Vulkan 1.1 and `VK_EXT_descriptor_indexing`, and ray queries `VK_KHR_spirv_1_4` with
+  `VK_KHR_shader_float_controls` (commit 63).
 - `EXPERIMENTAL_MESH_SHADER` and `EXPERIMENTAL_MESH_SHADER_POINTS`: `VK_EXT_mesh_shader`, `meshShader` and
   `taskShader`, and `VK_KHR_spirv_1_4` before Vulkan 1.2. `EXPERIMENTAL_MESH_SHADER_MULTIVIEW`: those, with
   `multiviewMeshShader` and `multiview`.
 - `MULTIVIEW` and `SELECTIVE_MULTIVIEW`: `multiview`, and `VK_KHR_multiview` before Vulkan 1.1.
 - `SUBGROUP`, `SUBGROUP_VERTEX` and `SUBGROUP_BARRIER`: `subgroupSizeControl`, and
   `VK_EXT_subgroup_size_control` before Vulkan 1.3, beyond the subgroup operations and stages the physical device
-  supports.
+  supports; on a device with `SHADER_F16`, `SHADER_I16` or `SHADER_INT64`, `shaderSubgroupExtendedTypes`, and
+  `VK_KHR_shader_subgroup_extended_types` before Vulkan 1.2 (commit 59); on a device with mesh shaders, the task and
+  mesh subgroup stages (commit 60).
 - `EXPERIMENTAL_COOPERATIVE_MATRIX`: `VK_KHR_cooperative_matrix` and `cooperativeMatrix`, with
   `vulkanMemoryModel` and `vulkanMemoryModelDeviceScope`, and `VK_KHR_vulkan_memory_model` before Vulkan 1.2.
-- `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010`: Vulkan 1.1 or `VK_KHR_sampler_ycbcr_conversion`, and no
+- `TEXTURE_FORMAT_NV12` and `TEXTURE_FORMAT_P010`: Vulkan 1.1, or `VK_KHR_sampler_ycbcr_conversion` with
+  `VK_KHR_bind_memory2` and `VK_KHR_get_memory_requirements2`, which it requires (commit 63), and no
   `samplerYcbcrConversion`, which only conversion objects need.
 - `TEXTURE_BINDING_ARRAY` and `STORAGE_RESOURCE_BINDING_ARRAY`: the descriptor indexing features wgpu-hal uses
   for every binding array, and the dynamic indexing of sampled images, and of storage buffers and storage images.
   `BUFFER_BINDING_ARRAY`: the descriptor indexing features; it enables uniform buffers' dynamic indexing where
   offered, and does not need it (residual behaviour).
-- `TEXTURE_COMPONENT_SWIZZLE` and `MULTISAMPLE_ARRAY`: on a device with `VK_KHR_portability_subset`, its
-  `imageViewFormatSwizzle` and `multisampleArrayImage`.
+- `TEXTURE_COMPONENT_SWIZZLE` and `MULTISAMPLE_ARRAY`: on an implementation that lists
+  `VK_KHR_portability_subset`, which wgpu-hal's devices enable there (commit 61), its `imageViewFormatSwizzle` and
+  `multisampleArrayImage`; `POLYGON_MODE_POINT` there, its `pointPolygons`.
+- `SHADER_INT64_ATOMIC_MIN_MAX`: `shaderBufferInt64Atomics`; `SHADER_INT64_ATOMIC_ALL_OPS`: with
+  `shaderSharedInt64Atomics` (commit 62); both with `VK_KHR_shader_atomic_int64` before Vulkan 1.2.
 - The features promoted to core (16-bit storage, `shaderFloat16`, 64-bit atomics, descriptor indexing,
-  ASTC HDR): their extension before the promotion.
+  ASTC HDR): their extension before the promotion. An adapter queries their structures by version as well (commit
+  57).
 
 A request enables five things beyond need, which the derivation does not require: `maintenance4` with the mesh
 shader features (its only gate is the `LocalSizeId` execution mode, VUID-RuntimeSpirv-LocalSizeId-06434, which
@@ -369,7 +409,11 @@ polyfills it), `shaderUniformBufferArrayDynamicIndexing` with buffer arrays wher
 - **Offers that narrow** (commits 47 and 50, kept by the owner on review 5): an adapter without the dynamic
   indexing of sampled images no longer offers texture arrays, one without that of storage buffers and storage
   images no longer offers storage resource arrays, and one without 3D images of every BC format no longer offers
-  `TEXTURE_COMPRESSION_BC_SLICED_3D`. No adapter here changes (Tests not run here).
+  `TEXTURE_COMPRESSION_BC_SLICED_3D`. Review 5's 59 and 60 narrow the subgroup features: on an adapter with 16- or
+  64-bit shader types but without `shaderSubgroupExtendedTypes`, and on one with mesh shaders but without the task
+  and mesh subgroup stages; 57 and 62 widen `TEXTURE_COMPRESSION_ASTC_HDR` and `SHADER_INT64_ATOMIC_MIN_MAX`. No
+  adapter here changes: `wgpu-info` at the tip offers what it offers at `e7c9c5d98`, on every adapter here and on
+  eddy2lnx.
 - **Uniform-buffer and dynamic-offset binding arrays stay accepted** as at `e7c9c5d98`, the owner's ruling on
   review 5 ("Keep today's leniency"): wgpu-core lets a uniform buffer array through with `BUFFER_BINDING_ARRAY`
   alone, and counts no array binding as a uniform or dynamic-offset buffer, and wgpu-hal marks every array
@@ -380,10 +424,13 @@ polyfills it), `shaderUniformBufferArrayDynamicIndexing` with buffer arrays wher
   `UPDATE_AFTER_BIND`, which no feature allows). wgpu's docs contradict each other here: `BUFFER_BINDING_ARRAY`'s
   shows a uniform buffer array, while `UNIFORM_BUFFER_BINDING_ARRAYS` ("Supported platforms: None") and
   `BindGroupLayoutEntry::count` say uniform and dynamic-offset buffer arrays are not supported.
-- **Naga's SPIR-V declares no `*ArrayDynamicIndexing` or `*ArrayNonUniformIndexing` capability**, only
-  `ShaderNonUniform`, though `VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127` to `-10130` and
-  `VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134` to `-10137` key on the declared capability. Found for
-  commit 47, not changed: Naga's, outside these commits.
+- **Naga declares the binding-array indexing capabilities** (commit 69), and wgpu-hal allows those of the
+  features the device was created with. Uniform buffer arrays are the exception, by the owner's ruling on review 5:
+  on a device without uniform buffers' dynamic or non-uniform indexing, such an array indexed so is written without
+  the capability, against `VUID-StandaloneSpirv-UniformBufferArrayDynamicIndexing-10127` and
+  `VUID-RuntimeSpirv-UniformBufferArrayNonUniformIndexing-10134`, part of the known gap above. Other users of
+  `naga::back::spv::Options::capabilities` must allow the new capabilities, or writing fails with
+  `MissingCapabilities`.
 - **Lazy adapter selection** (commits 35, 38 and 39):
   - For `LowPower` and `HighPerformance`, DX12 follows DXGI's preference order, so `request_adapter` need not
     return `request_adapters`' first adapter: it can return another adapter of the same device type, or, where a
@@ -523,6 +570,14 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
 - **`device_from_raw` refuses unsupported requested features** (commit 53, `BREAKING:`): a caller that passed its
   adapter's features for a device created elsewhere is refused, and requests a subset of
   `Adapter::device_features` instead. #9980's validated alternatives would carry this check.
+- **`hal::Device::features`** (commit 56, `BREAKING:`): every hal backend reports the features a device was opened
+  with, and `create_device_from_hal` refuses others with the new `RequestDeviceError::FeaturesNotOpened`.
+- **The subgroup rules** (commits 59 and 60) are in the derivation, not in Naga: upstream #8207 aligned Naga's
+  capabilities with wgpu's features, and Dawn likewise offers no `subgroups` with `shader-f16` on a device without
+  `shaderSubgroupExtendedTypes`.
+- **Naga's capabilities** (commit 69) change `naga`'s output: a user that restricts `spv::Options::capabilities`
+  must allow the indexing capabilities. Uniform buffer arrays written without theirs are a leniency the owner chose
+  to keep (review 5), which upstream may not want.
 - **The derivation's rules** (commits 45 to 50) are the specification's, cited in each commit. The two places
   where the owner decided on review 5: wgpu-hal's own devices enable `fullDrawIndexUint32` (decision 1), and a
   sliced 3D compression request enables its family's feature, as WebGPU's feature dependencies imply.
@@ -549,6 +604,11 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
     `Suboptimal`). The test configures 256×256, then 512×512, on an invisible window that keeps winit's 800×600,
     and takes only `Success` from the first acquire; Mesa's X11 WSI marks such a swapchain `SUBOPTIMAL` at creation
     by design. This is `trunk`'s test, not the branch: noted here only (the owner, 2026-11-13).
+- Review 5's paths that no device here has (rows 61 and 63 to 66): a portability implementation, a device older
+  than Vulkan 1.3, one with mesh shaders but without `multiDrawIndirect`. Their rules have unit tests where a rule can
+  be tested without a device. 68's device test runs on RADV only, the one driver here with `VK_EXT_headless_surface`.
+  Naga's SPIR-V snapshots were regenerated with the `spirv-cross` of Vulkan SDK 1.4.363, where CI pins 1.4.357: one
+  GLSL snapshot that 1.4.363 writes differently, and that the series does not change, was left as it was.
 - Commit 7 (Vulkan discard) is tested only by commit 26's `discarded_images`.
 - Commit 24 (Metal) and commit 21's `copy_external_image_to_texture` (WebGL) were type-checked with Rust 1.99.0
   for `aarch64-apple-ios` and `wasm32-unknown-unknown`; nothing ran on those platforms.
