@@ -763,63 +763,74 @@ impl PhysicalDeviceFeatures {
 
         // vk::PhysicalDeviceFeatures is a struct composed of Bool32's while
         // Features is a bitfield so we need to map everything manually
-        let mut core = vk::PhysicalDeviceFeatures::default()
-            .robust_buffer_access(private_caps.robust_buffer_access)
-            .draw_indirect_first_instance(
-                requested_features.contains(wgt::Features::INDIRECT_FIRST_INSTANCE),
-            )
-            //.dual_src_blend(requested_features.contains(wgt::Features::DUAL_SRC_BLENDING))
-            .multi_draw_indirect(phd_features.core.multi_draw_indirect != 0)
-            .fill_mode_non_solid(
-                requested_features.intersects(
+        let mut core =
+            vk::PhysicalDeviceFeatures::default()
+                .robust_buffer_access(private_caps.robust_buffer_access)
+                .draw_indirect_first_instance(
+                    requested_features.contains(wgt::Features::INDIRECT_FIRST_INSTANCE),
+                )
+                //.dual_src_blend(requested_features.contains(wgt::Features::DUAL_SRC_BLENDING))
+                .multi_draw_indirect(phd_features.core.multi_draw_indirect != 0)
+                .fill_mode_non_solid(requested_features.intersects(
                     wgt::Features::POLYGON_MODE_LINE | wgt::Features::POLYGON_MODE_POINT,
-                ),
-            )
-            //.depth_bounds(requested_features.contains(wgt::Features::DEPTH_BOUNDS))
-            //.alpha_to_one(requested_features.contains(wgt::Features::ALPHA_TO_ONE))
-            //.multi_viewport(requested_features.contains(wgt::Features::MULTI_VIEWPORTS))
-            .texture_compression_etc2(
-                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2),
-            )
-            .texture_compression_astc_ldr(
-                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC),
-            )
-            .texture_compression_bc(
-                requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
-                // BC provides formats for Sliced 3D
-            )
-            //.occlusion_query_precise(requested_features.contains(wgt::Features::PRECISE_OCCLUSION_QUERY))
-            .pipeline_statistics_query(
-                requested_features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY),
-            )
-            .vertex_pipeline_stores_and_atomics(
-                requested_features.contains(wgt::Features::VERTEX_WRITABLE_STORAGE),
-            )
-            //.shader_image_gather_extended(
-            //.shader_storage_image_extended_formats(
-            .shader_uniform_buffer_array_dynamic_indexing(
-                requested_features.contains(wgt::Features::BUFFER_BINDING_ARRAY),
-            )
-            .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
-                wgt::Features::BUFFER_BINDING_ARRAY | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
-            ))
-            .shader_sampled_image_array_dynamic_indexing(
-                requested_features.contains(wgt::Features::TEXTURE_BINDING_ARRAY),
-            )
-            .shader_storage_buffer_array_dynamic_indexing(requested_features.contains(
-                wgt::Features::TEXTURE_BINDING_ARRAY
-                    | wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
-            ))
-            //.shader_storage_image_array_dynamic_indexing(
-            .shader_clip_distance(requested_features.contains(wgt::Features::CLIP_DISTANCES))
-            //.shader_cull_distance(requested_features.contains(wgt::Features::SHADER_CULL_DISTANCE))
-            .shader_float64(requested_features.contains(wgt::Features::SHADER_F64))
-            .shader_int64(requested_features.contains(wgt::Features::SHADER_INT64))
-            .shader_int16(requested_features.contains(wgt::Features::SHADER_I16))
-            //.shader_resource_residency(requested_features.contains(wgt::Features::SHADER_RESOURCE_RESIDENCY))
-            .geometry_shader(requested_features.contains(wgt::Features::PRIMITIVE_INDEX))
-            .depth_clamp(requested_features.contains(wgt::Features::DEPTH_CLIP_CONTROL))
-            .dual_src_blend(requested_features.contains(wgt::Features::DUAL_SOURCE_BLENDING));
+                ))
+                //.depth_bounds(requested_features.contains(wgt::Features::DEPTH_BOUNDS))
+                //.alpha_to_one(requested_features.contains(wgt::Features::ALPHA_TO_ONE))
+                //.multi_viewport(requested_features.contains(wgt::Features::MULTI_VIEWPORTS))
+                .texture_compression_etc2(
+                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ETC2),
+                )
+                .texture_compression_astc_ldr(
+                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_ASTC),
+                )
+                .texture_compression_bc(
+                    requested_features.contains(wgt::Features::TEXTURE_COMPRESSION_BC),
+                    // BC provides formats for Sliced 3D
+                )
+                //.occlusion_query_precise(requested_features.contains(wgt::Features::PRECISE_OCCLUSION_QUERY))
+                .pipeline_statistics_query(
+                    requested_features.contains(wgt::Features::PIPELINE_STATISTICS_QUERY),
+                )
+                .vertex_pipeline_stores_and_atomics(
+                    requested_features.contains(wgt::Features::VERTEX_WRITABLE_STORAGE),
+                )
+                //.shader_image_gather_extended(
+                //.shader_storage_image_extended_formats(
+                // Binding arrays are indexed by dynamically uniform values. Without the dynamic
+                // indexing feature of a descriptor type, arrays of it "must be indexed only by
+                // constant integral expressions" (the features' text; the capabilities they allow,
+                // VUID-StandaloneSpirv-UniformBufferArrayDynamicIndexing-10127,
+                // -SampledImageArrayDynamicIndexing-10128, -StorageBufferArrayDynamicIndexing-10129
+                // and -StorageImageArrayDynamicIndexing-10130): sampled images for texture arrays,
+                // storage buffers and storage images for storage resource arrays. Uniform buffer
+                // arrays, which wgpu-core lets through with buffer arrays alone, have the dynamic
+                // indexing of uniform buffers where the device offers it; buffer arrays do not need
+                // it, so that every buffer array that wgpu-core accepted before stays accepted.
+                .shader_uniform_buffer_array_dynamic_indexing(
+                    requested_features.contains(wgt::Features::BUFFER_BINDING_ARRAY)
+                        && phd_features
+                            .core
+                            .shader_uniform_buffer_array_dynamic_indexing
+                            != 0,
+                )
+                .shader_sampled_image_array_dynamic_indexing(
+                    requested_features.contains(wgt::Features::TEXTURE_BINDING_ARRAY),
+                )
+                .shader_storage_buffer_array_dynamic_indexing(
+                    requested_features.contains(wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY),
+                )
+                .shader_storage_image_array_dynamic_indexing(
+                    requested_features.contains(wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY),
+                )
+                .shader_clip_distance(requested_features.contains(wgt::Features::CLIP_DISTANCES))
+                //.shader_cull_distance(requested_features.contains(wgt::Features::SHADER_CULL_DISTANCE))
+                .shader_float64(requested_features.contains(wgt::Features::SHADER_F64))
+                .shader_int64(requested_features.contains(wgt::Features::SHADER_INT64))
+                .shader_int16(requested_features.contains(wgt::Features::SHADER_I16))
+                //.shader_resource_residency(requested_features.contains(wgt::Features::SHADER_RESOURCE_RESIDENCY))
+                .geometry_shader(requested_features.contains(wgt::Features::PRIMITIVE_INDEX))
+                .depth_clamp(requested_features.contains(wgt::Features::DEPTH_CLIP_CONTROL))
+                .dual_src_blend(requested_features.contains(wgt::Features::DUAL_SOURCE_BLENDING));
         for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
             *feature(&mut core) = downlevel_flags.contains(flag).into();
         }
@@ -1339,13 +1350,27 @@ impl PhysicalDeviceFeatures {
                     && descriptor_indexing.shader_storage_buffer_array_non_uniform_indexing != 0
                     && descriptor_indexing.descriptor_binding_storage_buffer_update_after_bind != 0;
 
-            let descriptor_indexing_features = F::BUFFER_BINDING_ARRAY
-                | F::TEXTURE_BINDING_ARRAY
-                | F::STORAGE_RESOURCE_BINDING_ARRAY
-                | F::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-                | F::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING;
-
-            features.set(descriptor_indexing_features, supports_descriptor_indexing);
+            features.set(
+                F::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+                    | F::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING,
+                supports_descriptor_indexing,
+            );
+            // Texture and storage resource arrays also need the dynamic indexing of the
+            // descriptors in them. Buffer arrays do not need uniform buffers' (it is enabled where
+            // offered), so that no uniform or dynamic-offset buffer array that wgpu-core accepted
+            // is refused.
+            features.set(F::BUFFER_BINDING_ARRAY, supports_descriptor_indexing);
+            features.set(
+                F::TEXTURE_BINDING_ARRAY,
+                supports_descriptor_indexing
+                    && self.core.shader_sampled_image_array_dynamic_indexing != 0,
+            );
+            features.set(
+                F::STORAGE_RESOURCE_BINDING_ARRAY,
+                supports_descriptor_indexing
+                    && self.core.shader_storage_buffer_array_dynamic_indexing != 0
+                    && self.core.shader_storage_image_array_dynamic_indexing != 0,
+            );
 
             let supports_partially_bound =
                 descriptor_indexing.descriptor_binding_partially_bound != 0;

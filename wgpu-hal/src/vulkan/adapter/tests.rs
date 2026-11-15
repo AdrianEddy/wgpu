@@ -899,3 +899,116 @@ fn device_addresses_need_the_feature_as_well_as_the_extension() {
     assert!(!uses_device_addresses(&extension, &off));
     assert!(!uses_device_addresses(&[], &on));
 }
+
+/// The features that wgpu-hal enables to open a device with `requested` on the physical device
+/// `caps`, which offers `offered`, with the extensions that `caps` lists of those it requires.
+/// Returns them with those extensions.
+fn opened(
+    caps: &PhysicalDeviceProperties,
+    offered: &PhysicalDeviceFeatures,
+    requested: wgt::Features,
+) -> (alloc::vec::Vec<&'static CStr>, PhysicalDeviceFeatures) {
+    let extensions = caps
+        .get_required_extensions(requested)
+        .into_iter()
+        .filter(|&extension| caps.supports_extension(extension))
+        .collect::<alloc::vec::Vec<_>>();
+    let enabled = PhysicalDeviceFeatures::from_extensions_and_requested_features(
+        caps,
+        offered,
+        &extensions,
+        requested,
+        wgt::DownlevelFlags::empty(),
+        &PrivateCapabilities::default(),
+    );
+    (extensions, enabled)
+}
+
+/// The binding-array features.
+const BINDING_ARRAYS: [wgt::Features; 5] = [
+    wgt::Features::BUFFER_BINDING_ARRAY,
+    wgt::Features::TEXTURE_BINDING_ARRAY,
+    wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY,
+    wgt::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING,
+    wgt::Features::STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING,
+];
+
+/// Storage resource arrays enable the dynamic indexing of storage buffers and of storage images,
+/// with buffer arrays, texture arrays or both. Before, the storage image one was never enabled,
+/// and a second call for storage buffers, keyed on texture arrays, overwrote the first, so that
+/// storage buffer arrays without texture arrays were indexed without
+/// `shaderStorageBufferArrayDynamicIndexing`.
+#[test]
+fn storage_resource_arrays_enable_storage_dynamic_indexing() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let storage = wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY;
+    for others in [
+        wgt::Features::BUFFER_BINDING_ARRAY,
+        wgt::Features::TEXTURE_BINDING_ARRAY,
+        wgt::Features::BUFFER_BINDING_ARRAY | wgt::Features::TEXTURE_BINDING_ARRAY,
+    ] {
+        let (_, enabled) = opened(&caps, &PhysicalDeviceFeatures::default(), storage | others);
+        assert_eq!(
+            (
+                enabled.core.shader_storage_buffer_array_dynamic_indexing,
+                enabled.core.shader_storage_image_array_dynamic_indexing,
+            ),
+            (vk::TRUE, vk::TRUE),
+            "{others:?}"
+        );
+    }
+}
+
+/// Texture and storage resource arrays need the dynamic indexing of the descriptors in their
+/// arrays, and opening a device with one alone gives it. Before, a device with the descriptor
+/// indexing features had every binding-array feature, whatever dynamic indexing it lacked.
+#[test]
+fn binding_arrays_need_dynamic_indexing() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    for feature in BINDING_ARRAYS {
+        let (extensions, enabled) = opened(&caps, &PhysicalDeviceFeatures::default(), feature);
+        assert!(
+            derived(&caps, &extensions, &enabled).contains(feature),
+            "{feature:?} alone"
+        );
+    }
+    let (extensions, mut enabled) = opened(
+        &caps,
+        &PhysicalDeviceFeatures::default(),
+        wgt::Features::all(),
+    );
+    enabled.core.shader_storage_image_array_dynamic_indexing = vk::FALSE;
+    let features = derived(&caps, &extensions, &enabled);
+    assert!(!features.contains(wgt::Features::STORAGE_RESOURCE_BINDING_ARRAY));
+    assert!(features.contains(wgt::Features::TEXTURE_BINDING_ARRAY));
+    enabled.core.shader_sampled_image_array_dynamic_indexing = vk::FALSE;
+    let features = derived(&caps, &extensions, &enabled);
+    assert!(!features.contains(wgt::Features::TEXTURE_BINDING_ARRAY));
+}
+
+/// Buffer arrays need no dynamic indexing of uniform buffers: a device with the descriptor
+/// indexing features has them without `shaderUniformBufferArrayDynamicIndexing`, so
+/// no uniform or dynamic-offset buffer array that wgpu-core accepts is refused. Opening one enables
+/// that feature where the adapter offers it, and only there.
+#[test]
+fn buffer_arrays_do_not_need_uniform_dynamic_indexing() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let buffer = wgt::Features::BUFFER_BINDING_ARRAY;
+    for offered in [false, true] {
+        let mut offers = PhysicalDeviceFeatures::default();
+        offers.core.shader_uniform_buffer_array_dynamic_indexing = offered.into();
+        let (extensions, enabled) = opened(&caps, &offers, buffer);
+        assert_eq!(
+            enabled.core.shader_uniform_buffer_array_dynamic_indexing,
+            vk::Bool32::from(offered),
+            "offered: {offered}"
+        );
+        assert!(derived(&caps, &extensions, &enabled).contains(buffer));
+        let mut without = enabled;
+        without.core.shader_uniform_buffer_array_dynamic_indexing = vk::FALSE;
+        assert!(
+            derived(&caps, &extensions, &without).contains(buffer),
+            "offered: {offered}"
+        );
+    }
+}
