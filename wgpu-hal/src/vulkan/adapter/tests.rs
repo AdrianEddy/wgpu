@@ -1109,3 +1109,64 @@ fn mesh_shader_multiview_needs_multiview() {
     assert!(!derived(&caps, &extensions, &mesh(false)).contains(feature));
     assert!(derived(&caps, &extensions, &mesh(true)).contains(feature));
 }
+
+/// A device opened with `TEXTURE_FORMAT_P010` before Vulkan 1.1, or with
+/// `EXPERIMENTAL_COOPERATIVE_MATRIX` before Vulkan 1.2, enables the extension that its formats or
+/// its memory model come from, and has the feature. Before, only `TEXTURE_FORMAT_NV12` enabled
+/// `VK_KHR_sampler_ycbcr_conversion`, and nothing enabled `VK_KHR_vulkan_memory_model`.
+#[test]
+fn older_devices_enable_the_extensions_their_features_come_from() {
+    let formats = FormatSupport {
+        p010: true,
+        ..FormatSupport::default()
+    };
+    let caps = device_of_version(vk::API_VERSION_1_0, &[khr::sampler_ycbcr_conversion::NAME]);
+    let (extensions, enabled) = opened(
+        &caps,
+        &PhysicalDeviceFeatures::default(),
+        wgt::Features::TEXTURE_FORMAT_P010,
+    );
+    let mut wrong = alloc::vec::Vec::new();
+    if !extensions.contains(&khr::sampler_ycbcr_conversion::NAME) {
+        wrong.push("P010 before 1.1 without VK_KHR_sampler_ycbcr_conversion");
+    }
+    let (features, _) = enabled.to_wgpu(
+        &caps,
+        |extension| extensions.contains(&extension),
+        &formats,
+        &vk::QueueFamilyProperties::default(),
+    );
+    if !features.contains(wgt::Features::TEXTURE_FORMAT_P010) {
+        wrong.push("P010 lacking alone before 1.1");
+    }
+
+    let caps = PhysicalDeviceProperties {
+        device_api_version: vk::API_VERSION_1_1,
+        supported_extensions: [
+            khr::cooperative_matrix::NAME,
+            khr::vulkan_memory_model::NAME,
+        ]
+        .iter()
+        .map(|&name| {
+            vk::ExtensionProperties::default()
+                .extension_name(name)
+                .unwrap()
+        })
+        .collect(),
+        ..subgroups_and_matrices()
+    };
+    let (extensions, enabled) = opened(
+        &caps,
+        &PhysicalDeviceFeatures::default(),
+        wgt::Features::EXPERIMENTAL_COOPERATIVE_MATRIX,
+    );
+    if !extensions.contains(&khr::vulkan_memory_model::NAME) {
+        wrong.push("cooperative matrices before 1.2 without VK_KHR_vulkan_memory_model");
+    }
+    if !derived(&caps, &extensions, &enabled)
+        .contains(wgt::Features::EXPERIMENTAL_COOPERATIVE_MATRIX)
+    {
+        wrong.push("cooperative matrices lacking alone before 1.2");
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
