@@ -1378,13 +1378,13 @@ impl crate::Device for super::Device {
         // https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#textures-component-swizzle
         // If the image view has a depth/stencil format and the VkComponentSwizzle is VK_COMPONENT_SWIZZLE_ONE,
         // and VkPhysicalDeviceMaintenance5Properties::depthStencilSwizzleOneSupport is not VK_TRUE,
-        // the value of the texel after swizzle is undefined.
+        // the value of the texel after swizzle is undefined. That property is part of
+        // `maintenance5`, which a device has only with it enabled, and wgpu-hal does not enable
+        // it: no device relies on it.
         //
         // We convert `One` to `A` which should sample as 1.0,
         // according to https://registry.khronos.org/vulkan/specs/latest/html/vkspec.html#images-component-substitution
-        if texture.format.is_depth_stencil_format()
-            && !self.shared.private_caps.depth_stencil_swizzle_one_support
-        {
+        if texture.format.is_depth_stencil_format() {
             for component in [
                 &mut swizzle.r,
                 &mut swizzle.g,
