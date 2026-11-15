@@ -352,6 +352,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Recover from `VK_ERROR_FRAGMENTED_POOL` and `VK_ERROR_OUT_OF_POOL_MEMORY` when allocating descriptor sets by resetting or retiring the offending pool and retrying on the next available (or a freshly created) pool instead of panicking. By @beicause in [#10264](https://github.com/gfx-rs/wgpu/pull/10264).
 - Enable the `depthBiasClamp` device feature when it is supported. Pipelines with a non-zero `DepthBiasState::clamp` previously failed Vulkan validation. By @VoxelBoy in [#10566](https://github.com/gfx-rs/wgpu/pull/10566).
 - Derive each feature from the members of the feature structures that enable it: `TEXTURE_INT64_ATOMIC` read `shaderImageInt64Atomics` after setting it, and the ray tracing, mesh shader, cooperative matrix and subgroup features followed their extensions alone. A device created with `VK_KHR_buffer_device_address` but without `bufferDeviceAddress` no longer allocates memory with device addresses. By @AdrianEddy.
+- Enable `shaderStorageImageArrayDynamicIndexing` for `STORAGE_RESOURCE_BINDING_ARRAY`, and `shaderStorageBufferArrayDynamicIndexing` without `TEXTURE_BINDING_ARRAY`, which a second call overwrote. Texture and storage resource arrays need the dynamic indexing of the descriptors they array; buffer arrays enable uniform buffers' where offered. By @AdrianEddy.
 
 #### Metal
 
