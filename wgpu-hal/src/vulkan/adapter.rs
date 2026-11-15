@@ -66,9 +66,6 @@ pub struct PhysicalDeviceFeatures {
     /// Features provided by `VK_KHR_multiview`, promoted to Vulkan 1.1.
     multiview: Option<vk::PhysicalDeviceMultiviewFeaturesKHR<'static>>,
 
-    /// Features provided by `VK_KHR_sampler_ycbcr_conversion`, promoted to Vulkan 1.1.
-    sampler_ycbcr_conversion: Option<vk::PhysicalDeviceSamplerYcbcrConversionFeatures<'static>>,
-
     /// Features provided by `VK_EXT_texture_compression_astc_hdr`, promoted to Vulkan 1.3.
     astc_hdr: Option<vk::PhysicalDeviceTextureCompressionASTCHDRFeaturesEXT<'static>>,
 
@@ -81,31 +78,11 @@ pub struct PhysicalDeviceFeatures {
     /// Features provided by `VK_KHR_acceleration_structure`.
     acceleration_structure: Option<vk::PhysicalDeviceAccelerationStructureFeaturesKHR<'static>>,
 
-    /// Features provided by `VK_KHR_buffer_device_address`, promoted to Vulkan 1.2.
-    ///
-    /// We only use this feature for
-    /// [`Features::EXPERIMENTAL_RAY_QUERY`], which requires
-    /// `VK_KHR_acceleration_structure`, which depends on
-    /// `VK_KHR_buffer_device_address`, so [`Instance::expose_adapter`] only
-    /// bothers to check if `VK_KHR_acceleration_structure` is available,
-    /// leaving this `None`.
-    ///
-    /// However, we do populate this when creating a device if
-    /// [`Features::EXPERIMENTAL_RAY_QUERY`] is requested.
-    ///
-    /// [`Instance::expose_adapter`]: super::Instance::expose_adapter
-    /// [`Features::EXPERIMENTAL_RAY_QUERY`]: wgt::Features::EXPERIMENTAL_RAY_QUERY
+    /// Features provided by `VK_KHR_buffer_device_address`, promoted to Vulkan 1.2. wgpu-hal uses
+    /// them for acceleration structures, through the extension's functions.
     buffer_device_address: Option<vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR<'static>>,
 
-    /// Features provided by `VK_KHR_ray_query`,
-    ///
-    /// Vulkan requires that the feature be present if the `VK_KHR_ray_query`
-    /// extension is present, so [`Instance::expose_adapter`] doesn't bother retrieving
-    /// this from `vkGetPhysicalDeviceFeatures2`.
-    ///
-    /// However, we do populate this when creating a device if ray tracing is requested.
-    ///
-    /// [`Instance::expose_adapter`]: super::Instance::expose_adapter
+    /// Features provided by `VK_KHR_ray_query`.
     ray_query: Option<vk::PhysicalDeviceRayQueryFeaturesKHR<'static>>,
 
     /// Features provided by `VK_KHR_ray_tracing_pipeline`.
@@ -198,6 +175,20 @@ fn enables_swapchain_maintenance1(
         && phd_features
             .swapchain_maintenance1
             .is_some_and(|features| features.swapchain_maintenance1 == vk::TRUE)
+}
+
+/// Whether a device created with `enabled_extensions` and `enabled_features` allocates memory with
+/// device addresses, for acceleration structures: with `VK_KHR_buffer_device_address`, whose
+/// functions wgpu-hal uses, and its `bufferDeviceAddress`, without which no allocation may ask
+/// for addresses (VUID-VkMemoryAllocateInfo-flags-03331).
+fn uses_device_addresses(
+    enabled_extensions: &[&'static CStr],
+    enabled_features: &PhysicalDeviceFeatures,
+) -> bool {
+    enabled_extensions.contains(&khr::buffer_device_address::NAME)
+        && enabled_features
+            .buffer_device_address
+            .is_some_and(|features| features.buffer_device_address == vk::TRUE)
 }
 
 /// The member of [`vk::PhysicalDeviceFeatures`] that holds one core feature.
@@ -351,7 +342,6 @@ impl PhysicalDeviceFeatures {
                         || enable_if_of_type(&mut features.image_robustness, next)
                         || enable_if_of_type(&mut features.robustness2, next)
                         || enable_if_of_type(&mut features.multiview, next)
-                        || enable_if_of_type(&mut features.sampler_ycbcr_conversion, next)
                         || enable_if_of_type(&mut features.astc_hdr, next)
                         || enable_if_of_type(&mut features.shader_float16_int8, next)
                         || enable_if_of_type(&mut features._16bit_storage, next)
@@ -428,12 +418,6 @@ impl PhysicalDeviceFeatures {
                 multiview_geometry_shader,
                 multiview_tessellation_shader,
             ]
-        );
-        enable_members!(
-            self,
-            sampler_ycbcr_conversion,
-            vulkan11,
-            [sampler_ycbcr_conversion]
         );
         enable_members!(
             self,
@@ -796,15 +780,6 @@ impl PhysicalDeviceFeatures {
             } else {
                 None
             },
-            sampler_ycbcr_conversion: if device_api_version >= vk::API_VERSION_1_1
-                || enabled_extensions.contains(&khr::sampler_ycbcr_conversion::NAME)
-            {
-                Some(
-                    vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default(), // .sampler_ycbcr_conversion(requested_features.contains(wgt::Features::TEXTURE_FORMAT_NV12))
-                )
-            } else {
-                None
-            },
             astc_hdr: if enabled_extensions.contains(&ext::texture_compression_astc_hdr::NAME) {
                 Some(
                     vk::PhysicalDeviceTextureCompressionASTCHDRFeaturesEXT::default()
@@ -1052,6 +1027,11 @@ impl PhysicalDeviceFeatures {
     /// For an adapter, `self` is what it offers and `has_extension` tells the extensions it
     /// supports.
     ///
+    /// A feature is derived from the members of the feature structures that enable what it uses,
+    /// never from a structure's presence, and from an extension where wgpu-hal uses the extension's
+    /// functions or the feature is in no structure. A feature promoted to core needs its extension
+    /// on a device older than the promotion.
+    ///
     /// [`Features`]: wgt::Features
     /// [`DownlevelFlags`]: wgt::DownlevelFlags
     fn to_wgpu(
@@ -1062,6 +1042,10 @@ impl PhysicalDeviceFeatures {
         queue_props: &vk::QueueFamilyProperties,
     ) -> (wgt::Features, wgt::DownlevelFlags) {
         use wgt::{DownlevelFlags as Df, Features as F};
+        // Whether the device has what an extension promoted to core in `version` gives.
+        let promoted = |version: u32, extension: &'static CStr| {
+            caps.device_api_version >= version || has_extension(extension)
+        };
         let mut features = F::empty()
             | F::ADDRESS_MODE_CLAMP_TO_BORDER
             | F::ADDRESS_MODE_CLAMP_TO_ZERO
@@ -1162,49 +1146,48 @@ impl PhysicalDeviceFeatures {
 
         features.set(F::SHADER_F64, self.core.shader_float64 != 0);
         features.set(F::SHADER_INT64, self.core.shader_int64 != 0);
-        if let Some(ref bit16) = self._16bit_storage {
-            features.set(
-                F::SHADER_I16,
-                self.core.shader_int16 != 0
-                    && bit16.storage_buffer16_bit_access != 0
-                    && bit16.uniform_and_storage_buffer16_bit_access != 0,
-            );
-        }
+        let storage16 = promoted(vk::API_VERSION_1_1, khr::_16bit_storage::NAME)
+            && self._16bit_storage.is_some_and(|bit16| {
+                bit16.storage_buffer16_bit_access != 0
+                    && bit16.uniform_and_storage_buffer16_bit_access != 0
+            });
+        features.set(F::SHADER_I16, self.core.shader_int16 != 0 && storage16);
 
         features.set(F::PRIMITIVE_INDEX, self.core.geometry_shader != 0);
 
-        if let Some(ref shader_atomic_int64) = self.shader_atomic_int64 {
-            features.set(
-                F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX,
-                shader_atomic_int64.shader_buffer_int64_atomics != 0
-                    && shader_atomic_int64.shader_shared_int64_atomics != 0,
-            );
-        }
+        features.set(
+            F::SHADER_INT64_ATOMIC_ALL_OPS | F::SHADER_INT64_ATOMIC_MIN_MAX,
+            promoted(vk::API_VERSION_1_2, khr::shader_atomic_int64::NAME)
+                && self.shader_atomic_int64.is_some_and(|atomics| {
+                    atomics.shader_buffer_int64_atomics != 0
+                        && atomics.shader_shared_int64_atomics != 0
+                }),
+        );
 
-        if let Some(ref shader_image_atomic_int64) = self.shader_image_atomic_int64 {
-            features.set(
-                F::TEXTURE_INT64_ATOMIC,
-                shader_image_atomic_int64
-                    .shader_image_int64_atomics(true)
-                    .shader_image_int64_atomics
-                    != 0,
-            );
-        }
+        features.set(
+            F::TEXTURE_INT64_ATOMIC,
+            has_extension(ext::shader_image_atomic_int64::NAME)
+                && self
+                    .shader_image_atomic_int64
+                    .is_some_and(|atomics| atomics.shader_image_int64_atomics != 0),
+        );
 
-        if let Some(ref shader_atomic_float) = self.shader_atomic_float {
-            features.set(
-                F::SHADER_FLOAT32_ATOMIC,
-                shader_atomic_float.shader_buffer_float32_atomics != 0
-                    && shader_atomic_float.shader_buffer_float32_atomic_add != 0,
-            );
-        }
+        features.set(
+            F::SHADER_FLOAT32_ATOMIC,
+            has_extension(ext::shader_atomic_float::NAME)
+                && self.shader_atomic_float.is_some_and(|atomics| {
+                    atomics.shader_buffer_float32_atomics != 0
+                        && atomics.shader_buffer_float32_atomic_add != 0
+                }),
+        );
 
-        if let Some(ref shader_barycentrics) = self.shader_barycentrics {
-            features.set(
-                F::SHADER_BARYCENTRICS | F::SHADER_PER_VERTEX,
-                shader_barycentrics.fragment_shader_barycentric != 0,
-            );
-        }
+        features.set(
+            F::SHADER_BARYCENTRICS | F::SHADER_PER_VERTEX,
+            has_extension(khr::fragment_shader_barycentric::NAME)
+                && self
+                    .shader_barycentrics
+                    .is_some_and(|barycentrics| barycentrics.fragment_shader_barycentric != 0),
+        );
 
         //if caps.supports_extension(khr::sampler_mirror_clamp_to_edge::NAME) {
         //if caps.supports_extension(ext::sampler_filter_minmax::NAME) {
@@ -1218,10 +1201,16 @@ impl PhysicalDeviceFeatures {
         );
         features.set(
             F::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
-            has_extension(khr::ray_tracing_position_fetch::NAME),
+            has_extension(khr::ray_tracing_position_fetch::NAME)
+                && self
+                    .position_fetch
+                    .is_some_and(|fetch| fetch.ray_tracing_position_fetch != 0),
         );
 
-        if let Some(ref descriptor_indexing) = self.descriptor_indexing {
+        let descriptor_indexing = self
+            .descriptor_indexing
+            .filter(|_| promoted(vk::API_VERSION_1_2, ext::descriptor_indexing::NAME));
+        if let Some(ref descriptor_indexing) = descriptor_indexing {
             // We use update-after-bind descriptors for all bind groups containing binding arrays.
             //
             // In those bind groups, we allow all binding types except uniform buffers to be present.
@@ -1259,39 +1248,45 @@ impl PhysicalDeviceFeatures {
         features.set(F::DUAL_SOURCE_BLENDING, self.core.dual_src_blend != 0);
         features.set(F::CLIP_DISTANCES, self.core.shader_clip_distance != 0);
 
-        if let Some(ref multiview) = self.multiview {
-            features.set(F::MULTIVIEW, multiview.multiview != 0);
-            features.set(F::SELECTIVE_MULTIVIEW, multiview.multiview != 0);
-        }
+        let multiview = promoted(vk::API_VERSION_1_1, khr::multiview::NAME)
+            && self
+                .multiview
+                .is_some_and(|multiview| multiview.multiview != 0);
+        features.set(F::MULTIVIEW | F::SELECTIVE_MULTIVIEW, multiview);
 
         features.set(F::TEXTURE_FORMAT_16BIT_NORM, formats.norm16);
 
-        if let Some(ref astc_hdr) = self.astc_hdr {
-            features.set(
-                F::TEXTURE_COMPRESSION_ASTC_HDR,
-                astc_hdr.texture_compression_astc_hdr != 0,
-            );
-        }
+        features.set(
+            F::TEXTURE_COMPRESSION_ASTC_HDR,
+            promoted(vk::API_VERSION_1_3, ext::texture_compression_astc_hdr::NAME)
+                && self
+                    .astc_hdr
+                    .is_some_and(|astc_hdr| astc_hdr.texture_compression_astc_hdr != 0),
+        );
 
         if self.core.texture_compression_astc_ldr != 0 {
             features.set(F::TEXTURE_COMPRESSION_ASTC_SLICED_3D, formats.astc_3d);
         }
 
-        if let (Some(ref f16_i8), Some(ref bit16)) = (self.shader_float16_int8, self._16bit_storage)
-        {
-            // Note `storage_input_output16` is not required, we polyfill `f16` I/O using `f32`
-            // types when this capability is not available
-            features.set(
-                F::SHADER_F16,
-                f16_i8.shader_float16 != 0
-                    && bit16.storage_buffer16_bit_access != 0
-                    && bit16.uniform_and_storage_buffer16_bit_access != 0,
-            );
-        }
+        // Note `storage_input_output16` is not required, we polyfill `f16` I/O using `f32`
+        // types when this capability is not available
+        features.set(
+            F::SHADER_F16,
+            promoted(vk::API_VERSION_1_2, khr::shader_float16_int8::NAME)
+                && self
+                    .shader_float16_int8
+                    .is_some_and(|f16_i8| f16_i8.shader_float16 != 0)
+                && storage16,
+        );
 
+        // Subgroup operations need `subgroupSizeControl`: the pipelines that use them allow a
+        // varying subgroup size (VUID-VkPipelineShaderStageCreateInfo-flags-02784).
+        let subgroup_size_control = promoted(vk::API_VERSION_1_3, ext::subgroup_size_control::NAME)
+            && self
+                .subgroup_size_control
+                .is_some_and(|control| control.subgroup_size_control != 0);
         if let Some(ref subgroup) = caps.subgroup {
-            if (caps.device_api_version >= vk::API_VERSION_1_3
-                || has_extension(ext::subgroup_size_control::NAME))
+            if subgroup_size_control
                 && subgroup.supported_operations.contains(
                     vk::SubgroupFeatureFlags::BASIC
                         | vk::SubgroupFeatureFlags::VOTE
@@ -1330,10 +1325,19 @@ impl PhysicalDeviceFeatures {
 
         let supports_acceleration_structures = has_extension(khr::deferred_host_operations::NAME)
             && has_extension(khr::acceleration_structure::NAME)
-            && has_extension(khr::buffer_device_address::NAME);
+            && has_extension(khr::buffer_device_address::NAME)
+            && self
+                .acceleration_structure
+                .is_some_and(|features| features.acceleration_structure != 0)
+            && self
+                .buffer_device_address
+                .is_some_and(|features| features.buffer_device_address != 0);
 
-        let supports_ray_query =
-            supports_acceleration_structures && has_extension(khr::ray_query::NAME);
+        let supports_ray_query = supports_acceleration_structures
+            && has_extension(khr::ray_query::NAME)
+            && self
+                .ray_query
+                .is_some_and(|features| features.ray_query != 0);
         let supports_acceleration_structure_binding_array = supports_ray_query
             && self
                 .acceleration_structure
@@ -1359,7 +1363,12 @@ impl PhysicalDeviceFeatures {
             supports_acceleration_structure_binding_array,
         );
 
-        if supports_acceleration_structures && has_extension(khr::ray_tracing_pipeline::NAME) {
+        if supports_acceleration_structures
+            && has_extension(khr::ray_tracing_pipeline::NAME)
+            && self
+                .ray_tracing_pipeline
+                .is_some_and(|features| features.ray_tracing_pipeline != 0)
+        {
             features.insert(
                 F::EXPERIMENTAL_RAY_TRACING_PIPELINES
                         // Same reason as for ray queries.
@@ -1378,47 +1387,48 @@ impl PhysicalDeviceFeatures {
 
         features.set(F::FLOAT32_BLENDABLE, formats.float32_blendable);
 
-        if let Some(ref _sampler_ycbcr_conversion) = self.sampler_ycbcr_conversion {
-            features.set(
-                F::TEXTURE_FORMAT_NV12,
-                formats.nv12 && !caps.is_driver(vk::DriverId::MOLTENVK),
-            );
-        }
+        // The two-plane formats come with `VK_KHR_sampler_ycbcr_conversion`, promoted to 1.1. Their
+        // images, the views of their planes, and copies need no `samplerYcbcrConversion`, which
+        // only conversion objects do (VUID-vkCreateSamplerYcbcrConversion-None-01648).
+        let two_plane_formats = promoted(vk::API_VERSION_1_1, khr::sampler_ycbcr_conversion::NAME)
+            && !caps.is_driver(vk::DriverId::MOLTENVK);
+        features.set(F::TEXTURE_FORMAT_NV12, two_plane_formats && formats.nv12);
+        features.set(F::TEXTURE_FORMAT_P010, two_plane_formats && formats.p010);
 
-        if let Some(ref _sampler_ycbcr_conversion) = self.sampler_ycbcr_conversion {
-            features.set(
-                F::TEXTURE_FORMAT_P010,
-                formats.p010 && !caps.is_driver(vk::DriverId::MOLTENVK),
-            );
-        }
-
+        // Mesh and task shader stages need their features (VUID-VkPipelineShaderStageCreateInfo-
+        // stage-02091, -02092).
+        let mesh_shader = has_extension(ext::mesh_shader::NAME)
+            && self
+                .mesh_shader
+                .is_some_and(|mesh| mesh.mesh_shader != 0 && mesh.task_shader != 0);
         features.set(
-            F::EXPERIMENTAL_MESH_SHADER,
-            has_extension(ext::mesh_shader::NAME),
+            F::EXPERIMENTAL_MESH_SHADER | F::EXPERIMENTAL_MESH_SHADER_POINTS,
+            mesh_shader,
         );
         features.set(
-            F::EXPERIMENTAL_MESH_SHADER_POINTS,
-            has_extension(ext::mesh_shader::NAME),
+            F::EXPERIMENTAL_MESH_SHADER_MULTIVIEW,
+            has_extension(ext::mesh_shader::NAME)
+                && self
+                    .mesh_shader
+                    .is_some_and(|mesh| mesh.multiview_mesh_shader != 0),
         );
-        if let Some(ref mesh_shader) = self.mesh_shader {
-            features.set(
-                F::EXPERIMENTAL_MESH_SHADER_MULTIVIEW,
-                mesh_shader.multiview_mesh_shader != 0,
-            );
-        }
 
-        // Not supported by default by `VK_KHR_portability_subset`, which we use on apple platforms.
+        // Not supported by default by `VK_KHR_portability_subset`, which we use on apple platforms:
+        // a device with the extension has these only with its features.
+        let portability = has_extension(khr::portability_subset::NAME);
         features.set(
             F::TEXTURE_COMPONENT_SWIZZLE,
-            self.portability_subset
-                .map(|p| p.image_view_format_swizzle == vk::TRUE)
-                .unwrap_or(true),
+            !portability
+                || self
+                    .portability_subset
+                    .is_some_and(|p| p.image_view_format_swizzle == vk::TRUE),
         );
         features.set(
             F::MULTISAMPLE_ARRAY,
-            self.portability_subset
-                .map(|p| p.multisample_array_image == vk::TRUE)
-                .unwrap_or(true),
+            !portability
+                || self
+                    .portability_subset
+                    .is_some_and(|p| p.multisample_array_image == vk::TRUE),
         );
 
         // Enable cooperative matrix if any configuration is supported. The SPIR-V
@@ -1428,6 +1438,11 @@ impl PhysicalDeviceFeatures {
         features.set(
             F::EXPERIMENTAL_COOPERATIVE_MATRIX,
             !caps.cooperative_matrix_properties.is_empty()
+                && has_extension(khr::cooperative_matrix::NAME)
+                && self
+                    .cooperative_matrix
+                    .is_some_and(|matrix| matrix.cooperative_matrix == vk::TRUE)
+                && promoted(vk::API_VERSION_1_2, khr::vulkan_memory_model::NAME)
                 && self.vulkan_memory_model.is_some_and(|m| {
                     m.vulkan_memory_model == vk::TRUE
                         && m.vulkan_memory_model_device_scope == vk::TRUE
@@ -2551,16 +2566,6 @@ impl super::InstanceShared {
                 features2 = features2.push_next(next);
             }
 
-            // `VK_KHR_sampler_ycbcr_conversion` is promoted to 1.1
-            if capabilities.device_api_version >= vk::API_VERSION_1_1
-                || capabilities.supports_extension(khr::sampler_ycbcr_conversion::NAME)
-            {
-                let next = features
-                    .sampler_ycbcr_conversion
-                    .insert(vk::PhysicalDeviceSamplerYcbcrConversionFeatures::default());
-                features2 = features2.push_next(next);
-            }
-
             if capabilities.supports_extension(ext::descriptor_indexing::NAME) {
                 let next = features
                     .descriptor_indexing
@@ -2639,6 +2644,27 @@ impl super::InstanceShared {
                 let next = features
                     .acceleration_structure
                     .insert(vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default());
+                features2 = features2.push_next(next);
+            }
+
+            if capabilities.supports_extension(khr::buffer_device_address::NAME) {
+                let next = features
+                    .buffer_device_address
+                    .insert(vk::PhysicalDeviceBufferDeviceAddressFeaturesKHR::default());
+                features2 = features2.push_next(next);
+            }
+
+            if capabilities.supports_extension(khr::ray_query::NAME) {
+                let next = features
+                    .ray_query
+                    .insert(vk::PhysicalDeviceRayQueryFeaturesKHR::default());
+                features2 = features2.push_next(next);
+            }
+
+            if capabilities.supports_extension(khr::ray_tracing_pipeline::NAME) {
+                let next = features
+                    .ray_tracing_pipeline
+                    .insert(vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default());
                 features2 = features2.push_next(next);
             }
 
@@ -3680,7 +3706,7 @@ impl super::Adapter {
 
         let allocation_sizes = AllocationSizes::from_memory_hints(memory_hints);
 
-        let buffer_device_address = enabled_extensions.contains(&khr::buffer_device_address::NAME);
+        let buffer_device_address = uses_device_addresses(enabled_extensions, enabled_features);
 
         let mem_allocator = super::MemoryAllocators::new(
             self.instance.raw.clone(),

@@ -351,6 +351,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Don't use timeline semaphores on VeriSilicon's proprietary driver, as on NXP's i.MX 8 SoCs, which crashes in `vkQueueSubmit` with them. wgpu falls back to binary fences there. By @tronical in [#10535](https://github.com/gfx-rs/wgpu/pull/10535).
 - Recover from `VK_ERROR_FRAGMENTED_POOL` and `VK_ERROR_OUT_OF_POOL_MEMORY` when allocating descriptor sets by resetting or retiring the offending pool and retrying on the next available (or a freshly created) pool instead of panicking. By @beicause in [#10264](https://github.com/gfx-rs/wgpu/pull/10264).
 - Enable the `depthBiasClamp` device feature when it is supported. Pipelines with a non-zero `DepthBiasState::clamp` previously failed Vulkan validation. By @VoxelBoy in [#10566](https://github.com/gfx-rs/wgpu/pull/10566).
+- Derive each feature from the members of the feature structures that enable it: `TEXTURE_INT64_ATOMIC` read `shaderImageInt64Atomics` after setting it, and the ray tracing, mesh shader, cooperative matrix and subgroup features followed their extensions alone. A device created with `VK_KHR_buffer_device_address` but without `bufferDeviceAddress` no longer allocates memory with device addresses. By @AdrianEddy.
 
 #### Metal
 
