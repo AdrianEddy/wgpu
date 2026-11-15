@@ -323,6 +323,60 @@ fn a_device_with_ffmpegs_features_works_through_wgpu() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
+/// On each adapter, a device created with FFmpeg's features, without `independentBlend`, takes
+/// pipelines with a hole among their colour targets, before or after the target, and the
+/// validation layer reports nothing: the hole has the target's blend state. Before, wgpu-hal gave
+/// it the default state, and the attachments differed
+/// (VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605).
+#[test]
+fn a_colour_target_hole_takes_the_first_targets_blend_state() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let flags = wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG;
+    let Some((instance, messenger)) = super::instance(flags) else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    for adapter in super::adapters(&instance) {
+        let name = adapter.get_info().name;
+        let (_, ffmpeg) = offered(&adapter);
+        let (device, _queue) = open(&adapter, ffmpeg);
+        assert!(!device
+            .downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::INDEPENDENT_BLEND));
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+        });
+        let target = Some(wgpu::ColorTargetState {
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            blend: Some(wgpu::BlendState::REPLACE),
+            write_mask: wgpu::ColorWrites::ALL,
+        });
+        for (entry_point, targets) in [
+            ("one", vec![target.clone(), None]),
+            ("two", vec![None, target.clone()]),
+        ] {
+            if let Some(error) = validation_error(&device, || {
+                pipeline(&device, &module, entry_point, &targets, None);
+            }) {
+                wrong.push(format!("{name:?}: {targets:?} refused: {error}"));
+            }
+        }
+        drop(device);
+        match &messenger {
+            Some(messenger) => {
+                let messages = messenger.take();
+                if !messages.is_empty() {
+                    wrong.push(format!("{name:?}: {messages:#?}"));
+                }
+            }
+            None => println!("{name:?}: no validation layer"),
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// On each adapter with `CUBE_ARRAY_TEXTURES`, a device created without `imageCubeArray` lacks the
 /// flag, and wgpu-core refuses a cube array view of a cube-compatible texture, naming the flag,
 /// while it takes a cube view; the validation layer reports nothing. Before, wgpu-core validated

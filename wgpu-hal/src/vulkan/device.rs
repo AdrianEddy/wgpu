@@ -2348,41 +2348,17 @@ impl crate::Device for super::Device {
             .alpha_to_coverage_enable(desc.multisample.alpha_to_coverage_enabled)
             .sample_mask(&vk_sample_mask);
 
-        let mut vk_attachments = Vec::with_capacity(desc.color_targets.len());
+        let vk_attachments = conv::map_color_targets_blend(desc.color_targets);
         for cat in desc.color_targets {
-            let (key, attarchment) = if let Some(cat) = cat.as_ref() {
-                let mut vk_attachment = vk::PipelineColorBlendAttachmentState::default()
-                    .color_write_mask(vk::ColorComponentFlags::from_raw(cat.write_mask.bits()));
-                if let Some(ref blend) = cat.blend {
-                    let (color_op, color_src, color_dst) = conv::map_blend_component(&blend.color);
-                    let (alpha_op, alpha_src, alpha_dst) = conv::map_blend_component(&blend.alpha);
-                    vk_attachment = vk_attachment
-                        .blend_enable(true)
-                        .color_blend_op(color_op)
-                        .src_color_blend_factor(color_src)
-                        .dst_color_blend_factor(color_dst)
-                        .alpha_blend_op(alpha_op)
-                        .src_alpha_blend_factor(alpha_src)
-                        .dst_alpha_blend_factor(alpha_dst);
-                }
-
-                let vk_format = self.shared.private_caps.map_texture_format(cat.format);
-                (
-                    Some(super::ColorAttachmentKey {
-                        base: super::AttachmentKey::compatible(
-                            vk_format,
-                            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        ),
-                        resolve: None,
-                    }),
-                    vk_attachment,
-                )
-            } else {
-                (None, vk::PipelineColorBlendAttachmentState::default())
-            };
-
-            compatible_rp_key.colors.push(key);
-            vk_attachments.push(attarchment);
+            compatible_rp_key
+                .colors
+                .push(cat.as_ref().map(|cat| super::ColorAttachmentKey {
+                    base: super::AttachmentKey::compatible(
+                        self.shared.private_caps.map_texture_format(cat.format),
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    ),
+                    resolve: None,
+                }));
         }
 
         let vk_color_blend =
