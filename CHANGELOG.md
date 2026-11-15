@@ -366,6 +366,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Fix `Device::destroy` deadlocking when another thread drops one of the device's buffers at the same time. By @AdrianEddy.
 - A GPU wait that times out while configuring a surface is now the error `ConfigureSurfaceError::GpuWaitTimeout`, and the surface stays configured, apart from its acquired texture, which is destroyed as when configuring succeeds. Unconfiguring or dropping the surface logs the timeout and carries on. Each panicked, and GL's waits time out after about two seconds. By @AdrianEddy.
 - Fix deadlocks when `Device::on_uncaptured_error` or `Device::set_device_lost_callback` replaces a callback, or `Surface::configure` changes the surface's device, and drops the last reference to application state that calls wgpu when it drops, such as the last `Queue`, or the previous device with its callbacks. They were dropped with a lock held. By @AdrianEddy.
+- Refuse a `CubeArray` texture view on a device without `DownlevelFlags::CUBE_ARRAY_TEXTURES`. By @AdrianEddy.
 
 #### naga
 
