@@ -3364,8 +3364,8 @@ impl super::Adapter {
     /// - `raw_device` must be created from this adapter, with `queue`.
     /// - `enabled_extensions` must be the device extensions `raw_device` was created with; those
     ///   wgpu-hal does not know may be left out. On a Vulkan 1.0 device they must include
-    ///   `VK_KHR_maintenance1` and `VK_KHR_storage_buffer_storage_class`, and `VK_KHR_swapchain`
-    ///   for surfaces.
+    ///   `VK_KHR_maintenance1` and `VK_KHR_storage_buffer_storage_class`. Without
+    ///   `VK_KHR_swapchain`, configuring a surface is an error.
     /// - `enabled_features` must be the features `raw_device` was created with.
     /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of `raw_device`. If
     ///   `drop_callback` is [`Some`], `raw_device` must be valid until the callback is called.

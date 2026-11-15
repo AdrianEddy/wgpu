@@ -200,6 +200,38 @@ impl Surface for NativeSurface {
         provided_old_swapchain: Option<Box<dyn Swapchain>>,
     ) -> Result<Box<dyn Swapchain>, crate::SurfaceError> {
         profiling::scope!("Device::create_swapchain");
+        // A swapchain needs `VK_KHR_swapchain` on the device, and presentation to the surface from
+        // the device's queue family (VUID-vkQueuePresentKHR-pSwapchains-01292), which a device
+        // created elsewhere may lack: `surface_capabilities` asks of the adapter's family 0.
+        if !device
+            .shared
+            .enabled_extensions
+            .contains(&khr::swapchain::NAME)
+        {
+            return Err(crate::SurfaceError::Other(
+                "the device was created without VK_KHR_swapchain",
+            ));
+        }
+        match unsafe {
+            self.functor.get_physical_device_surface_support(
+                device.shared.physical_device,
+                device.shared.family_index,
+                self.raw,
+            )
+        } {
+            Ok(true) => {}
+            Ok(false) => {
+                return Err(crate::SurfaceError::Other(
+                    "the device's queue family cannot present to the surface",
+                ))
+            }
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => return Err(crate::SurfaceError::Lost),
+            Err(other) => {
+                return Err(crate::SurfaceError::Device(
+                    super::super::map_host_device_oom_err(other),
+                ))
+            }
+        }
         let functor = khr::swapchain::Device::new(&self.instance.raw, &device.shared.raw);
 
         let old_swapchain = provided_old_swapchain

@@ -187,6 +187,85 @@ fn a_device_without_the_features_wgpu_hal_would_use_takes_the_paths_without_them
     }
 }
 
+/// On each adapter with a headless surface, a device created without `VK_KHR_swapchain` cannot
+/// configure the surface: an error, before wgpu-hal calls a swapchain function the device lacks.
+/// Before, it loaded and called them, and panicked.
+#[test]
+fn a_device_without_the_swapchain_extension_cannot_configure_a_surface() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some((instance, surface)) = super::headless_instance(wgt::InstanceFlags::empty()) else {
+        return;
+    };
+    let mut wrong = Vec::new();
+    for (exposed, caps) in super::adapters(&instance, &surface) {
+        let adapter = &exposed.adapter;
+        let features = wgt::Features::empty();
+        let mut extensions = adapter.required_device_extensions(features);
+        extensions.retain(|&name| {
+            name != ash::khr::swapchain::NAME
+                && !super::super::adapter::SWAPCHAIN_MAINTENANCE1
+                    .iter()
+                    .any(|(maintenance, _)| *maintenance == name)
+                && name != ash::khr::swapchain_mutable_format::NAME
+        });
+        let mut physical_features = adapter.physical_device_features(&extensions, features);
+        let priorities = [1.0];
+        let queues = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(0)
+            .queue_priorities(&priorities)];
+        let names = extensions
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<_>>();
+        let info = physical_features.add_to_device_create(
+            vk::DeviceCreateInfo::default()
+                .queue_create_infos(&queues)
+                .enabled_extension_names(&names),
+        );
+        // SAFETY: A valid create info, whose extensions and features the adapter offers.
+        let raw = unsafe {
+            instance
+                .shared
+                .raw
+                .create_device(adapter.raw_physical_device(), &info, None)
+        }
+        .unwrap();
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            adapter.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &physical_features,
+                features,
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        let config = super::config(&caps);
+        let configured = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            // SAFETY: Nothing uses the surface.
+            unsafe { surface.configure(&open.device, &config) }
+        }));
+        match configured {
+            Err(_) => wrong.push(alloc::format!("{:?}: panicked", exposed.info.name)),
+            Ok(Ok(())) => {
+                // SAFETY: Configured just now.
+                unsafe { surface.unconfigure(&open.device) };
+                wrong.push(alloc::format!("{:?}: configured", exposed.info.name));
+            }
+            Ok(Err(crate::SurfaceError::Other(reason))) => {
+                std::println!("{:?}: refused: {reason}", exposed.info.name)
+            }
+            Ok(Err(other)) => wrong.push(alloc::format!("{:?}: {other:?}", exposed.info.name)),
+        }
+        drop(open);
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
 /// On each adapter with a headless surface whose devices can have `swapchainMaintenance1`, a
 /// device created with the swapchain maintenance extension but without its feature, with a lock
 /// that the application gave: presents carry no fence, and the swapchain's teardown waits for the
