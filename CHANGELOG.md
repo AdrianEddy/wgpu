@@ -241,6 +241,11 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
   - family_index, queue_index,
   + DeviceQueue::new(family_index, queue_index),
   ```
+- BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` takes the features the device was created with, `enabled_features`: the `PhysicalDeviceFeatures` that `PhysicalDeviceFeatures::from_device_create_info` reads from the `VkDeviceCreateInfo` its creator gave `vkCreateDevice` (or `PhysicalDeviceFeatures::from_enabled` from its `VkPhysicalDeviceFeatures2` chain), Vulkan 1.1 to 1.3 structures included, or that `physical_device_features` gave to create it. wgpu-hal took the device's internal capabilities, whether its presents signal fences, and its shader options from the features the adapter offers, as if the device had enabled them all. It now takes them from the device's, and takes the path that needs no feature the device lacks. It refuses a device that lacks a core feature behind the adapter's downlevel flags, which `Adapter::missing_downlevel_features` names. By @AdrianEddy.
+  ```diff
+  - device_from_raw(raw_device, drop_callback, &enabled_extensions, features, ..)
+  + device_from_raw(raw_device, drop_callback, &enabled_extensions, &enabled_features, features, ..)
+  ```
 - `wgpu_hal::Surface::configure` and `unconfigure` must now be externally synchronized with `acquire_texture`, `discard_texture` and `Queue::present` of the surface's textures, as wgpu-core does. By @AdrianEddy.
 
 ### Bug Fixes

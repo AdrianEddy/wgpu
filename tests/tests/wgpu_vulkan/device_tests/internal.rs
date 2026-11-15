@@ -162,12 +162,15 @@ unsafe fn from_raw(
 ) -> Result<wgpu_hal::OpenDevice<Vulkan>, wgpu_hal::DeviceError> {
     // SAFETY: Used to open a device.
     let hal = unsafe { adapter.as_hal::<Vulkan>() }.unwrap();
+    // The features `create` created it with.
+    let enabled_features = hal.physical_device_features(extensions, wgpu::Features::empty());
     // SAFETY: Our caller's contract.
     unsafe {
         hal.device_from_raw(
             raw,
             None,
             extensions,
+            &enabled_features,
             wgpu::Features::empty(),
             &adapter.limits(),
             &wgpu::MemoryHints::default(),
