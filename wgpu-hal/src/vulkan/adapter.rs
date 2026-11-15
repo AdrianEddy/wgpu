@@ -1837,10 +1837,6 @@ pub struct PhysicalDeviceProperties {
     maintenance_4: Option<vk::PhysicalDeviceMaintenance4Properties<'static>>,
 
     /// Additional `vk::PhysicalDevice` properties from the
-    /// `VK_KHR_maintenance5` extension, promoted to Vulkan 1.4.
-    maintenance_5: Option<vk::PhysicalDeviceMaintenance5PropertiesKHR<'static>>,
-
-    /// Additional `vk::PhysicalDevice` properties from the
     /// `VK_EXT_descriptor_indexing` extension, promoted to Vulkan 1.2.
     descriptor_indexing: Option<vk::PhysicalDeviceDescriptorIndexingPropertiesEXT<'static>>,
 
@@ -2682,9 +2678,6 @@ impl super::InstanceShared {
                     || capabilities.supports_extension(khr::maintenance3::NAME);
                 let supports_maintenance4 = capabilities.device_api_version >= vk::API_VERSION_1_3
                     || capabilities.supports_extension(khr::maintenance4::NAME);
-                let supports_maintenance5 = capabilities.device_api_version
-                    >= vk::make_api_version(0, 1, 4, 0) // TODO: Use `vk::API_VERSION_1_4` after `ash` is updated.
-                    || capabilities.supports_extension(khr::maintenance5::NAME);
                 let supports_descriptor_indexing = capabilities.device_api_version
                     >= vk::API_VERSION_1_2
                     || capabilities.supports_extension(ext::descriptor_indexing::NAME);
@@ -2718,13 +2711,6 @@ impl super::InstanceShared {
                     let next = capabilities
                         .maintenance_4
                         .insert(vk::PhysicalDeviceMaintenance4Properties::default());
-                    properties2 = properties2.push_next(next);
-                }
-
-                if supports_maintenance5 {
-                    let next = capabilities
-                        .maintenance_5
-                        .insert(vk::PhysicalDeviceMaintenance5PropertiesKHR::default());
                     properties2 = properties2.push_next(next);
                 }
 
@@ -3071,10 +3057,6 @@ impl super::Instance {
                 .map(|a| a.max_multiview_instance_index)
                 .unwrap_or(0),
             scratch_buffer_alignment: alignments.ray_tracing_scratch_buffer_alignment,
-            depth_stencil_swizzle_one_support: phd_capabilities
-                .maintenance_5
-                .map(|maintenance_5| maintenance_5.depth_stencil_swizzle_one_support == vk::TRUE)
-                .unwrap_or(false),
             ray_tracing_pipeline_group_data_size: alignments.ray_tracing_pipeline_group_data_size,
             shader_binding_table_alignment: alignments.ray_tracing_pipeline_data_offset_alignment,
         };

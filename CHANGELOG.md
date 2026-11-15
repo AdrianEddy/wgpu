@@ -373,6 +373,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - Below Vulkan 1.2, enable the extensions that enabled extensions depend on: `VK_KHR_spirv_1_4` and `VK_KHR_shader_float_controls` for ray queries, `VK_EXT_descriptor_indexing` for acceleration structures, and `VK_KHR_bind_memory2` and `VK_KHR_get_memory_requirements2` for the two-plane formats (VUID-vkCreateDevice-ppEnabledExtensionNames-01387). By @AdrianEddy.
 - Gate the debug printing of ray queries and ray tracing on the device's version or its `VK_KHR_shader_non_semantic_info`, not the loader's version (VUID-VkShaderModuleCreateInfo-pCode-08742). By @AdrianEddy.
 - Split indirect mesh task draws into one command per draw without `multiDrawIndirect` or beyond `maxDrawIndirectCount`, as the other indirect draws do (VUID-vkCmdDrawMeshTasksIndirectEXT-drawCount-02718, -02719). By @AdrianEddy.
+- Convert a `One` swizzle of a depth-stencil view to `A` on every device: `depthStencilSwizzleOneSupport` is part of `maintenance5`, which wgpu-hal does not enable. By @AdrianEddy.
 
 #### Metal
 
