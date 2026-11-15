@@ -1773,8 +1773,12 @@ impl PhysicalDeviceProperties {
                 extensions.push(khr::multiview::NAME);
             }
 
-            // Require `VK_KHR_sampler_ycbcr_conversion` if the associated feature was requested
-            if requested_features.contains(wgt::Features::TEXTURE_FORMAT_NV12) {
+            // Require `VK_KHR_sampler_ycbcr_conversion`, which adds the two-plane formats, if a
+            // feature that uses them was requested: a device may use an enumerant that an
+            // extension adds only with the extension.
+            if requested_features
+                .intersects(wgt::Features::TEXTURE_FORMAT_NV12 | wgt::Features::TEXTURE_FORMAT_P010)
+            {
                 extensions.push(khr::sampler_ycbcr_conversion::NAME);
             }
 
@@ -1828,6 +1832,13 @@ impl PhysicalDeviceProperties {
                 MESH_SHADER_FEATURES | wgt::Features::EXPERIMENTAL_RAY_TRACING_PIPELINES,
             ) {
                 extensions.push(khr::spirv_1_4::NAME);
+            }
+
+            // Require `VK_KHR_vulkan_memory_model` if cooperative matrices were requested: their
+            // SPIR-V uses the Vulkan memory model, whose features structure a device created
+            // before Vulkan 1.2 may have only with the extension.
+            if requested_features.contains(wgt::Features::EXPERIMENTAL_COOPERATIVE_MATRIX) {
+                extensions.push(khr::vulkan_memory_model::NAME);
             }
 
             //extensions.push(khr::sampler_mirror_clamp_to_edge::NAME);
