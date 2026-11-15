@@ -930,8 +930,18 @@ fn a_promoted_feature_needs_its_extension_before_its_promotion() {
             .intersection(both)
     };
     assert!(two_plane(&vulkan_1_0, &[]).is_empty());
+    // On Vulkan 1.0 the conversion extension counts with the extensions it requires
+    // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+    assert!(two_plane(&vulkan_1_0, &[khr::sampler_ycbcr_conversion::NAME]).is_empty());
     assert_eq!(
-        two_plane(&vulkan_1_0, &[khr::sampler_ycbcr_conversion::NAME]),
+        two_plane(
+            &vulkan_1_0,
+            &[
+                khr::sampler_ycbcr_conversion::NAME,
+                khr::bind_memory2::NAME,
+                khr::get_memory_requirements2::NAME,
+            ]
+        ),
         both
     );
     assert_eq!(two_plane(&vulkan_1_1, &[]), both);
@@ -1236,15 +1246,20 @@ fn older_devices_enable_the_extensions_their_features_come_from() {
         p010: true,
         ..FormatSupport::default()
     };
-    let caps = device_of_version(vk::API_VERSION_1_0, &[khr::sampler_ycbcr_conversion::NAME]);
+    let ycbcr = [
+        khr::sampler_ycbcr_conversion::NAME,
+        khr::bind_memory2::NAME,
+        khr::get_memory_requirements2::NAME,
+    ];
+    let caps = device_of_version(vk::API_VERSION_1_0, &ycbcr);
     let (extensions, enabled) = opened(
         &caps,
         &PhysicalDeviceFeatures::default(),
         wgt::Features::TEXTURE_FORMAT_P010,
     );
     let mut wrong = alloc::vec::Vec::new();
-    if !extensions.contains(&khr::sampler_ycbcr_conversion::NAME) {
-        wrong.push("P010 before 1.1 without VK_KHR_sampler_ycbcr_conversion");
+    if !ycbcr.iter().all(|extension| extensions.contains(extension)) {
+        wrong.push("P010 before 1.1 without VK_KHR_sampler_ycbcr_conversion and its dependencies");
     }
     let (features, _) = enabled.to_wgpu(
         &caps,
@@ -1491,6 +1506,9 @@ const EVERY_EXTENSION: &[&CStr] = &[
     khr::cooperative_matrix::NAME,
     khr::vulkan_memory_model::NAME,
     khr::shader_subgroup_extended_types::NAME,
+    khr::shader_float_controls::NAME,
+    khr::bind_memory2::NAME,
+    khr::get_memory_requirements2::NAME,
 ];
 
 /// A physical device of Vulkan `version` that offers everything: every extension of
@@ -2118,6 +2136,67 @@ fn int64_atomic_min_max_needs_only_buffer_atomics() {
             "{feature:?}"
         );
     }
+}
+
+/// Below Vulkan 1.2, opening a device enables the extensions that the extensions it enables
+/// depend on, and a feature needs them: `VK_KHR_ray_query` needs `VK_KHR_spirv_1_4`, which needs
+/// `VK_KHR_shader_float_controls`; `VK_KHR_acceleration_structure` needs
+/// `VK_EXT_descriptor_indexing`; `VK_KHR_sampler_ycbcr_conversion` needs `VK_KHR_bind_memory2`
+/// and `VK_KHR_get_memory_requirements2` (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+#[test]
+fn enabled_extensions_bring_the_extensions_they_depend_on() {
+    let mut wrong = alloc::vec::Vec::new();
+    for (version, feature, dependencies) in [
+        (
+            vk::API_VERSION_1_1,
+            wgt::Features::EXPERIMENTAL_RAY_QUERY,
+            &[
+                khr::spirv_1_4::NAME,
+                khr::shader_float_controls::NAME,
+                ext::descriptor_indexing::NAME,
+            ][..],
+        ),
+        (
+            vk::API_VERSION_1_1,
+            wgt::Features::EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS,
+            &[ext::descriptor_indexing::NAME][..],
+        ),
+        (
+            vk::API_VERSION_1_0,
+            wgt::Features::TEXTURE_FORMAT_NV12,
+            &[khr::bind_memory2::NAME, khr::get_memory_requirements2::NAME][..],
+        ),
+    ] {
+        let (caps, offered, formats, queue) = offers_everything(version);
+        let derive = |extensions: &[&'static CStr], enabled: &PhysicalDeviceFeatures| {
+            enabled
+                .to_wgpu(
+                    &caps,
+                    |extension| extensions.contains(&extension),
+                    &formats,
+                    &queue,
+                )
+                .0
+        };
+        let (extensions, enabled) = opened(&caps, &offered, feature);
+        if !derive(&extensions, &enabled).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} lacking alone"));
+        }
+        for &dependency in dependencies {
+            if !extensions.contains(&dependency) {
+                wrong.push(alloc::format!("{feature:?} without {dependency:?}"));
+            }
+            let fewer = extensions
+                .iter()
+                .copied()
+                .filter(|&extension| extension != dependency)
+                .collect::<alloc::vec::Vec<_>>();
+            if derive(&fewer, &enabled).contains(feature) {
+                wrong.push(alloc::format!("{feature:?} does not need {dependency:?}"));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// `InstanceShared::inspect` queries every structure that `PhysicalDeviceFeatures::queried` gives:
