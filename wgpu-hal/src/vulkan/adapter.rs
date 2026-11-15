@@ -1045,19 +1045,20 @@ impl PhysicalDeviceFeatures {
         }
     }
 
-    /// Compute the wgpu [`Features`] and [`DownlevelFlags`] supported by a physical device.
+    /// The wgpu [`Features`] and [`DownlevelFlags`] of a device of the physical device that `caps`
+    /// and `formats` describe, with the features `self`, the device extensions that
+    /// `has_extension` says it has, and a queue of the family that `queue_props` describes.
     ///
-    /// Given `self`, together with the instance and physical device it was
-    /// built from, and a `caps` also built from those, determine which wgpu
-    /// features and downlevel flags the device can support.
+    /// For an adapter, `self` is what it offers and `has_extension` tells the extensions it
+    /// supports.
     ///
     /// [`Features`]: wgt::Features
     /// [`DownlevelFlags`]: wgt::DownlevelFlags
     fn to_wgpu(
         &self,
-        instance: &ash::Instance,
-        phd: vk::PhysicalDevice,
         caps: &PhysicalDeviceProperties,
+        has_extension: impl Fn(&'static CStr) -> bool,
+        formats: &FormatSupport,
         queue_props: &vk::QueueFamilyProperties,
     ) -> (wgt::Features, wgt::DownlevelFlags) {
         use wgt::{DownlevelFlags as Df, Features as F};
@@ -1100,13 +1101,13 @@ impl PhysicalDeviceFeatures {
         dl_flags.set(
             Df::READ_ONLY_DEPTH_STENCIL,
             caps.device_api_version >= vk::API_VERSION_1_1
-                || caps.supports_extension(khr::maintenance2::NAME),
+                || has_extension(khr::maintenance2::NAME),
         );
 
         dl_flags.set(
             Df::SURFACE_VIEW_FORMATS,
-            caps.supports_extension(khr::swapchain_mutable_format::NAME)
-                || !caps.supports_extension(khr::swapchain::NAME),
+            has_extension(khr::swapchain_mutable_format::NAME)
+                || !has_extension(khr::swapchain::NAME),
         );
         let mut core = self.core;
         for (flag, _, feature) in DOWNLEVEL_CORE_FEATURES {
@@ -1209,15 +1210,15 @@ impl PhysicalDeviceFeatures {
         //if caps.supports_extension(ext::sampler_filter_minmax::NAME) {
         features.set(
             F::MULTI_DRAW_INDIRECT_COUNT,
-            caps.supports_extension(khr::draw_indirect_count::NAME),
+            has_extension(khr::draw_indirect_count::NAME),
         );
         features.set(
             F::CONSERVATIVE_RASTERIZATION,
-            caps.supports_extension(ext::conservative_rasterization::NAME),
+            has_extension(ext::conservative_rasterization::NAME),
         );
         features.set(
             F::EXPERIMENTAL_RAY_HIT_VERTEX_RETURN,
-            caps.supports_extension(khr::ray_tracing_position_fetch::NAME),
+            has_extension(khr::ray_tracing_position_fetch::NAME),
         );
 
         if let Some(ref descriptor_indexing) = self.descriptor_indexing {
@@ -1263,10 +1264,7 @@ impl PhysicalDeviceFeatures {
             features.set(F::SELECTIVE_MULTIVIEW, multiview.multiview != 0);
         }
 
-        features.set(
-            F::TEXTURE_FORMAT_16BIT_NORM,
-            is_format_16bit_norm_supported(instance, phd),
-        );
+        features.set(F::TEXTURE_FORMAT_16BIT_NORM, formats.norm16);
 
         if let Some(ref astc_hdr) = self.astc_hdr {
             features.set(
@@ -1276,10 +1274,7 @@ impl PhysicalDeviceFeatures {
         }
 
         if self.core.texture_compression_astc_ldr != 0 {
-            features.set(
-                F::TEXTURE_COMPRESSION_ASTC_SLICED_3D,
-                supports_astc_3d(instance, phd),
-            );
+            features.set(F::TEXTURE_COMPRESSION_ASTC_SLICED_3D, formats.astc_3d);
         }
 
         if let (Some(ref f16_i8), Some(ref bit16)) = (self.shader_float16_int8, self._16bit_storage)
@@ -1296,7 +1291,7 @@ impl PhysicalDeviceFeatures {
 
         if let Some(ref subgroup) = caps.subgroup {
             if (caps.device_api_version >= vk::API_VERSION_1_3
-                || caps.supports_extension(ext::subgroup_size_control::NAME))
+                || has_extension(ext::subgroup_size_control::NAME))
                 && subgroup.supported_operations.contains(
                     vk::SubgroupFeatureFlags::BASIC
                         | vk::SubgroupFeatureFlags::VOTE
@@ -1323,38 +1318,22 @@ impl PhysicalDeviceFeatures {
             }
         }
 
-        let supports_depth_format = |format| {
-            supports_format(
-                instance,
-                phd,
-                format,
-                vk::ImageTiling::OPTIMAL,
-                depth_stencil_required_flags(),
-            )
-        };
-
-        let texture_s8 = supports_depth_format(vk::Format::S8_UINT);
-        let texture_d32 = supports_depth_format(vk::Format::D32_SFLOAT);
-        let texture_d24_s8 = supports_depth_format(vk::Format::D24_UNORM_S8_UINT);
-        let texture_d32_s8 = supports_depth_format(vk::Format::D32_SFLOAT_S8_UINT);
-
-        let stencil8 = texture_s8 || texture_d24_s8;
-        let depth24_plus_stencil8 = texture_d24_s8 || texture_d32_s8;
+        let stencil8 = formats.s8 || formats.d24_s8;
+        let depth24_plus_stencil8 = formats.d24_s8 || formats.d32_s8;
 
         dl_flags.set(
             Df::WEBGPU_TEXTURE_FORMAT_SUPPORT,
-            stencil8 && depth24_plus_stencil8 && texture_d32,
+            stencil8 && depth24_plus_stencil8 && formats.d32,
         );
 
-        features.set(F::DEPTH32FLOAT_STENCIL8, texture_d32_s8);
+        features.set(F::DEPTH32FLOAT_STENCIL8, formats.d32_s8);
 
-        let supports_acceleration_structures = caps
-            .supports_extension(khr::deferred_host_operations::NAME)
-            && caps.supports_extension(khr::acceleration_structure::NAME)
-            && caps.supports_extension(khr::buffer_device_address::NAME);
+        let supports_acceleration_structures = has_extension(khr::deferred_host_operations::NAME)
+            && has_extension(khr::acceleration_structure::NAME)
+            && has_extension(khr::buffer_device_address::NAME);
 
         let supports_ray_query =
-            supports_acceleration_structures && caps.supports_extension(khr::ray_query::NAME);
+            supports_acceleration_structures && has_extension(khr::ray_query::NAME);
         let supports_acceleration_structure_binding_array = supports_ray_query
             && self
                 .acceleration_structure
@@ -1380,9 +1359,7 @@ impl PhysicalDeviceFeatures {
             supports_acceleration_structure_binding_array,
         );
 
-        if supports_acceleration_structures
-            && caps.supports_extension(khr::ray_tracing_pipeline::NAME)
-        {
+        if supports_acceleration_structures && has_extension(khr::ray_tracing_pipeline::NAME) {
             features.insert(
                 F::EXPERIMENTAL_RAY_TRACING_PIPELINES
                         // Same reason as for ray queries.
@@ -1390,68 +1367,38 @@ impl PhysicalDeviceFeatures {
             );
         }
 
-        let rg11b10ufloat_renderable = supports_format(
-            instance,
-            phd,
-            vk::Format::B10G11R11_UFLOAT_PACK32,
-            vk::ImageTiling::OPTIMAL,
-            vk::FormatFeatureFlags::COLOR_ATTACHMENT
-                | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
-        );
-        features.set(F::RG11B10UFLOAT_RENDERABLE, rg11b10ufloat_renderable);
-
         features.set(
-            F::BGRA8UNORM_STORAGE,
-            supports_bgra8unorm_storage(instance, phd, caps.device_api_version),
+            F::RG11B10UFLOAT_RENDERABLE,
+            formats.rg11b10ufloat_renderable,
         );
 
-        features.set(
-            F::FLOAT32_FILTERABLE,
-            is_float32_filterable_supported(instance, phd),
-        );
+        features.set(F::BGRA8UNORM_STORAGE, formats.bgra8unorm_storage);
 
-        features.set(
-            F::FLOAT32_BLENDABLE,
-            is_float32_blendable_supported(instance, phd),
-        );
+        features.set(F::FLOAT32_FILTERABLE, formats.float32_filterable);
+
+        features.set(F::FLOAT32_BLENDABLE, formats.float32_blendable);
 
         if let Some(ref _sampler_ycbcr_conversion) = self.sampler_ycbcr_conversion {
             features.set(
                 F::TEXTURE_FORMAT_NV12,
-                supports_format(
-                    instance,
-                    phd,
-                    vk::Format::G8_B8R8_2PLANE_420_UNORM,
-                    vk::ImageTiling::OPTIMAL,
-                    vk::FormatFeatureFlags::SAMPLED_IMAGE
-                        | vk::FormatFeatureFlags::TRANSFER_SRC
-                        | vk::FormatFeatureFlags::TRANSFER_DST,
-                ) && !caps.is_driver(vk::DriverId::MOLTENVK),
+                formats.nv12 && !caps.is_driver(vk::DriverId::MOLTENVK),
             );
         }
 
         if let Some(ref _sampler_ycbcr_conversion) = self.sampler_ycbcr_conversion {
             features.set(
                 F::TEXTURE_FORMAT_P010,
-                supports_format(
-                    instance,
-                    phd,
-                    vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16,
-                    vk::ImageTiling::OPTIMAL,
-                    vk::FormatFeatureFlags::SAMPLED_IMAGE
-                        | vk::FormatFeatureFlags::TRANSFER_SRC
-                        | vk::FormatFeatureFlags::TRANSFER_DST,
-                ) && !caps.is_driver(vk::DriverId::MOLTENVK),
+                formats.p010 && !caps.is_driver(vk::DriverId::MOLTENVK),
             );
         }
 
         features.set(
             F::EXPERIMENTAL_MESH_SHADER,
-            caps.supports_extension(ext::mesh_shader::NAME),
+            has_extension(ext::mesh_shader::NAME),
         );
         features.set(
             F::EXPERIMENTAL_MESH_SHADER_POINTS,
-            caps.supports_extension(ext::mesh_shader::NAME),
+            has_extension(ext::mesh_shader::NAME),
         );
         if let Some(ref mesh_shader) = self.mesh_shader {
             features.set(
@@ -1491,16 +1438,102 @@ impl PhysicalDeviceFeatures {
             F::SHADER_DRAW_INDEX,
             self.shader_draw_parameters
                 .is_some_and(|a| a.shader_draw_parameters != 0)
-                || caps.supports_extension(c"VK_KHR_shader_draw_parameters"),
+                || has_extension(c"VK_KHR_shader_draw_parameters"),
         );
 
         features.set(
             F::DEBUG_PRINTF,
             caps.device_api_version >= vk::API_VERSION_1_3
-                || caps.supports_extension(khr::shader_non_semantic_info::NAME),
+                || has_extension(khr::shader_non_semantic_info::NAME),
         );
 
         (features, dl_flags)
+    }
+}
+
+/// The support of a physical device for the formats on which wgpu features and downlevel flags
+/// depend ([`PhysicalDeviceFeatures::to_wgpu`]). They are properties of the physical device, which
+/// do not depend on the features or extensions that a device of it enables.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct FormatSupport {
+    /// `S8_UINT` is a depth-stencil attachment and samples.
+    s8: bool,
+    /// `D32_SFLOAT` is a depth-stencil attachment and samples.
+    d32: bool,
+    /// `D24_UNORM_S8_UINT` is a depth-stencil attachment and samples.
+    d24_s8: bool,
+    /// `D32_SFLOAT_S8_UINT` is a depth-stencil attachment and samples.
+    d32_s8: bool,
+    /// `B10G11R11_UFLOAT_PACK32` is a blendable color attachment.
+    rg11b10ufloat_renderable: bool,
+    /// `B8G8R8A8_UNORM` is a storage image that shaders write without a format.
+    bgra8unorm_storage: bool,
+    /// The 32-bit float formats filter linearly.
+    float32_filterable: bool,
+    /// The 32-bit float formats blend.
+    float32_blendable: bool,
+    /// The 16-bit normalized formats ([`is_format_16bit_norm_supported`]).
+    norm16: bool,
+    /// The physical device offers `textureCompressionASTC_LDR`, and the ASTC formats have 3D
+    /// images.
+    astc_3d: bool,
+    /// `G8_B8R8_2PLANE_420_UNORM` samples and is copied.
+    nv12: bool,
+    /// `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` samples and is copied.
+    p010: bool,
+}
+
+impl FormatSupport {
+    /// Queries the format support of `phd`, a physical device of `instance` that `caps`
+    /// describes, and that offers `offered`.
+    fn query(
+        instance: &ash::Instance,
+        phd: vk::PhysicalDevice,
+        caps: &PhysicalDeviceProperties,
+        offered: &PhysicalDeviceFeatures,
+    ) -> Self {
+        let depth_format = |format| {
+            supports_format(
+                instance,
+                phd,
+                format,
+                vk::ImageTiling::OPTIMAL,
+                depth_stencil_required_flags(),
+            )
+        };
+        let planar_format = |format| {
+            supports_format(
+                instance,
+                phd,
+                format,
+                vk::ImageTiling::OPTIMAL,
+                vk::FormatFeatureFlags::SAMPLED_IMAGE
+                    | vk::FormatFeatureFlags::TRANSFER_SRC
+                    | vk::FormatFeatureFlags::TRANSFER_DST,
+            )
+        };
+        Self {
+            s8: depth_format(vk::Format::S8_UINT),
+            d32: depth_format(vk::Format::D32_SFLOAT),
+            d24_s8: depth_format(vk::Format::D24_UNORM_S8_UINT),
+            d32_s8: depth_format(vk::Format::D32_SFLOAT_S8_UINT),
+            rg11b10ufloat_renderable: supports_format(
+                instance,
+                phd,
+                vk::Format::B10G11R11_UFLOAT_PACK32,
+                vk::ImageTiling::OPTIMAL,
+                vk::FormatFeatureFlags::COLOR_ATTACHMENT
+                    | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
+            ),
+            bgra8unorm_storage: supports_bgra8unorm_storage(instance, phd, caps.device_api_version),
+            float32_filterable: is_float32_filterable_supported(instance, phd),
+            float32_blendable: is_float32_blendable_supported(instance, phd),
+            norm16: is_format_16bit_norm_supported(instance, phd),
+            astc_3d: offered.core.texture_compression_astc_ldr != 0
+                && supports_astc_3d(instance, phd),
+            nv12: planar_format(vk::Format::G8_B8R8_2PLANE_420_UNORM),
+            p010: planar_format(vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16),
+        }
     }
 }
 
@@ -2859,10 +2892,12 @@ impl super::Instance {
             return None;
         }
 
+        let format_support =
+            FormatSupport::query(&self.shared.raw, phd, &phd_capabilities, &phd_features);
         let (available_features, mut downlevel_flags) = phd_features.to_wgpu(
-            &self.shared.raw,
-            phd,
             &phd_capabilities,
+            |extension| phd_capabilities.supports_extension(extension),
+            &format_support,
             queue_family_properties,
         );
 
