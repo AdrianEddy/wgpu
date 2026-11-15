@@ -66,7 +66,10 @@ has, so it has no entry of its own; 40 changes a test only.
 | 38 | `f607ba2fd` | perf(core): ask backends for a selection only until no later adapter can outrank it | Review 4 item 4 (the owner's decision 2): with several backends, `request_adapter` asked every backend, so DX12 created a device for its selection, and GL its contexts, after an earlier backend had an adapter that none of theirs could rank before (DX12's device: 0.15 s for the RTX 5090 here, 2 s for the iGPU). It now stops asking there, for `request_adapter` only; the adapter returned and the error stay the same. Tested over 31,944 requests to three test backends: the test fails without the stop, and with a stop on any adapter or in `request_adapters` too. | a release contains it |
 | 39 | `885f87f9b` | fix(core): ask no backend to select an adapter for a surface it has none for | Review 4 item 5 (the owner's decision 5): a request for a surface that has no surface for a backend still asked that backend to select, for a selection that could only be dropped. Such a backend is now enumerated without being asked, and wgpu-hal documents that `surface_hint` is `None` only for a request without a surface, and where an override may ignore it. Two noop hooks: the tests fail without the guard, and with a lazy step that passes no hint or does not check the selection against the surface. `selects_in_dxgi_order` tests DX12's surface path on a DirectComposition surface handle. | with 35's DX12 selection |
 | 40 | `781e0e69e` | test(core): build the concurrent delivery test only where callbacks are `Send` | Review 4 item 1 (the owner's decision 4): CI's wasm32 row `clippy --tests --features glsl,spirv` failed from commit 16 on (Upstream review points). Test only. | folded into 16 at the next rebase onto `trunk` |
-| 41 | (this commit) | docs: FORK.md: carry lazy adapter selection | This file | the branch is dropped |
+| 41 | `e7c9c5d98` | docs: FORK.md: carry lazy adapter selection | This file | the branch is dropped |
+| 42 | `469c40f22` | fix(vulkan): enable VK_KHR_zero_initialize_workgroup_memory where its feature is used | Found for the consumers' decision 11: on a device older than Vulkan 1.3 that lists the extension, the adapter offered its feature and Naga initialized workgroup memory with it, but the device enabled neither extension nor feature (`VUID-RuntimeSpirv-shaderZeroInitializeWorkgroupMemory-06372`). Upstream `trunk` has the same gap. Tested by the extension list of a Vulkan 1.2 device, which fails without it; no device here is older than Vulkan 1.3. | a release contains it |
+| 43 | `ac3fba1e7` | feat(vulkan)!: take a raw device's capabilities from the features it was created with | The consumers' decision 11, the owner's ruling "Pass the enabled features" (2026-11-15): `device_from_raw` used every feature the adapter offers. It takes the device's `enabled_features` (breaking), which `PhysicalDeviceFeatures::from_enabled` reads from a creator's `VkPhysicalDeviceFeatures2` chain; the device's private capabilities, present fences and Naga options follow them, and a device without a core feature behind the adapter's downlevel flags is refused (`Adapter::missing_downlevel_features`). Device tests fail with the adapter's capabilities, with the adapter's present fences, and without the refusal. | upstream carries an equivalent |
+| 44 | (this commit) | docs: FORK.md: carry caller-enabled features | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 4, 5, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after
 it (their tests use it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25's #10675 half in
@@ -89,6 +92,9 @@ only DX12 adapter is WARP, the DX12 device test cannot fail without 35 (review 4
 (`find_adapters`, `suitable_adapters` and `rank_adapters`) with 38 needs neither the HAL hook nor DX12's
 selection, so it can also be proposed apart from them. 37 alone. 40 goes into 16.
 
+Devices created elsewhere: 42 alone. 43 after 31, whose `DeviceQueue` its signature extends, and 33, whose present
+fences it derives from the device's features; or rebased onto `trunk`'s `device_from_raw` without them.
+
 ## The future of lazy adapter selection
 
 The owner's decision 1 of review 4: keep 35 until gfx-rs/wgpu#10775 is released. That PR, open when review 4 read
@@ -106,6 +112,31 @@ one LUID. Then rebase onto it:
 Either way, 35's core restructuring and 38's early stop stay, as a core-only change without
 `hal::Instance::request_adapter`: with `Backends::all()` and no LUID, a Vulkan adapter of the best rank still means
 that DX12 and GL are never asked.
+
+## Devices created elsewhere (commits 42 and 43)
+
+`Adapter::device_from_raw` takes the extensions and the features that the device was created with, and wgpu-hal
+takes its paths from them, never from what the adapter offers (the owner's ruling on the consumers' decision 11):
+
+- **The features** come from the creator's `VkPhysicalDeviceFeatures2` chain, through
+  `PhysicalDeviceFeatures::from_enabled`, which reads the Vulkan 1.1, 1.2 and 1.3 structures as well as the
+  extensions' own, as FFmpeg's `AVVulkanDeviceContext::device_features` and libplacebo's
+  `pl_vulkan_import_params::features` give them. wgpu-hal's own opening passes the `PhysicalDeviceFeatures` it
+  enabled.
+- **The paths with a fallback:** without `timelineSemaphore`, binary fences; without `robustBufferAccess2` or
+  `robustImageAccess`, bounds checks that Naga injects; without `shaderZeroInitializeWorkgroupMemory`,
+  zero-initialization that Naga polyfills; without `swapchainMaintenance1`, the teardown that waits for the queue;
+  without `multiDrawIndirect`, single draws; without `shaderIntegerDotProduct` or `shaderInt8`, no such SPIR-V
+  capabilities; without `storageInputOutput16`, 16-bit I/O through 32-bit types. Image view usage, image format
+  lists and the `NONE` store op follow the device's extensions.
+- **No fallback:** `independentBlend`, `sampleRateShading`, `imageCubeArray`, `samplerAnisotropy`,
+  `fragmentStoresAndAtomics` and `depthBiasClamp`, which wgpu-core relies on through the adapter's downlevel flags.
+  `device_from_raw` refuses a device that lacks one the adapter offers (a usage-error panic, before taking the
+  device), and `Adapter::missing_downlevel_features` names them, so that a caller refuses such a device first.
+- **The caller's word, not checked:** that the device supports the `features` requested from it (the extensions
+  and features that `required_device_extensions` and `physical_device_features` select for them).
+- `fullDrawIndexUint32`, behind `DownlevelFlags::FULL_DRAW_INDEX_UINT32`, is reported from the adapter's offer and
+  not enabled, by wgpu-hal's own opening too, as on `trunk`; wgpu-core validates nothing against it. Unchanged.
 
 ## Already upstream, not carried
 
@@ -239,6 +270,11 @@ that DX12 and GL are never asked.
   `max_bindings_per_bind_group` of `u32::MAX` allows. Passthrough GLSL with hard-coded bindings shifts for
   layouts with bindings of the other pass kind or visible to no stage. The combined binding-point limits are
   still not queried.
+- **A device created elsewhere without one of the six downlevel core features is refused** (commit 43): wgpu-core
+  keeps downlevel capabilities per adapter, and has no per-device set with which such a device could open with
+  fewer capabilities. That refuses FFmpeg's own devices wherever the adapter offers the six: FFmpeg's
+  `device_features_copy_needed` enables none of `imageCubeArray`, `independentBlend`, `samplerAnisotropy`,
+  `sampleRateShading` and `depthBiasClamp` (read 2026-11-15). The owner's decision.
 - **Lazy adapter selection** (commits 35, 38 and 39):
   - For `LowPower` and `HighPerformance`, DX12 follows DXGI's preference order, so `request_adapter` need not
     return `request_adapters`' first adapter: it can return another adapter of the same device type, or, where a
@@ -368,6 +404,9 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   and two `doc`, passed before it too.
 - **The CHANGELOG** entries of commits 28 to 33 are cut to `trunk`'s length; 28 and 31 are `BREAKING:`, and 28
   is `fix(core)!:` (it tightens `unsafe` contracts).
+- **`device_from_raw` takes `enabled_features`** (commit 43, `BREAKING:` in the CHANGELOG): every caller passes
+  the features its device was created with. Upstream's #9980 asks for validated alternatives to the `_from_raw`
+  APIs, and #10304 an extension API; neither covers a raw device's enabled features.
 
 ## Tests not run here
 
@@ -416,3 +455,7 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   fix round (432/432): headless Chromium 149,
   whose `navigator.gpu` exists and whose `requestAdapter` resolves `null`, and WebGL on SwiftShader. The three tests
   that replace `requestAdapter` check that wgpu called the replacement, and fail when it is not installed.
+- The caller-enabled features' device tests (commit 43, `vulkan::device_tests::enabled_features`) run on every
+  Vulkan adapter. The teardown pin needs `VK_EXT_headless_surface`, so it ran on RADV only (eddy2lnx); on the other
+  adapters the paths test checks that presents signal no fence. Commit 42's path, a device older than Vulkan 1.3,
+  exists on no machine here: its test is the extension list.
