@@ -414,6 +414,53 @@ fn ffmpeg_core(adapter: &super::super::Adapter) -> vk::PhysicalDeviceFeatures {
         .shader_float64(offered.shader_float64 != 0)
 }
 
+/// On each adapter, `device_from_raw` refuses a queue family that the physical device lacks with an
+/// error, leaving the device with its caller: the drop callback is not called, and the caller
+/// destroys the device.
+#[test]
+fn a_device_that_device_from_raw_refuses_stays_with_its_caller() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        let enabled = vk::PhysicalDeviceFeatures2::default();
+        let (raw, extensions) = create(adapter, &instance, &enabled);
+        // SAFETY: No chain.
+        let enabled_features =
+            unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
+        let called = Arc::new(core::sync::atomic::AtomicBool::new(false));
+        let callback = {
+            let called = Arc::clone(&called);
+            alloc::boxed::Box::new(move || called.store(true, core::sync::atomic::Ordering::SeqCst))
+        };
+        // SAFETY: Created from this adapter with these extensions and features; the queue family
+        // does not exist, which is what is tested.
+        let opened = unsafe {
+            adapter.device_from_raw(
+                raw.clone(),
+                Some(callback),
+                &extensions,
+                &enabled_features,
+                wgt::Features::empty(),
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(u32::MAX, 0),
+            )
+        };
+        assert!(opened.is_err(), "{:?}", exposed.info.name);
+        assert!(
+            !called.load(core::sync::atomic::Ordering::SeqCst),
+            "{:?}: the drop callback was called",
+            exposed.info.name
+        );
+        // SAFETY: Still ours, and nothing uses it.
+        unsafe { raw.destroy_device(None) };
+    }
+}
+
 /// On each adapter, `open_with_callback` refuses, before creating the device, to open one whose
 /// callback removed an extension that a requested feature needs, with an error: the device would
 /// not give the feature. Before, it created the device and then panicked, leaking it.

@@ -461,6 +461,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Offer `TEXTURE_COMPRESSION_BC_SLICED_3D` and `TEXTURE_COMPRESSION_ASTC_SLICED_3D` where every format of the family has 3D images as wgpu creates them: no Vulkan feature guarantees them. A device has them with its family's formats, which a request for them enables. By @AdrianEddy.
 - Give a hole among a render pipeline's colour targets the first target's blend state: without `independentBlend`, every attachment's state must be identical, unused ones included (VUID-VkPipelineColorBlendStateCreateInfo-pAttachments-00605). By @AdrianEddy.
 - Query the feature structures of extensions promoted to a device's version by version, as a device's features follow them: a Vulkan 1.3 device offers `TEXTURE_COMPRESSION_ASTC_HDR` without listing its extension, and opening one for it no longer enables the extension at 1.3. By @AdrianEddy.
+- `Adapter::device_from_raw` takes no step that can fail after taking the device: on an error, the device and its drop callback stay with the caller. By @AdrianEddy.
 
 #### Metal
 

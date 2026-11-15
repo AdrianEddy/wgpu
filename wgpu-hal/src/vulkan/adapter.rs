@@ -3442,6 +3442,11 @@ impl super::Adapter {
     /// - Destroying the device requires that no other code uses the device or its queues, and
     ///   that code outside wgpu-hal has destroyed every object it created on it.
     ///
+    /// # Errors
+    ///
+    /// On an error, wgpu-hal has not taken `raw_device`: the caller keeps it, and `drop_callback`
+    /// is dropped without being called.
+    ///
     /// # Panics
     ///
     /// Before taking `raw_device`: if `features` has a feature that is not among
@@ -3903,13 +3908,44 @@ impl super::Adapter {
             0, 0, 0, 0,
         ];
 
-        let drop_guard = crate::DropGuard::from_option(drop_callback);
-
+        // Every step that can fail comes before wgpu-hal takes the device: on an error, the device
+        // and its drop callback stay with the caller, and what was created on it is destroyed.
         let empty_descriptor_set_layout = unsafe {
             raw_device
                 .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default(), None)
                 .map_err(super::map_host_device_oom_err)?
         };
+        let relay_signal =
+            match unsafe { raw_device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) }
+            {
+                Ok(semaphore) => semaphore,
+                Err(err) => {
+                    unsafe {
+                        raw_device.destroy_descriptor_set_layout(empty_descriptor_set_layout, None)
+                    };
+                    return Err(super::map_host_device_oom_err(err));
+                }
+            };
+        let allocation_sizes = AllocationSizes::from_memory_hints(memory_hints);
+        let buffer_device_address = uses_device_addresses(enabled_extensions, enabled_features);
+        let mem_allocator = match super::MemoryAllocators::new(
+            self.instance.raw.clone(),
+            raw_device.clone(),
+            self.raw,
+            buffer_device_address,
+            allocation_sizes,
+        ) {
+            Ok(allocator) => allocator,
+            Err(err) => {
+                unsafe {
+                    raw_device.destroy_semaphore(relay_signal, None);
+                    raw_device.destroy_descriptor_set_layout(empty_descriptor_set_layout, None);
+                }
+                return Err(err.into());
+            }
+        };
+
+        let drop_guard = crate::DropGuard::from_option(drop_callback);
 
         let shared = Arc::new(super::DeviceShared {
             raw: raw_device,
@@ -3970,29 +4006,23 @@ impl super::Adapter {
             dxgi_interop: wgpu_sync::OnceCell::new(),
         });
 
-        let relay_semaphores = super::RelaySemaphores::new(&shared)?;
+        if !self
+            .instance
+            .flags
+            .contains(wgt::InstanceFlags::DISCARD_HAL_LABELS)
+        {
+            unsafe { shared.set_object_name(relay_signal, "RelaySemaphores: 1") };
+        }
 
         let queue = super::Queue {
             raw: raw_queue,
             device: Arc::clone(&shared),
             family_index,
-            relay_semaphores: Mutex::new(relay_semaphores),
+            relay_semaphores: Mutex::new(super::RelaySemaphores::new(relay_signal)),
             signal_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Signal)),
             wait_semaphores: Mutex::new(SemaphoreList::new(SemaphoreListMode::Wait)),
             next_submit_chain: Mutex::new(None),
         };
-
-        let allocation_sizes = AllocationSizes::from_memory_hints(memory_hints);
-
-        let buffer_device_address = uses_device_addresses(enabled_extensions, enabled_features);
-
-        let mem_allocator = super::MemoryAllocators::new(
-            self.instance.raw.clone(),
-            shared.raw.clone(),
-            self.raw,
-            buffer_device_address,
-            allocation_sizes,
-        )?;
 
         let desc_allocator = super::descriptor::DescriptorAllocator::new(
             if let Some(di) = self.phd_capabilities.descriptor_indexing {
@@ -4117,9 +4147,9 @@ impl super::Adapter {
 
         // SAFETY: Created just now from this adapter, with these extensions and features, which
         // give each of `features` (above).
-        unsafe {
+        let opened = unsafe {
             self.device_from_raw_unchecked(
-                raw_device,
+                raw_device.clone(),
                 None,
                 &enabled_extensions,
                 &enabled_phd_features,
@@ -4129,7 +4159,12 @@ impl super::Adapter {
                 super::DeviceQueue::new(family_index, 0).create_flags(family_infos[0].flags),
                 queue_family_properties,
             )
+        };
+        if opened.is_err() {
+            // Not taken: wgpu-hal created it, and destroys it.
+            unsafe { raw_device.destroy_device(None) };
         }
+        opened
     }
 }
 
