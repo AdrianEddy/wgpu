@@ -471,6 +471,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Split indirect mesh task draws into one command per draw without `multiDrawIndirect` or beyond `maxDrawIndirectCount`, as the other indirect draws do (VUID-vkCmdDrawMeshTasksIndirectEXT-drawCount-02718, -02719). By @AdrianEddy.
 - Convert a `One` swizzle of a depth-stencil view to `A` on every device: `depthStencilSwizzleOneSupport` is part of `maintenance5`, which wgpu-hal does not enable. By @AdrianEddy.
 - Query memory budgets only where the physical device offers `VK_EXT_memory_budget` as well as the device having enabled it, so that the RADV workaround holds for devices created elsewhere. By @AdrianEddy.
+- Refuse to create a swapchain, with a `SurfaceError`, on a device created without `VK_KHR_swapchain` or whose queue family cannot present to the surface (VUID-vkQueuePresentKHR-pSwapchains-01292), instead of panicking or presenting from the wrong family. By @AdrianEddy.
 
 #### Metal
 
