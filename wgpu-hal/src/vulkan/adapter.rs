@@ -1619,9 +1619,21 @@ impl PhysicalDeviceFeatures {
 
         features.set(F::DEPTH32FLOAT_STENCIL8, formats.d32_s8);
 
+        // Below Vulkan 1.2, an extension needs the extensions it depends on
+        // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387): `VK_KHR_spirv_1_4` needs Vulkan
+        // 1.1 and `VK_KHR_shader_float_controls`, and `VK_KHR_acceleration_structure` Vulkan 1.1
+        // and `VK_EXT_descriptor_indexing`.
+        let version = caps.device_api_version;
+        let spirv_1_4 = version >= vk::API_VERSION_1_2
+            || (version >= vk::API_VERSION_1_1
+                && has_extension(khr::spirv_1_4::NAME)
+                && has_extension(khr::shader_float_controls::NAME));
         let supports_acceleration_structures = has_extension(khr::deferred_host_operations::NAME)
             && has_extension(khr::acceleration_structure::NAME)
             && has_extension(khr::buffer_device_address::NAME)
+            && (version >= vk::API_VERSION_1_2
+                || (version >= vk::API_VERSION_1_1
+                    && has_extension(ext::descriptor_indexing::NAME)))
             && self
                 .acceleration_structure
                 .is_some_and(|features| features.acceleration_structure != 0)
@@ -1629,7 +1641,9 @@ impl PhysicalDeviceFeatures {
                 .buffer_device_address
                 .is_some_and(|features| features.buffer_device_address != 0);
 
+        // `VK_KHR_ray_query` also needs `VK_KHR_spirv_1_4` below Vulkan 1.2.
         let supports_ray_query = supports_acceleration_structures
+            && spirv_1_4
             && has_extension(khr::ray_query::NAME)
             && self
                 .ray_query
@@ -1669,7 +1683,7 @@ impl PhysicalDeviceFeatures {
 
         if supports_acceleration_structures
             && has_extension(khr::ray_tracing_pipeline::NAME)
-            && promoted(vk::API_VERSION_1_2, khr::spirv_1_4::NAME)
+            && spirv_1_4
             && self
                 .ray_tracing_pipeline
                 .is_some_and(|features| features.ray_tracing_pipeline != 0)
@@ -1698,10 +1712,15 @@ impl PhysicalDeviceFeatures {
 
         features.set(F::FLOAT32_BLENDABLE, formats.float32_blendable);
 
-        // The two-plane formats come with `VK_KHR_sampler_ycbcr_conversion`, promoted to 1.1. Their
-        // images, the views of their planes, and copies need no `samplerYcbcrConversion`, which
-        // only conversion objects do (VUID-vkCreateSamplerYcbcrConversion-None-01648).
-        let two_plane_formats = promoted(vk::API_VERSION_1_1, khr::sampler_ycbcr_conversion::NAME)
+        // The two-plane formats come with `VK_KHR_sampler_ycbcr_conversion`, promoted to 1.1, which
+        // needs `VK_KHR_bind_memory2` and `VK_KHR_get_memory_requirements2` before it (and
+        // `VK_KHR_maintenance1`, which every Vulkan 1.0 device has here). Their images, the views of
+        // their planes, and copies need no `samplerYcbcrConversion`, which only conversion objects
+        // do (VUID-vkCreateSamplerYcbcrConversion-None-01648).
+        let two_plane_formats = (version >= vk::API_VERSION_1_1
+            || (has_extension(khr::sampler_ycbcr_conversion::NAME)
+                && has_extension(khr::bind_memory2::NAME)
+                && has_extension(khr::get_memory_requirements2::NAME)))
             && !caps.is_driver(vk::DriverId::MOLTENVK);
         features.set(F::TEXTURE_FORMAT_NV12, two_plane_formats && formats.nv12);
         features.set(F::TEXTURE_FORMAT_P010, two_plane_formats && formats.p010);
@@ -1709,8 +1728,7 @@ impl PhysicalDeviceFeatures {
         // Mesh and task shader stages need their features (VUID-VkPipelineShaderStageCreateInfo-
         // stage-02091, -02092).
         // `VK_EXT_mesh_shader` and `VK_KHR_ray_tracing_pipeline` require `VK_KHR_spirv_1_4`
-        // before Vulkan 1.2 (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
-        let spirv_1_4 = promoted(vk::API_VERSION_1_2, khr::spirv_1_4::NAME);
+        // before Vulkan 1.2 (above).
         let mesh_shader = has_extension(ext::mesh_shader::NAME)
             && spirv_1_4
             && self
@@ -2077,10 +2095,14 @@ impl PhysicalDeviceProperties {
             // Require `VK_KHR_sampler_ycbcr_conversion`, which adds the two-plane formats, if a
             // feature that uses them was requested: a device may use an enumerant that an
             // extension adds only with the extension.
+            // It requires `VK_KHR_bind_memory2` and `VK_KHR_get_memory_requirements2`
+            // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
             if requested_features
                 .intersects(wgt::Features::TEXTURE_FORMAT_NV12 | wgt::Features::TEXTURE_FORMAT_P010)
             {
                 extensions.push(khr::sampler_ycbcr_conversion::NAME);
+                extensions.push(khr::bind_memory2::NAME);
+                extensions.push(khr::get_memory_requirements2::NAME);
             }
 
             // Require `VK_KHR_16bit_storage` if `SHADER_F16` or `SHADER_I16` was requested
@@ -2114,8 +2136,10 @@ impl PhysicalDeviceProperties {
                 extensions.push(khr::timeline_semaphore::NAME);
             }
 
-            // Require `VK_EXT_descriptor_indexing` if one of the associated features was requested
-            if requested_features.intersects(INDEXING_FEATURES) {
+            // Require `VK_EXT_descriptor_indexing` if one of the associated features was requested,
+            // or acceleration structures, whose extension requires it
+            // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+            if requested_features.intersects(INDEXING_FEATURES | ACCELERATION_STRUCTURE_FEATURES) {
                 extensions.push(ext::descriptor_indexing::NAME);
             }
 
@@ -2136,10 +2160,15 @@ impl PhysicalDeviceProperties {
                 extensions.push(khr::shader_float16_int8::NAME);
             }
 
-            // `SPV_EXT_mesh_shader`, `SPV_KHR_ray_tracing` and
-            // `SPV_EXT_shader_invocation_reorder` all require SPIR-V 1.4.
-            if requested_features.intersects(MESH_SHADER_FEATURES | RAY_TRACING_PIPELINE_FEATURES) {
+            // `SPV_EXT_mesh_shader`, `SPV_KHR_ray_tracing` and `SPV_EXT_shader_invocation_reorder`
+            // all require SPIR-V 1.4, and `VK_KHR_ray_query` requires `VK_KHR_spirv_1_4`, which
+            // requires `VK_KHR_shader_float_controls`
+            // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387).
+            if requested_features.intersects(
+                MESH_SHADER_FEATURES | RAY_TRACING_PIPELINE_FEATURES | RAY_QUERY_FEATURES,
+            ) {
                 extensions.push(khr::spirv_1_4::NAME);
+                extensions.push(khr::shader_float_controls::NAME);
             }
 
             // Require `VK_KHR_vulkan_memory_model` if cooperative matrices were requested: their
