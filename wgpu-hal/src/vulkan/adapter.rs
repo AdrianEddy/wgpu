@@ -398,6 +398,15 @@ fn device_downlevel_capabilities(
     }
 }
 
+/// Whether a device of Vulkan `device_api_version`, created with `enabled_extensions`, may take
+/// SPIR-V that declares `SPV_KHR_non_semantic_info`, which Naga's debug printing does: with Vulkan
+/// 1.3, or with `VK_KHR_shader_non_semantic_info` enabled (VUID-VkShaderModuleCreateInfo-pCode-08742).
+/// The device's version, not the loader's.
+fn uses_non_semantic_info(device_api_version: u32, enabled_extensions: &[&'static CStr]) -> bool {
+    device_api_version >= vk::API_VERSION_1_3
+        || enabled_extensions.contains(&khr::shader_non_semantic_info::NAME)
+}
+
 /// The structure at `structure`, if it is of type `T`. The copy may hold the caller's `p_next`: it
 /// is read, not kept.
 ///
@@ -3895,8 +3904,10 @@ impl super::Adapter {
                 spv::WriterFlags::PRINT_ON_RAY_QUERY_INITIALIZATION_FAIL
                     | spv::WriterFlags::PRINT_ON_TRACE_RAYS_FAIL,
                 self.instance.flags.contains(wgt::InstanceFlags::DEBUG)
-                    && (self.instance.instance_api_version >= vk::API_VERSION_1_3
-                        || enabled_extensions.contains(&khr::shader_non_semantic_info::NAME)),
+                    && uses_non_semantic_info(
+                        self.phd_capabilities.device_api_version,
+                        enabled_extensions,
+                    ),
             );
             if features.contains(wgt::Features::EXPERIMENTAL_RAY_QUERY) {
                 capabilities.push(spv::Capability::RayQueryKHR);
