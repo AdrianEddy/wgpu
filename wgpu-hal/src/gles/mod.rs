@@ -366,6 +366,10 @@ pub struct Adapter {
 #[derive(Debug)]
 pub struct Device {
     shared: Arc<AdapterShared>,
+    /// The features the device was opened with; `AdapterShared::features` are the adapter's.
+    features: wgt::Features,
+    /// The limits the device was opened with; `AdapterShared::limits` are the adapter's.
+    limits: wgt::Limits,
     main_vao: glow::VertexArray,
     #[cfg(all(native, feature = "renderdoc"))]
     render_doc: crate::auxil::renderdoc::RenderDoc,

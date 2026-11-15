@@ -3936,6 +3936,7 @@ impl super::Adapter {
             )),
             private_caps,
             features,
+            limits: limits.clone(),
             downlevel,
             workarounds: self.workarounds,
             render_passes: Mutex::new(Default::default()),

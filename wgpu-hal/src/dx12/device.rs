@@ -2754,6 +2754,14 @@ impl crate::Device for super::Device {
         self.counters.as_ref().clone()
     }
 
+    fn features(&self) -> wgt::Features {
+        self.features
+    }
+
+    fn limits(&self) -> wgt::Limits {
+        self.limits.clone()
+    }
+
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         self.downlevel.clone()
     }

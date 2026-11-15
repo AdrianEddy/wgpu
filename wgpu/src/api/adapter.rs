@@ -78,10 +78,15 @@ impl Adapter {
 
     /// Create a wgpu [`Device`] and [`Queue`] from a wgpu-hal [`hal::OpenDevice`].
     ///
+    /// `desc` is validated as [`Self::request_device`] validates it, but against the features and
+    /// limits that `hal_device` was opened with ([`hal::Device::features`],
+    /// [`hal::Device::limits`]) instead of the adapter's: a device created outside wgpu may have
+    /// features and limits that its adapter does not offer. Requesting a feature or a limit
+    /// outside them is an error. On an error, `hal_device` is dropped.
+    ///
     /// # Safety
     ///
     /// - `hal_device` must be created from this adapter internal handle.
-    /// - `desc.features` must be a subset of `hal_device`'s supported features.
     #[cfg(wgpu_core)]
     pub unsafe fn create_device_from_hal<A: hal::Api>(
         &self,

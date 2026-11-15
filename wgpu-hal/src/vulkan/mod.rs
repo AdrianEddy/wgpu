@@ -697,6 +697,7 @@ struct DeviceShared {
     private_caps: PrivateCapabilities,
     workarounds: Workarounds,
     features: wgt::Features,
+    limits: wgt::Limits,
     /// The device's downlevel capabilities, from what it was created with.
     downlevel: wgt::DownlevelCapabilities,
     render_passes: Mutex<FastHashMap<RenderPassKey, vk::RenderPass>>,

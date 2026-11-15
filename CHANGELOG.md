@@ -287,6 +287,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Texture copy extents are now correctly validated for subsampled chroma planes. Copying is now supported between a plane of a multi-planar texture and other textures or buffers, in either direction. By @andyleiserson in [#10776](https://github.com/gfx-rs/wgpu/pull/10776).
 - `Device::poll` now returns the new `PollError::DeviceLost` when it finds the device lost, instead of panicking. `PollError` is exhaustive, so code that matches it needs the new arm. `wgpu_core::device::WaitIdleError::to_poll_error` now returns a `PollError` for every error, not an `Option`. By @AdrianEddy.
 - BREAKING: `wgpu::custom::DeviceInterface` requires `downlevel_capabilities`. By @AdrianEddy.
+- `Adapter::create_device_from_hal` validates its descriptor as `request_device` does, against the features and limits the hal device was opened with: requesting others is an error. By @AdrianEddy.
 
 #### naga
 
@@ -314,6 +315,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - BREAKING: `wgpu_hal::DynInstance` requires `request_adapter`. By @AdrianEddy in [#10011](https://github.com/gfx-rs/wgpu/pull/10011).
 - BREAKING: `wgpu_hal::Device` requires `downlevel_capabilities`, and wgpu-core validates each device against its own. A Vulkan device created without `independentBlend`, `sampleRateShading`, `imageCubeArray`, `samplerAnisotropy`, `fragmentStoresAndAtomics`, `depthBiasClamp` or `fullDrawIndexUint32` opens without the matching downlevel flag, and `Adapter::device_downlevel_capabilities` gives its flags. wgpu-hal's own devices enable `fullDrawIndexUint32` where offered. A device has no downlevel flag that its adapter lacks. By @AdrianEddy.
 - BREAKING: `wgpu_hal::vulkan::Adapter::device_from_raw` refuses a requested feature that the device's extensions and features do not give, naming it, and `Adapter::device_features` gives those they give. By @AdrianEddy.
+- BREAKING: `wgpu_hal::Device` requires `features` and `limits`, the features and limits the device was opened with. wgpu-core refuses a descriptor feature outside them on the hal path, `RequestDeviceError::FeaturesNotOpened`, and a limit beyond them, `RequestDeviceError::LimitsExceeded`, and validates the rest of the descriptor as `request_device` does, but against the device instead of its adapter. By @AdrianEddy.
 
 #### Metal
 
