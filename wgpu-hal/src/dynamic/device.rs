@@ -225,6 +225,8 @@ pub trait DynDevice: DynResource {
 
     /// Dynamic version of [Device::get_internal_counters]
     fn get_internal_counters(&self) -> wgt::HalCounters;
+    /// Dynamic version of [Device::downlevel_capabilities]
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
     /// Dynamic version of [Device::generate_allocator_report]
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport>;
 
@@ -661,6 +663,10 @@ impl<D: Device + DynResource> DynDevice for D {
 
     fn get_internal_counters(&self) -> wgt::HalCounters {
         D::get_internal_counters(self)
+    }
+
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
+        D::downlevel_capabilities(self)
     }
 
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {

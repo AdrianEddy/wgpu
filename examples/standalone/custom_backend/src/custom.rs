@@ -136,6 +136,10 @@ impl DeviceInterface for CustomDevice {
         unimplemented!()
     }
 
+    fn downlevel_capabilities(&self) -> wgpu::DownlevelCapabilities {
+        unimplemented!()
+    }
+
     fn adapter_info(&self) -> wgpu::AdapterInfo {
         unimplemented!()
     }

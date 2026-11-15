@@ -670,7 +670,11 @@ impl Device {
 
         // Cloned as we need them below anyway.
         let alignments = adapter.raw.capabilities.alignments.clone();
-        let downlevel = adapter.raw.capabilities.downlevel.clone();
+        // The device's own: a device that lacks a capability of its adapter is validated without it.
+        // It has none that its adapter lacks, such as one that a hal user removed from the
+        // adapter's before giving it to wgpu-core.
+        let mut downlevel = raw.downlevel_capabilities();
+        downlevel.flags &= adapter.raw.capabilities.downlevel.flags;
         let limits = &adapter.raw.capabilities.limits;
 
         let enable_indirect_validation = instance_flags

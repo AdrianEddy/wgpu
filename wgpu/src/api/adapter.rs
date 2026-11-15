@@ -176,7 +176,8 @@ impl Adapter {
         self.inner.get_info()
     }
 
-    /// Get info about the adapter itself.
+    /// The downlevel capabilities of the adapter, which the devices that it opens have. A device
+    /// created from a raw device may have fewer ([`Device::downlevel_capabilities`]).
     pub fn get_downlevel_capabilities(&self) -> DownlevelCapabilities {
         self.inner.downlevel_capabilities()
     }

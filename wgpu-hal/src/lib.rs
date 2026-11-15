@@ -1332,6 +1332,12 @@ pub trait Device: WasmNotSendSync {
 
     fn get_internal_counters(&self) -> wgt::HalCounters;
 
+    /// The downlevel capabilities of this device: those of its adapter, unless the device lacks a
+    /// capability that the adapter offers, as a Vulkan device created outside wgpu-hal without a
+    /// feature or an extension behind a downlevel flag does
+    /// (`vulkan::Adapter::device_downlevel_capabilities`). It has none that its adapter lacks.
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
+
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {
         None
     }

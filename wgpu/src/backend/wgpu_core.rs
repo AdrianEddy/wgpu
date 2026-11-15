@@ -991,6 +991,10 @@ impl dispatch::DeviceInterface for CoreDevice {
             .is_surface_supported(&surface.as_core().wgpu_surface)
     }
 
+    fn downlevel_capabilities(&self) -> crate::DownlevelCapabilities {
+        self.wgpu_device.downlevel().clone()
+    }
+
     fn adapter_info(&self) -> crate::AdapterInfo {
         self.wgpu_device.adapter_info()
     }

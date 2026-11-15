@@ -931,6 +931,10 @@ impl crate::Device for Context {
         Default::default()
     }
 
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
+        CAPABILITIES.downlevel
+    }
+
     fn check_if_oom(&self) -> DeviceResult<()> {
         #[cfg(feature = "noop_test_hooks")]
         if let Some(error) = self.hooks().take_failure(DeviceOperation::CheckIfOom) {

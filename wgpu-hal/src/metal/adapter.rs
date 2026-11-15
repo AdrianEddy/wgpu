@@ -1545,7 +1545,8 @@ impl super::CapabilitiesQuery {
         features
     }
 
-    pub fn capabilities(&self, instance_flags: wgt::InstanceFlags) -> crate::Capabilities {
+    /// The downlevel capabilities of the device, which its adapter and every device of it have.
+    pub fn downlevel(&self) -> wgt::DownlevelCapabilities {
         let mut downlevel = wgt::DownlevelCapabilities::default();
         downlevel.flags.set(
             wgt::DownlevelFlags::FRAGMENT_WRITABLE_STORAGE,
@@ -1577,6 +1578,11 @@ impl super::CapabilitiesQuery {
             wgt::DownlevelFlags::TEXTURE_COMPRESSION,
             self.format_bc || (self.format_eac_etc && self.format_astc),
         );
+        downlevel
+    }
+
+    pub fn capabilities(&self, instance_flags: wgt::InstanceFlags) -> crate::Capabilities {
+        let downlevel = self.downlevel();
 
         let max_storage_buffers_per_shader_stage;
         let max_uniform_buffers_per_shader_stage;

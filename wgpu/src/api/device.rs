@@ -157,6 +157,18 @@ impl Device {
         self.inner.is_surface_supported(&surface.inner)
     }
 
+    /// The downlevel capabilities of this device, against which its use is validated.
+    ///
+    /// They are its adapter's ([`Adapter::get_downlevel_capabilities`]), unless the device lacks
+    /// a capability that the adapter offers, as a device created from a raw Vulkan device without
+    /// a feature behind a downlevel flag does ([`Adapter::create_device_from_hal`]); never more.
+    /// On the WebGPU backend, wgpu reports all flags, as the adapter does, and the browser
+    /// validates.
+    #[must_use]
+    pub fn downlevel_capabilities(&self) -> DownlevelCapabilities {
+        self.inner.downlevel_capabilities()
+    }
+
     /// Get info about the adapter that this device was created from.
     pub fn adapter_info(&self) -> AdapterInfo {
         self.inner.adapter_info()

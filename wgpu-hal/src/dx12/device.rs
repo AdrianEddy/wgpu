@@ -51,6 +51,7 @@ impl super::Device {
         memory_budget_thresholds: wgt::MemoryBudgetThresholds,
         compiler_container: Arc<shader_compilation::CompilerContainer>,
         backend_options: wgt::Dx12BackendOptions,
+        downlevel: wgt::DownlevelCapabilities,
     ) -> Result<Self, crate::DeviceError> {
         if private_caps
             .instance_flags
@@ -228,6 +229,7 @@ impl super::Device {
             shader_cache: Default::default(),
             counters: Default::default(),
             limits: limits.clone(),
+            downlevel,
         })
     }
 
@@ -2750,6 +2752,10 @@ impl crate::Device for super::Device {
 
     fn get_internal_counters(&self) -> wgt::HalCounters {
         self.counters.as_ref().clone()
+    }
+
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
+        self.downlevel.clone()
     }
 
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {

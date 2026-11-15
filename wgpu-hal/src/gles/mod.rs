@@ -312,6 +312,8 @@ struct AdapterShared {
     private_caps: PrivateCapabilities,
     features: wgt::Features,
     limits: wgt::Limits,
+    /// The downlevel capabilities of the adapter and of its devices.
+    downlevel: wgt::DownlevelCapabilities,
     workarounds: Workarounds,
     options: wgt::GlBackendOptions,
     shading_language_version: naga::back::glsl::Version,
@@ -332,6 +334,7 @@ impl fmt::Debug for AdapterShared {
             private_caps,
             features,
             limits,
+            downlevel,
             workarounds,
             options,
             shading_language_version,
@@ -344,6 +347,7 @@ impl fmt::Debug for AdapterShared {
             .field("private_caps", private_caps)
             .field("features", features)
             .field("limits", limits)
+            .field("downlevel", downlevel)
             .field("workarounds", workarounds)
             .field("options", options)
             .field("shading_language_version", shading_language_version)

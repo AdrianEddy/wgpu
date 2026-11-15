@@ -399,6 +399,8 @@ pub struct Adapter {
     memory_budget_thresholds: wgt::MemoryBudgetThresholds,
     compiler_container: Arc<shader_compilation::CompilerContainer>,
     options: wgt::Dx12BackendOptions,
+    /// The downlevel capabilities of the adapter, which its devices have.
+    downlevel: wgt::DownlevelCapabilities,
 }
 
 unsafe impl Send for Adapter {}
@@ -473,6 +475,7 @@ pub struct Device {
     shader_cache: Mutex<ShaderCache>,
     counters: Arc<wgt::HalCounters>,
     limits: wgt::Limits,
+    downlevel: wgt::DownlevelCapabilities,
 }
 
 impl Drop for Device {

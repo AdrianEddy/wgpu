@@ -1002,6 +1002,7 @@ impl super::Adapter {
                     workarounds,
                     features,
                     limits: limits.clone(),
+                    downlevel: downlevel.clone(),
                     options: backend_options,
                     shading_language_version,
                     next_shader_id: Default::default(),

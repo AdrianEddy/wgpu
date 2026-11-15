@@ -3192,6 +3192,10 @@ impl crate::Device for super::Device {
         }
     }
 
+    fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
+        self.shared.downlevel.clone()
+    }
+
     fn get_internal_counters(&self) -> wgt::HalCounters {
         self.counters
             .memory_allocations
