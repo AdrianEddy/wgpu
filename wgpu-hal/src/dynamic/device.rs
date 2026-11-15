@@ -177,6 +177,7 @@ pub trait DynDevice: DynResource {
     fn tlas_instance_to_bytes(&self, instance: TlasInstance, to_extend: &mut Vec<u8>);
 
     fn get_internal_counters(&self) -> wgt::HalCounters;
+    fn features(&self) -> wgt::Features;
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport>;
 
@@ -612,6 +613,10 @@ impl<D: Device + DynResource> DynDevice for D {
 
     fn get_internal_counters(&self) -> wgt::HalCounters {
         D::get_internal_counters(self)
+    }
+
+    fn features(&self) -> wgt::Features {
+        D::features(self)
     }
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {

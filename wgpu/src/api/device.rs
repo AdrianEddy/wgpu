@@ -240,7 +240,9 @@ impl Device {
     /// # Safety
     ///
     /// This function passes data to the backend as-is and can potentially result in a
-    /// driver crash or bogus behaviour. No attempt is made to ensure that data is valid.
+    /// driver crash or bogus behaviour. No attempt is made to ensure that data is valid: the
+    /// shader may use only what the device has, [`Self::features`] and
+    /// [`Self::downlevel_capabilities`].
     #[must_use]
     pub unsafe fn create_shader_module_passthrough(
         &self,

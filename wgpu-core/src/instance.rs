@@ -1401,10 +1401,16 @@ impl Adapter {
         }
     }
 
+    /// Creates a device and its queue from `hal_device`, validating `desc` as
+    /// [`Self::request_device`] does, but against the features `hal_device` was opened with
+    /// ([`hal::Device::features`]) instead of the adapter's: a device created outside wgpu may
+    /// have features its adapter does not offer. A feature outside them is
+    /// [`RequestDeviceError::FeaturesNotOpened`]. On an error, `hal_device` is dropped.
+    ///
     /// # Safety
     ///
     /// - `hal_device` must be created from this adapter.
-    /// - `desc` must be a subset of `hal_device` features and limits.
+    /// - `desc.required_limits` must be within the limits of `hal_device`.
     pub unsafe fn create_device_and_queue_from_hal(
         self: &Arc<Self>,
         hal_device: hal::DynOpenDevice,
@@ -1413,6 +1419,36 @@ impl Adapter {
         profiling::scope!("Adapter::create_device_and_queue_from_hal");
         api_log!("Adapter::create_device_and_queue_from_hal");
 
+        let mut desc = desc.clone();
+        filter_features_and_limits(
+            self.instance.flags,
+            &mut desc.required_features,
+            &mut desc.required_limits,
+        );
+        // wgpu-core validates the device against `desc`, wgpu-hal takes its paths from what the
+        // device was opened with: `desc` may request nothing outside it.
+        let opened = hal_device.device.features();
+        if !opened.contains(desc.required_features) {
+            return Err(RequestDeviceError::FeaturesNotOpened(
+                desc.required_features - opened,
+            ));
+        }
+        self.validate_device_descriptor_features_checked(&mut desc)?;
+        // SAFETY: As our caller guarantees; `desc` is validated.
+        unsafe { self.create_device_and_queue_from_validated_hal(hal_device, &desc) }
+    }
+
+    /// [`Self::create_device_and_queue_from_hal`], for a validated `desc`.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::create_device_and_queue_from_hal`]'s, and `desc` is validated: its features
+    /// among those `hal_device` was opened with.
+    unsafe fn create_device_and_queue_from_validated_hal(
+        self: &Arc<Self>,
+        hal_device: hal::DynOpenDevice,
+        desc: &DeviceDescriptor,
+    ) -> Result<(Arc<Device>, Arc<Queue>), RequestDeviceError> {
         if self
             .instance
             .flags
@@ -1474,6 +1510,15 @@ impl Adapter {
             ));
         }
 
+        self.validate_device_descriptor_features_checked(desc)
+    }
+
+    /// The validation of [`Self::validate_device_descriptor`] after its features were filtered
+    /// and checked: the experimental features, the limits and their normalization.
+    fn validate_device_descriptor_features_checked(
+        &self,
+        desc: &mut DeviceDescriptor,
+    ) -> Result<(), RequestDeviceError> {
         // Check if experimental features are permitted to be enabled.
         if desc
             .required_features
@@ -1535,7 +1580,8 @@ impl Adapter {
         }
         .map_err(DeviceError::from_hal)?;
 
-        unsafe { self.create_device_and_queue_from_hal(open, &desc) }
+        // SAFETY: Opened just now from this adapter, with `desc`'s features and limits.
+        unsafe { self.create_device_and_queue_from_validated_hal(open, &desc) }
     }
 }
 
@@ -1571,6 +1617,8 @@ pub enum RequestDeviceError {
     TimestampNormalizerInitFailed(#[from] TimestampNormalizerInitError),
     #[error("Unsupported features were requested: {0}")]
     UnsupportedFeature(wgt::Features),
+    #[error("Features were requested that the device was not opened with: {0}")]
+    FeaturesNotOpened(wgt::Features),
     #[error(
         "Some experimental features, {0}, were requested, but experimental features are not enabled"
     )]

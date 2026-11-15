@@ -1145,6 +1145,7 @@ impl crate::Adapter for super::Adapter {
         Ok(crate::OpenDevice {
             device: super::Device {
                 shared: Arc::clone(&self.shared),
+                features,
                 main_vao,
                 #[cfg(all(native, feature = "renderdoc"))]
                 render_doc: Default::default(),

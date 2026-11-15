@@ -3127,6 +3127,10 @@ impl crate::Device for super::Device {
         }
     }
 
+    fn features(&self) -> wgt::Features {
+        self.shared.features
+    }
+
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         self.shared.downlevel.clone()
     }

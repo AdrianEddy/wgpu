@@ -34,12 +34,16 @@ pub struct Context {
     /// adapter.
     #[cfg(feature = "noop_test_hooks")]
     device: Option<Arc<DeviceHooks>>,
+    /// For a device and its queue, the features the device was opened with; for an instance or
+    /// an adapter, those the adapter offers.
+    features: wgt::Features,
 }
 
 impl Context {
     /// An instance.
     fn new_instance(options: &Arc<wgt::NoopBackendOptions>) -> Self {
         Self {
+            features: Self::offered(options),
             options: Arc::clone(options),
             #[cfg(feature = "noop_test_hooks")]
             instance: Some(InstanceHooks::default()),
@@ -48,9 +52,15 @@ impl Context {
         }
     }
 
+    /// The features the adapter offers.
+    fn offered(options: &wgt::NoopBackendOptions) -> wgt::Features {
+        options.features.unwrap_or(wgt::Features::all())
+    }
+
     /// An adapter.
     fn new_adapter(options: &Arc<wgt::NoopBackendOptions>) -> Self {
         Self {
+            features: Self::offered(options),
             options: Arc::clone(options),
             #[cfg(feature = "noop_test_hooks")]
             instance: None,
@@ -60,10 +70,14 @@ impl Context {
     }
 
     /// A device and its queue.
-    fn new_device(options: &Arc<wgt::NoopBackendOptions>) -> crate::OpenDevice<Api> {
+    fn new_device(
+        options: &Arc<wgt::NoopBackendOptions>,
+        features: wgt::Features,
+    ) -> crate::OpenDevice<Api> {
         #[cfg(feature = "noop_test_hooks")]
         let hooks = Arc::new(DeviceHooks::default());
         let new = || Self {
+            features,
             options: Arc::clone(options),
             #[cfg(feature = "noop_test_hooks")]
             instance: None,
@@ -86,7 +100,7 @@ impl Context {
             .options
             .subgroup_max_size
             .unwrap_or(wgt::MAXIMUM_SUBGROUP_MAX_SIZE);
-        let features = self.options.features.unwrap_or(wgt::Features::all());
+        let features = Self::offered(&self.options);
         let limits = self
             .options
             .limits
@@ -594,7 +608,7 @@ impl crate::Adapter for Context {
         _limits: &wgt::Limits,
         _memory_hints: &wgt::MemoryHints,
     ) -> DeviceResult<crate::OpenDevice<Api>> {
-        Ok(Context::new_device(&self.options))
+        Ok(Context::new_device(&self.options, features))
     }
     unsafe fn texture_format_capabilities(
         &self,
@@ -927,6 +941,10 @@ impl crate::Device for Context {
 
     fn get_internal_counters(&self) -> wgt::HalCounters {
         Default::default()
+    }
+
+    fn features(&self) -> wgt::Features {
+        self.features
     }
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {

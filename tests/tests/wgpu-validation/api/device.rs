@@ -258,6 +258,64 @@ fn a_device_has_no_downlevel_flag_that_its_adapter_lacks() {
     );
 }
 
+/// A device made from a hal device may request only the features that the hal device was opened
+/// with: wgpu-hal takes its paths from them. Requesting more is an error naming them; requesting
+/// them is not. Before, wgpu-core took the descriptor's features unchecked.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_device_from_a_hal_device_requests_only_what_it_was_opened_with() {
+    use core::future::Future as _;
+    use core::pin::pin;
+    use core::task;
+    use wgpu_hal::{api::Noop, Adapter as _};
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::NOOP,
+        backend_options: wgpu::BackendOptions {
+            noop: wgpu::NoopBackendOptions::enabled(),
+            ..Default::default()
+        },
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let ctx = &mut task::Context::from_waker(task::Waker::noop());
+    let task::Poll::Ready(Ok(adapter)) =
+        pin!(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).poll(ctx)
+    else {
+        unreachable!()
+    };
+    let opened = wgpu::Features::POLYGON_MODE_LINE;
+    let open = |features| {
+        // SAFETY: Used to open a device.
+        let hal = unsafe { adapter.as_hal::<Noop>() }.unwrap();
+        // SAFETY: No requirements on the noop backend.
+        unsafe { hal.open(features, &wgpu::Limits::default(), &Default::default()) }.unwrap()
+    };
+    // SAFETY: Opened from this adapter, with default limits.
+    let more = unsafe {
+        adapter.create_device_from_hal(
+            open(opened),
+            &wgpu::DeviceDescriptor {
+                required_features: opened | wgpu::Features::SHADER_F16,
+                ..Default::default()
+            },
+        )
+    };
+    let error = more.expect_err("a feature the hal device was not opened with");
+    assert!(error.to_string().contains("SHADER_F16"), "{error}");
+    // SAFETY: Opened from this adapter, with default limits.
+    let (device, _queue) = unsafe {
+        adapter.create_device_from_hal(
+            open(opened),
+            &wgpu::DeviceDescriptor {
+                required_features: opened,
+                ..Default::default()
+            },
+        )
+    }
+    .unwrap();
+    assert_eq!(device.features(), opened);
+}
+
 /// Dropping the queue waits for its submissions on their fence before it waits for the queue to
 /// become idle, as `wgpu_hal::Queue::wait_for_idle` requires: the idle wait must not wait for one
 /// of them. The noop queue records an idle wait with a submission incomplete; here the GPU stalls,

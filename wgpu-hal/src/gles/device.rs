@@ -1992,6 +1992,10 @@ impl crate::Device for super::Device {
         self.counters.as_ref().clone()
     }
 
+    fn features(&self) -> wgt::Features {
+        self.features
+    }
+
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         self.shared.downlevel.clone()
     }
