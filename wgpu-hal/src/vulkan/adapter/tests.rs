@@ -1122,3 +1122,90 @@ fn older_devices_enable_the_extensions_their_features_come_from() {
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
+
+/// The sliced 3D compression features follow the 3D image support of their formats, and need no
+/// feature of a device: a device opened with one alone has it. Before,
+/// `TEXTURE_COMPRESSION_BC_SLICED_3D` followed `textureCompressionBC`, which the specification
+/// does not tie to 3D images, and both needed their compression feature enabled, which requesting
+/// them did not enable.
+#[test]
+fn sliced_3d_compression_follows_3d_image_support() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let sliced = |formats: &FormatSupport, requested: wgt::Features| {
+        let (extensions, enabled) = opened(&caps, &PhysicalDeviceFeatures::default(), requested);
+        enabled
+            .to_wgpu(
+                &caps,
+                |extension| extensions.contains(&extension),
+                formats,
+                &vk::QueueFamilyProperties::default(),
+            )
+            .0
+    };
+    let mut wrong = alloc::vec::Vec::new();
+    for (feature, supported) in [
+        (
+            wgt::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
+            FormatSupport {
+                bc_3d: true,
+                ..FormatSupport::default()
+            },
+        ),
+        (
+            wgt::Features::TEXTURE_COMPRESSION_ASTC_SLICED_3D,
+            FormatSupport {
+                astc_3d: true,
+                ..FormatSupport::default()
+            },
+        ),
+    ] {
+        if !sliced(&supported, feature).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} lacking alone"));
+        }
+        let base = wgt::Features::TEXTURE_COMPRESSION_BC | wgt::Features::TEXTURE_COMPRESSION_ASTC;
+        if sliced(&FormatSupport::default(), base).contains(feature) {
+            wrong.push(alloc::format!("{feature:?} without 3D images"));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A device has a sliced 3D feature only with its family's formats, as WebGPU's feature
+/// dependencies make it imply them: a request for it alone enables `textureCompressionBC` or
+/// `textureCompressionASTC_LDR`, and a device created without that feature lacks it, though its
+/// physical device has the 3D images.
+#[test]
+fn sliced_3d_compression_implies_its_formats() {
+    let caps = device_of_version(vk::API_VERSION_1_3, &[]);
+    let formats = FormatSupport {
+        bc_3d: true,
+        astc_3d: true,
+        ..FormatSupport::default()
+    };
+    for (sliced, base) in [
+        (
+            wgt::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
+            wgt::Features::TEXTURE_COMPRESSION_BC,
+        ),
+        (
+            wgt::Features::TEXTURE_COMPRESSION_ASTC_SLICED_3D,
+            wgt::Features::TEXTURE_COMPRESSION_ASTC,
+        ),
+    ] {
+        let (extensions, mut enabled) = opened(&caps, &PhysicalDeviceFeatures::default(), sliced);
+        let derive = |enabled: &PhysicalDeviceFeatures| {
+            enabled
+                .to_wgpu(
+                    &caps,
+                    |extension| extensions.contains(&extension),
+                    &formats,
+                    &vk::QueueFamilyProperties::default(),
+                )
+                .0
+        };
+        assert!(derive(&enabled).contains(sliced | base), "{sliced:?}");
+        enabled.core.texture_compression_bc = vk::FALSE;
+        enabled.core.texture_compression_astc_ldr = vk::FALSE;
+        assert!(!derive(&enabled).intersects(sliced | base), "{sliced:?}");
+    }
+}
