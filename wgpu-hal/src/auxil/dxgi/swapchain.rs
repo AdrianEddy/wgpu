@@ -1,6 +1,8 @@
 //! Backend-agnostic DXGI flip-model swapchain helpers, shared by the DX12 backend and the
 //! Windows Vulkan backend's DXGI interop swapchain.
 
+use alloc::vec::Vec;
+
 use wgpu_sync::Mutex;
 use windows::Win32::{Foundation, Graphics::Dxgi, System::Threading, UI::WindowsAndMessaging};
 
@@ -26,6 +28,49 @@ pub(crate) enum SurfaceTarget {
     SurfaceHandle(Foundation::HANDLE),
     #[cfg(dx12)]
     SwapChainPanel(crate::auxil::dxgi::types::ISwapChainPanelNative),
+}
+
+impl SurfaceTarget {
+    /// The `DXGI_SCALING` of a swapchain for this target that presents with `mode`, or `None`
+    /// for a mode the target does not offer.
+    ///
+    /// A swapchain made from a window offers `DXGI_SCALING_STRETCH` (DXGI's own default, also
+    /// for `Auto`) and `DXGI_SCALING_NONE`, which flip-model swapchains support.
+    /// `DXGI_SCALING_ASPECT_RATIO_STRETCH` "with legacy Win32 window swapchains ... works the same
+    /// as DXGI_SCALING_STRETCH" (`DXGI_SCALING`'s documentation), so it is not offered. A
+    /// composition swapchain must be `DXGI_SCALING_STRETCH` (`CreateSwapChainForComposition`'s
+    /// documentation), and its visual places it: it offers no mode.
+    pub(crate) fn dxgi_scaling(&self, mode: wgt::SurfaceScalingMode) -> Option<Dxgi::DXGI_SCALING> {
+        use wgt::SurfaceScalingMode as Mode;
+        match (self, mode) {
+            (_, Mode::Auto) | (Self::WndHandle(_), Mode::Stretch) => {
+                Some(Dxgi::DXGI_SCALING_STRETCH)
+            }
+            (Self::WndHandle(_), Mode::OneToOne) => Some(Dxgi::DXGI_SCALING_NONE),
+            (Self::WndHandle(_), Mode::AspectRatio)
+            | (
+                Self::VisualFromWndHandle { .. },
+                Mode::Stretch | Mode::AspectRatio | Mode::OneToOne,
+            ) => None,
+            #[cfg(dx12)]
+            (
+                Self::Visual(_) | Self::SurfaceHandle(_) | Self::SwapChainPanel(_),
+                Mode::Stretch | Mode::AspectRatio | Mode::OneToOne,
+            ) => None,
+        }
+    }
+
+    /// The scaling modes, other than `Auto`, that a swapchain for this target offers.
+    pub(crate) fn scaling_modes(&self) -> Vec<wgt::SurfaceScalingMode> {
+        [
+            wgt::SurfaceScalingMode::Stretch,
+            wgt::SurfaceScalingMode::AspectRatio,
+            wgt::SurfaceScalingMode::OneToOne,
+        ]
+        .into_iter()
+        .filter(|&mode| self.dxgi_scaling(mode).is_some())
+        .collect()
+    }
 }
 
 // SAFETY: `HWND` and `HANDLE` are identifiers that any thread can use, and any thread can call
@@ -56,13 +101,15 @@ pub(crate) fn supports_allow_tearing(factory: &DxgiFactory) -> bool {
     }
 }
 
-/// Builds the flip-model `DXGI_SWAP_CHAIN_DESC1`.
+/// Builds the flip-model `DXGI_SWAP_CHAIN_DESC1`, presenting with `scaling`
+/// ([`SurfaceTarget::dxgi_scaling`]).
 pub(crate) fn swap_chain_descriptor(
     format: Dxgi::Common::DXGI_FORMAT,
     size: wgt::Extent3d,
     buffer_count: u32,
     alpha_mode: Dxgi::Common::DXGI_ALPHA_MODE,
     flags: Dxgi::DXGI_SWAP_CHAIN_FLAG,
+    scaling: Dxgi::DXGI_SCALING,
 ) -> Dxgi::DXGI_SWAP_CHAIN_DESC1 {
     Dxgi::DXGI_SWAP_CHAIN_DESC1 {
         AlphaMode: alpha_mode,
@@ -76,7 +123,7 @@ pub(crate) fn swap_chain_descriptor(
         },
         BufferUsage: Dxgi::DXGI_USAGE_RENDER_TARGET_OUTPUT,
         BufferCount: buffer_count,
-        Scaling: Dxgi::DXGI_SCALING_STRETCH,
+        Scaling: scaling,
         SwapEffect: Dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
         Flags: flags.0 as u32,
     }
@@ -212,6 +259,7 @@ pub(crate) fn surface_capabilities(
             | wgt::TextureUses::COPY_DST,
         present_modes,
         composite_alpha_modes,
+        scaling_modes: target.scaling_modes(),
     }
 }
 

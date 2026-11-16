@@ -938,7 +938,7 @@ impl super::Device {
     /// For wgpu's own tests and diagnostics, not a stable API.
     #[doc(hidden)]
     pub fn presents_signal_fences(&self) -> bool {
-        self.shared.present_fences
+        self.shared.swapchain_maintenance1
     }
 
     pub fn shared_instance(&self) -> &super::InstanceShared {
@@ -3175,6 +3175,10 @@ impl crate::Device for super::Device {
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         self.shared.downlevel.clone()
+    }
+
+    fn supports_present_scaling(&self, surface: &super::Surface) -> bool {
+        surface.inner.supports_present_scaling(self)
     }
 
     fn get_internal_counters(&self) -> wgt::HalCounters {

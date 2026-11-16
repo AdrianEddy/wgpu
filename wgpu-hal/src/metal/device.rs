@@ -2384,6 +2384,11 @@ impl crate::Device for super::Device {
         self.shared.downlevel.clone()
     }
 
+    fn supports_present_scaling(&self, _surface: &super::Surface) -> bool {
+        // A layer's `contentsGravity` needs nothing of the device.
+        true
+    }
+
     fn check_if_oom(&self) -> Result<(), crate::DeviceError> {
         // TODO: see https://github.com/gfx-rs/wgpu/issues/7460
 

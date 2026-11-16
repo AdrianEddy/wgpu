@@ -658,6 +658,7 @@ impl crate::Adapter for Context {
                 wgt::PresentMode::Immediate,
             ],
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
+            scaling_modes: surface::SCALING_MODES.to_vec(),
         })
     }
 
@@ -965,6 +966,10 @@ impl crate::Device for Context {
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         CAPABILITIES.downlevel
+    }
+
+    fn supports_present_scaling(&self, _surface: &Surface) -> bool {
+        self.options.present_scaling.unwrap_or(true)
     }
 
     fn check_if_oom(&self) -> DeviceResult<()> {

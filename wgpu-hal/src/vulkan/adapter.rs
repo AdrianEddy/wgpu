@@ -3522,6 +3522,20 @@ impl super::Adapter {
         &self.phd_capabilities
     }
 
+    /// The swapchain maintenance extension that a device opened on this adapter enables with
+    /// its `swapchainMaintenance1` feature, if the adapter supports both: a device that
+    /// [`crate::Adapter::open`] creates always enables them then. Its swapchains can be created
+    /// with a present scaling (`VkSwapchainPresentScalingCreateInfoKHR`), and the instance has the
+    /// surface maintenance extension (and `VK_KHR_get_surface_capabilities2`) through which the
+    /// surface reports the scalings it supports.
+    pub(super) fn opens_with_swapchain_maintenance1(&self) -> Option<&'static CStr> {
+        self.phd_capabilities.swapchain_maintenance1().filter(|_| {
+            self.phd_features
+                .swapchain_maintenance1
+                .is_some_and(|features| features.swapchain_maintenance1 == vk::TRUE)
+        })
+    }
+
     pub fn shared_instance(&self) -> &super::InstanceShared {
         &self.instance
     }
@@ -4143,7 +4157,10 @@ impl super::Adapter {
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
             enabled_extensions: enabled_extensions.into(),
-            present_fences: enables_swapchain_maintenance1(enabled_features, enabled_extensions),
+            swapchain_maintenance1: enables_swapchain_maintenance1(
+                enabled_features,
+                enabled_extensions,
+            ),
             extension_fns: super::DeviceExtensionFunctions {
                 debug_utils: debug_utils_fn,
                 draw_indirect_count: indirect_count_fn,

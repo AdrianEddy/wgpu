@@ -631,6 +631,11 @@ impl Surface for DxgiSurface {
         (!capabilities.formats.is_empty()).then_some(capabilities)
     }
 
+    fn supports_present_scaling(&self, _device: &crate::vulkan::Device) -> bool {
+        // DXGI applies the swapchain's `DXGI_SCALING`, which needs nothing of the Vulkan device.
+        true
+    }
+
     fn display_hdr_info(&self) -> Option<wgt::DisplayHdrInfo> {
         self.hdr_source.display_hdr_info()
     }
@@ -642,6 +647,11 @@ impl Surface for DxgiSurface {
         provided_old_swapchain: Option<Box<dyn Swapchain>>,
     ) -> Result<Box<dyn Swapchain>, crate::SurfaceError> {
         profiling::scope!("DxgiSurface::create_swapchain");
+
+        let scaling = self
+            .target
+            .dxgi_scaling(config.scaling_mode)
+            .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
 
         // `Surface::configure` already released the resources of the old swapchain. DXGI allows
         // only one swapchain per window, so the old one must be gone before the new one is created.
@@ -661,8 +671,14 @@ impl Surface for DxgiSurface {
         }
         let buffer_count = (config.maximum_frame_latency + 1).clamp(2, 16);
 
-        let swapchain =
-            self.create_dxgi_swapchain(config, interop, non_srgb_format, buffer_count, flags)?;
+        let swapchain = self.create_dxgi_swapchain(
+            config,
+            interop,
+            non_srgb_format,
+            buffer_count,
+            flags,
+            scaling,
+        )?;
 
         // Apply the color space unconditionally so reconfiguring away from HDR resets state.
         unsafe {
@@ -866,6 +882,7 @@ impl DxgiSurface {
         non_srgb_format: DXGI_FORMAT,
         buffer_count: u32,
         flags: DXGI_SWAP_CHAIN_FLAG,
+        scaling: DXGI_SCALING,
     ) -> Result<IDXGISwapChain3, crate::SurfaceError> {
         let dxgi_instance = self.dxgi_instance();
         let desc = dxgi::swapchain::swap_chain_descriptor(
@@ -874,6 +891,7 @@ impl DxgiSurface {
             buffer_count,
             dxgi::conv::map_acomposite_alpha_mode(config.composite_alpha_mode),
             flags,
+            scaling,
         );
 
         let swapchain1: IDXGISwapChain1 = match &self.target {

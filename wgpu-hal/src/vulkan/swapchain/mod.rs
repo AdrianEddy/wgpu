@@ -33,6 +33,11 @@ pub(super) trait Surface: Send + Sync + 'static {
     /// Returns `None` if the surface is not compatible with the adapter.
     fn surface_capabilities(&self, adapter: &super::Adapter) -> Option<crate::SurfaceCapabilities>;
 
+    /// Whether `device` can configure the surface with the scaling modes that
+    /// [`Self::surface_capabilities`] lists, as [`crate::Device::supports_present_scaling`]
+    /// asks.
+    fn supports_present_scaling(&self, device: &super::Device) -> bool;
+
     /// Creates a swapchain for the surface with the given configuration.
     ///
     /// If this is not the first swapchain created for the surface, the old swapchain

@@ -25,6 +25,12 @@
 //! - `configure_race`: one surface reconfigured a bounded number of times, with changing present
 //!   modes and frame latencies, while another thread submits; then configured for another device
 //!   and back; then dropped and created again.
+//! - `scaling_modes`: what each surface lists of `SurfaceScalingMode`, and that each listed mode
+//!   configures and presents, and an unlisted one is a validation error. DX12 lists `Stretch` and
+//!   `OneToOne` for a window's swapchain, made with their `DXGI_SCALING`, and none for a
+//!   composition swapchain. The DXGI swapchain of the Vulkan backend lists the same for a window,
+//!   also for a device without `swapchainMaintenance1`. On Vulkan it prints what a frame
+//!   presented to a window that changed its size gives, with each scaling and with none.
 //!
 //! Each adapter gets windows of its own: a window that one API presented to is not reused with
 //! another. Like `wgpu_surface`, this binary owns the main thread, which `winit` requires, and runs
@@ -175,6 +181,12 @@ mod native {
                 println!("{}: {path}", adapter_name(adapter));
             }
         }
+        let errors = collect_errors(&device);
+        (device, queue, errors)
+    }
+
+    /// The list in which `device`'s uncaptured errors, and its loss, are collected.
+    fn collect_errors(device: &wgpu::Device) -> Errors {
         let errors = Errors::default();
         let sink = Arc::clone(&errors);
         device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
@@ -189,7 +201,7 @@ mod native {
                     .push(format!("device lost: {reason:?}: {message}"));
             }
         });
-        (device, queue, errors)
+        errors
     }
 
     /// The errors collected in `errors` so far and the validation layers' messages, for a failure
@@ -649,6 +661,724 @@ mod native {
         Ok(())
     }
 
+    /// Failures that a trial collects, rather than stopping at the first, so that one run shows
+    /// every check that fails.
+    #[derive(Default)]
+    struct Failures(Vec<String>);
+
+    impl Failures {
+        fn push(&mut self, failure: String) {
+            println!("FAILED: {failure}");
+            self.0.push(failure);
+        }
+
+        fn into_result(self) -> Result<(), String> {
+            if self.0.is_empty() {
+                Ok(())
+            } else {
+                Err(self.0.join("\n"))
+            }
+        }
+    }
+
+    /// Configures `surface`, returning the validation error it reports, if any.
+    fn try_configure(
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        config: &wgpu::SurfaceConfiguration,
+    ) -> Option<wgpu::Error> {
+        let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        surface.configure(device, config);
+        pollster::block_on(scope.pop())
+    }
+
+    /// Acquires a texture of `surface`, and renders to and presents it if there is one. Returns
+    /// what the acquisition gave.
+    fn acquire_and_present(
+        surface: &wgpu::Surface<'_>,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> String {
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame) => {
+                render(
+                    device,
+                    queue,
+                    &frame.texture.create_view(&Default::default()),
+                );
+                queue.present(frame);
+                "Success".to_owned()
+            }
+            wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
+                render(
+                    device,
+                    queue,
+                    &frame.texture.create_view(&Default::default()),
+                );
+                queue.present(frame);
+                "Suboptimal".to_owned()
+            }
+            other => format!("{other:?}"),
+        }
+    }
+
+    const EXPLICIT_SCALING_MODES: [wgpu::SurfaceScalingMode; 3] = [
+        wgpu::SurfaceScalingMode::Stretch,
+        wgpu::SurfaceScalingMode::AspectRatio,
+        wgpu::SurfaceScalingMode::OneToOne,
+    ];
+
+    /// `scaling_modes`: on each adapter, the scaling modes its surface lists (printed); `Auto` and
+    /// each listed mode configure and present with no error or validation message; a mode the
+    /// surface does not list is a validation error that keeps the configuration. On DX12, a
+    /// window's swapchain lists `Stretch` and `OneToOne`, has the `DXGI_SCALING` of the mode it was
+    /// configured with, and is replaced when wgpu-hal is asked for another scaling on a configured
+    /// surface (`ResizeBuffers` keeps a swapchain's scaling), while wgpu-hal refuses the unlisted
+    /// `AspectRatio` with `SurfaceError::UnsupportedScalingMode`, keeping the swapchain; a
+    /// composition swapchain lists none, and wgpu-hal refuses each. On OpenGL, which lists none,
+    /// wgpu-hal refuses each. With the DXGI swapchain of the Vulkan backend, a window's surface
+    /// lists `Stretch` and `OneToOne`, and `Auto` and each listed mode configure and present on
+    /// a device created without `swapchainMaintenance1`.
+    /// On Vulkan, a caller's present scaling in the swapchain's creation chain is the only one
+    /// (a second would break the chain's unique structure types), and for each scaling, and for
+    /// the platform's own placement, it prints what a frame presented to a window that changed
+    /// its size gives, and the scaled extents the surface reports.
+    fn scaling_modes(
+        event_loop: &ActiveEventLoop,
+        instance: &wgpu::Instance,
+    ) -> Result<(), String> {
+        let mut failures = Failures::default();
+        for (adapter, surfaces) in adapters(event_loop, instance, 1)? {
+            let name = adapter_name(&adapter);
+            let surface = &surfaces[0].1;
+            let caps = surface.get_capabilities(&adapter);
+            println!("{name}: scaling modes {:?}", caps.scaling_modes);
+            let (device, queue, errors) = device(&adapter);
+            let errs = [&errors];
+            let base = config(surface, &adapter);
+
+            // `Auto`, and each listed mode.
+            for scaling_mode in
+                core::iter::once(wgpu::SurfaceScalingMode::Auto).chain(caps.scaling_modes.clone())
+            {
+                let config = wgpu::SurfaceConfiguration {
+                    scaling_mode,
+                    ..base.clone()
+                };
+                if let Some(error) = try_configure(surface, &device, &config) {
+                    failures.push(format!("{name}: {scaling_mode:?}: {error}"));
+                    continue;
+                }
+                for _ in 0..FRAMES {
+                    let got = acquire_and_present(surface, &device, &queue);
+                    if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                        failures.push(format!("{name}: {scaling_mode:?}: acquired {got}"));
+                        break;
+                    }
+                }
+            }
+
+            // Each mode the surface does not list: a validation error, the configuration kept.
+            for scaling_mode in EXPLICIT_SCALING_MODES
+                .into_iter()
+                .filter(|mode| !caps.scaling_modes.contains(mode))
+            {
+                configure(surface, &device, &base, &name, &errs);
+                let config = wgpu::SurfaceConfiguration {
+                    scaling_mode,
+                    ..base.clone()
+                };
+                let expected = format!(
+                    "The requested scaling mode {scaling_mode:?} could not be applied; \
+                     supported modes: {:?}",
+                    caps.scaling_modes
+                );
+                match try_configure(surface, &device, &config) {
+                    Some(error) if error.to_string().contains(&expected) => {}
+                    other => failures.push(format!(
+                        "{name}: unlisted {scaling_mode:?}: expected a validation error, got \
+                         {other:?}"
+                    )),
+                }
+                let got = acquire_and_present(surface, &device, &queue);
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!(
+                        "{name}: after the unlisted {scaling_mode:?}: acquired {got}"
+                    ));
+                }
+            }
+
+            #[cfg(any(windows, target_os = "linux"))]
+            if adapter.get_info().backend == wgpu::Backend::Vulkan {
+                vulkan_scaling(
+                    instance,
+                    &adapter,
+                    &surfaces[0].0,
+                    surface,
+                    (&device, &queue),
+                    &base,
+                    &caps,
+                    &mut failures,
+                );
+            }
+
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+
+        #[cfg(windows)]
+        dx12_scaling(event_loop, &mut failures);
+        #[cfg(windows)]
+        vulkan_dxgi_scaling(event_loop, &mut failures);
+        #[cfg(any(windows, target_os = "linux"))]
+        gl_scaling(event_loop, &mut failures);
+
+        failures.into_result()
+    }
+
+    /// A wgpu-hal configuration of a window's surface at the windows' size with `scaling_mode`.
+    #[cfg(any(windows, target_os = "linux"))]
+    fn hal_config(scaling_mode: wgpu::SurfaceScalingMode) -> wgpu_hal::SurfaceConfiguration {
+        wgpu_hal::SurfaceConfiguration {
+            maximum_frame_latency: 2,
+            present_mode: wgpu::PresentMode::Fifo,
+            composite_alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            scaling_mode,
+            format: wgpu::TextureFormat::Bgra8Unorm,
+            color_space: wgpu::SurfaceColorSpace::Srgb,
+            extent: wgpu::Extent3d {
+                width: SIZE,
+                height: SIZE,
+                depth_or_array_layers: 1,
+            },
+            usage: wgpu::TextureUses::COLOR_TARGET,
+            view_formats: Vec::new(),
+        }
+    }
+
+    /// Whether wgpu-hal refuses to configure `surface` for `device` with each explicit scaling
+    /// mode, by name; a failure is pushed for each mode it does not.
+    ///
+    /// # Safety
+    ///
+    /// wgpu-core did not configure `surface`, and nothing uses it.
+    #[cfg(any(windows, target_os = "linux"))]
+    unsafe fn hal_refuses_each_mode<A: wgpu_hal::Api>(
+        name: &str,
+        surface: &A::Surface,
+        device: &A::Device,
+        failures: &mut Failures,
+    ) {
+        use wgpu_hal::Surface as _;
+        for scaling_mode in EXPLICIT_SCALING_MODES {
+            // SAFETY: Our caller's contract; a configuration that succeeds is undone at once.
+            let configured = unsafe { surface.configure(device, &hal_config(scaling_mode)) };
+            println!("{name}: wgpu-hal configured with {scaling_mode:?}: {configured:?}");
+            match configured {
+                Err(wgpu_hal::SurfaceError::UnsupportedScalingMode) => {}
+                Ok(()) => {
+                    // SAFETY: As above.
+                    unsafe { surface.unconfigure(device) };
+                    failures.push(format!(
+                        "{name}: wgpu-hal configured with the unlisted {scaling_mode:?}"
+                    ));
+                }
+                Err(other) => failures.push(format!(
+                    "{name}: wgpu-hal configured with {scaling_mode:?}: {other:?}"
+                )),
+            }
+        }
+    }
+
+    /// The OpenGL half of [`scaling_modes`]: its surfaces list no mode, and wgpu-hal refuses each
+    /// by name (wgpu-core never asks it for one).
+    #[cfg(any(windows, target_os = "linux"))]
+    fn gl_scaling(event_loop: &ActiveEventLoop, failures: &mut Failures) {
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+            event_loop.owned_display_handle(),
+        ));
+        desc.backends = wgpu::Backends::GL;
+        let instance = wgpu::Instance::new(desc);
+        let gl_adapters = match adapters(event_loop, &instance, 1) {
+            Ok(adapters) => adapters,
+            Err(error) => return failures.push(format!("GL: {error}")),
+        };
+        for (adapter, surfaces) in gl_adapters {
+            let name = adapter_name(&adapter);
+            let (device, queue, errors) = device(&adapter);
+            {
+                // SAFETY: Only wgpu-hal uses the surface, which wgpu-core did not configure.
+                let hal_surface = unsafe { surfaces[0].1.as_hal::<wgpu_hal::api::Gles>() }.unwrap();
+                // SAFETY: As above.
+                let hal_device = unsafe { device.as_hal::<wgpu_hal::api::Gles>() }.unwrap();
+                // SAFETY: As above.
+                unsafe {
+                    hal_refuses_each_mode::<wgpu_hal::api::Gles>(
+                        &name,
+                        &hal_surface,
+                        &hal_device,
+                        failures,
+                    )
+                };
+            }
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+    }
+
+    /// The Vulkan half of [`scaling_modes`], on `surface` of `window`, configured for `device`.
+    #[cfg(any(windows, target_os = "linux"))]
+    #[allow(clippy::too_many_arguments)]
+    fn vulkan_scaling(
+        instance: &wgpu::Instance,
+        adapter: &wgpu::Adapter,
+        window: &Window,
+        surface: &wgpu::Surface<'_>,
+        (device, queue): (&wgpu::Device, &wgpu::Queue),
+        base: &wgpu::SurfaceConfiguration,
+        caps: &wgpu::SurfaceCapabilities,
+        failures: &mut Failures,
+    ) {
+        use ash::vk;
+
+        let name = adapter_name(adapter);
+        // The scaled extents and the scaling the surface reports, for FIFO.
+        if !caps.scaling_modes.is_empty() {
+            // SAFETY: Only inspected.
+            let (entry, raw_instance) = {
+                let hal = unsafe { instance.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+                let shared = hal.shared_instance();
+                (shared.entry().clone(), shared.raw_instance().clone())
+            };
+            // SAFETY: Only inspected.
+            let physical_device = unsafe { adapter.as_hal::<wgpu_hal::api::Vulkan>() }
+                .unwrap()
+                .raw_physical_device();
+            // SAFETY: Only inspected.
+            let raw_surface = unsafe {
+                surface
+                    .as_hal::<wgpu_hal::api::Vulkan>()
+                    .unwrap()
+                    .raw_native_handle()
+            }
+            .unwrap();
+            let functor = ash::khr::get_surface_capabilities2::Instance::new(&entry, &raw_instance);
+            let mut scaling = vk::SurfacePresentScalingCapabilitiesEXT::default();
+            let mut caps2 = vk::SurfaceCapabilities2KHR::default().push_next(&mut scaling);
+            let mut mode =
+                vk::SurfacePresentModeEXT::default().present_mode(vk::PresentModeKHR::FIFO);
+            let info = vk::PhysicalDeviceSurfaceInfo2KHR::default()
+                .surface(raw_surface)
+                .push_next(&mut mode);
+            // SAFETY: The surface lists scaling modes, so the instance has the extensions.
+            let queried = unsafe {
+                functor.get_physical_device_surface_capabilities2(
+                    physical_device,
+                    &info,
+                    &mut caps2,
+                )
+            };
+            // Read out before `scaling`, which `caps2` borrows.
+            let surface_caps = caps2.surface_capabilities;
+            match queried {
+                Ok(()) => println!(
+                    "{name}: FIFO: scaling {:?}, gravity {:?} / {:?}, scaled extents {}x{} to \
+                     {}x{}, image extents {}x{} to {}x{}, current {}x{}",
+                    scaling.supported_present_scaling,
+                    scaling.supported_present_gravity_x,
+                    scaling.supported_present_gravity_y,
+                    scaling.min_scaled_image_extent.width,
+                    scaling.min_scaled_image_extent.height,
+                    scaling.max_scaled_image_extent.width,
+                    scaling.max_scaled_image_extent.height,
+                    surface_caps.min_image_extent.width,
+                    surface_caps.min_image_extent.height,
+                    surface_caps.max_image_extent.width,
+                    surface_caps.max_image_extent.height,
+                    surface_caps.current_extent.width,
+                    surface_caps.current_extent.height,
+                ),
+                Err(error) => failures.push(format!("{name}: surface capabilities: {error}")),
+            }
+        }
+
+        // The configurations whose mismatched presents are printed: each listed mode, `Auto`,
+        // and a caller's chain asking for no scaling behaviour, the platform's own placement.
+        let mut cases: Vec<(String, wgpu::SurfaceConfiguration, bool)> = caps
+            .scaling_modes
+            .iter()
+            .map(|&scaling_mode| {
+                (
+                    format!("{scaling_mode:?}"),
+                    wgpu::SurfaceConfiguration {
+                        scaling_mode,
+                        ..base.clone()
+                    },
+                    false,
+                )
+            })
+            .collect();
+        cases.push(("Auto".to_owned(), base.clone(), false));
+        cases.push((
+            "a caller's scaling behaviour 0 (the platform's own)".to_owned(),
+            base.clone(),
+            true,
+        ));
+        for (case, config, callers_zero_scaling) in cases {
+            let _ = window.request_inner_size(PhysicalSize::new(SIZE, SIZE));
+            let mut zero = vk::SwapchainPresentScalingCreateInfoEXT::default();
+            if callers_zero_scaling {
+                // SAFETY: `zero` is a valid chain of one structure, which outlives the
+                // configuration below, and the device has the extension where the surface lists
+                // scaling modes; without it, a zero structure is valid too
+                // (VUID-VkSwapchainPresentScalingCreateInfoKHR-swapchainMaintenance1-10154).
+                unsafe {
+                    surface
+                        .as_hal::<wgpu_hal::api::Vulkan>()
+                        .unwrap()
+                        .set_next_swapchain_create_chain((&raw mut zero).cast());
+                }
+            }
+            if let Some(error) = try_configure(surface, device, &config) {
+                failures.push(format!("{name}: {case}: {error}"));
+                continue;
+            }
+            for _ in 0..2 {
+                let got = acquire_and_present(surface, device, queue);
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!("{name}: {case}: before the resize, acquired {got}"));
+                }
+            }
+            let _ = window.request_inner_size(PhysicalSize::new(SIZE + 48, SIZE + 32));
+            let size = window.inner_size();
+            if size == PhysicalSize::new(SIZE, SIZE) {
+                failures.push(format!("{name}: {case}: the window kept its size"));
+            }
+            let first = acquire_and_present(surface, device, queue);
+            let second = acquire_and_present(surface, device, queue);
+            println!(
+                "{name}: {case}: swapchain {SIZE}x{SIZE}, window {}x{}: {first}, then {second}",
+                size.width, size.height
+            );
+        }
+        let _ = window.request_inner_size(PhysicalSize::new(SIZE, SIZE));
+    }
+
+    /// A device of `adapter`, a Vulkan adapter, created from a raw device on queue 0 of family 0
+    /// with wgpu-hal's extensions for no feature but the swapchain maintenance ones, and the
+    /// features wgpu-hal enables with them, with its errors collected as [`device`] collects
+    /// them.
+    #[cfg(windows)]
+    fn device_without_swapchain_maintenance1(
+        adapter: &wgpu::Adapter,
+    ) -> (wgpu::Device, wgpu::Queue, Errors) {
+        use ash::vk;
+
+        let open = {
+            // SAFETY: Used to create and open a device.
+            let hal = unsafe { adapter.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+            let mut extensions = hal.required_device_extensions(wgpu::Features::empty());
+            extensions.retain(|&name| {
+                name != c"VK_KHR_swapchain_maintenance1"
+                    && name != ash::ext::swapchain_maintenance1::NAME
+            });
+            let mut physical_features =
+                hal.physical_device_features(&extensions, wgpu::Features::empty());
+            let priorities = [1.0];
+            let queues = [vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(0)
+                .queue_priorities(&priorities)];
+            let names = extensions
+                .iter()
+                .map(|name| name.as_ptr())
+                .collect::<Vec<_>>();
+            let info = physical_features.add_to_device_create(
+                vk::DeviceCreateInfo::default()
+                    .queue_create_infos(&queues)
+                    .enabled_extension_names(&names),
+            );
+            // SAFETY: A valid create info, with wgpu-hal's extensions and features but the
+            // swapchain maintenance ones.
+            let raw = unsafe {
+                hal.shared_instance().raw_instance().create_device(
+                    hal.raw_physical_device(),
+                    &info,
+                    None,
+                )
+            }
+            .expect("vkCreateDevice failed");
+            let enabled_features =
+                hal.physical_device_features(&extensions, wgpu::Features::empty());
+            // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+            unsafe {
+                hal.device_from_raw(
+                    raw,
+                    None,
+                    &extensions,
+                    &enabled_features,
+                    wgpu::Features::empty(),
+                    &adapter.limits(),
+                    &wgpu::MemoryHints::default(),
+                    wgpu_hal::vulkan::DeviceQueue::new(0, 0),
+                )
+            }
+            .unwrap()
+        };
+        // SAFETY: Opened from this adapter, with no feature.
+        let (device, queue) =
+            unsafe { adapter.create_device_from_hal(open, &wgpu::DeviceDescriptor::default()) }
+                .unwrap();
+        let errors = collect_errors(&device);
+        (device, queue, errors)
+    }
+
+    /// The half of [`scaling_modes`] for the DXGI swapchain of the Vulkan backend, on a window's
+    /// surface and a device created without `swapchainMaintenance1`, which only a Vulkan
+    /// swapchain needs for its scaling.
+    #[cfg(windows)]
+    fn vulkan_dxgi_scaling(event_loop: &ActiveEventLoop, failures: &mut Failures) {
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+            event_loop.owned_display_handle(),
+        ));
+        desc.backends = wgpu::Backends::VULKAN;
+        desc.backend_options.vulkan.swapchain_kind = wgpu::VulkanSwapchainKind::DxgiFromHwnd;
+        let instance = wgpu::Instance::new(desc);
+        let dxgi_adapters = match adapters(event_loop, &instance, 1) {
+            Ok(adapters) => adapters,
+            Err(error) => return failures.push(format!("Vulkan, DXGI swapchains: {error}")),
+        };
+        for (adapter, surfaces) in dxgi_adapters {
+            let name = format!("{}, a DXGI swapchain", adapter_name(&adapter));
+            let surface = &surfaces[0].1;
+            let caps = surface.get_capabilities(&adapter);
+            println!("{name}: scaling modes {:?}", caps.scaling_modes);
+            if caps.scaling_modes
+                != [
+                    wgpu::SurfaceScalingMode::Stretch,
+                    wgpu::SurfaceScalingMode::OneToOne,
+                ]
+            {
+                failures.push(format!("{name}: scaling modes {:?}", caps.scaling_modes));
+            }
+            let (device, queue, errors) = device_without_swapchain_maintenance1(&adapter);
+            let base = config(surface, &adapter);
+            for scaling_mode in
+                core::iter::once(wgpu::SurfaceScalingMode::Auto).chain(caps.scaling_modes.clone())
+            {
+                let config = wgpu::SurfaceConfiguration {
+                    scaling_mode,
+                    ..base.clone()
+                };
+                if let Some(error) = try_configure(surface, &device, &config) {
+                    failures.push(format!("{name}: {scaling_mode:?}: {error}"));
+                    continue;
+                }
+                for _ in 0..FRAMES {
+                    let got = acquire_and_present(surface, &device, &queue);
+                    if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                        failures.push(format!("{name}: {scaling_mode:?}: acquired {got}"));
+                        break;
+                    }
+                }
+            }
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+    }
+
+    /// The DX12 half of [`scaling_modes`], on instances that make each kind of swapchain.
+    #[cfg(windows)]
+    fn dx12_scaling(event_loop: &ActiveEventLoop, failures: &mut Failures) {
+        use wgpu_hal::Surface as _;
+        use windows::Win32::Graphics::Dxgi::{
+            DXGI_SCALING, DXGI_SCALING_NONE, DXGI_SCALING_STRETCH,
+        };
+
+        /// The scaling of `surface`'s swapchain.
+        fn swapchain_scaling(surface: &wgpu_hal::dx12::Surface) -> Option<DXGI_SCALING> {
+            let swap_chain = surface.swap_chain()?;
+            // SAFETY: A live swapchain.
+            unsafe { swap_chain.GetDesc1() }
+                .ok()
+                .map(|desc| desc.Scaling)
+        }
+
+        let instance = |kind| {
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+                event_loop.owned_display_handle(),
+            ));
+            desc.backends = wgpu::Backends::DX12;
+            desc.backend_options.dx12.presentation_system = kind;
+            wgpu::Instance::new(desc)
+        };
+
+        // A window's swapchain.
+        let hwnd = instance(wgpu::Dx12SwapchainKind::DxgiFromHwnd);
+        let window_adapters = match adapters(event_loop, &hwnd, 2) {
+            Ok(adapters) => adapters,
+            Err(error) => return failures.push(format!("DX12, window swapchains: {error}")),
+        };
+        for (adapter, surfaces) in window_adapters {
+            let name = adapter_name(&adapter);
+            let (_, surface) = &surfaces[0];
+            let caps = surface.get_capabilities(&adapter);
+            if caps.scaling_modes
+                != [
+                    wgpu::SurfaceScalingMode::Stretch,
+                    wgpu::SurfaceScalingMode::OneToOne,
+                ]
+            {
+                failures.push(format!(
+                    "{name}, a window's swapchain: scaling modes {:?}",
+                    caps.scaling_modes
+                ));
+            }
+            let (device, queue, errors) = device(&adapter);
+            let base = config(surface, &adapter);
+            for (scaling_mode, expected) in [
+                (wgpu::SurfaceScalingMode::Auto, DXGI_SCALING_STRETCH),
+                (wgpu::SurfaceScalingMode::Stretch, DXGI_SCALING_STRETCH),
+                (wgpu::SurfaceScalingMode::OneToOne, DXGI_SCALING_NONE),
+            ] {
+                let config = wgpu::SurfaceConfiguration {
+                    scaling_mode,
+                    ..base.clone()
+                };
+                if let Some(error) = try_configure(surface, &device, &config) {
+                    failures.push(format!("{name}: {scaling_mode:?}: {error}"));
+                    continue;
+                }
+                // SAFETY: Only inspected.
+                let scaling =
+                    swapchain_scaling(&unsafe { surface.as_hal::<wgpu_hal::api::Dx12>() }.unwrap());
+                println!("{name}: {scaling_mode:?}: the swapchain's scaling {scaling:?}");
+                if scaling != Some(expected) {
+                    failures.push(format!(
+                        "{name}: {scaling_mode:?}: the swapchain's scaling {scaling:?}, not \
+                         {expected:?}"
+                    ));
+                }
+                let got = acquire_and_present(surface, &device, &queue);
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!("{name}: {scaling_mode:?}: acquired {got}"));
+                }
+            }
+
+            // wgpu-hal asked for another scaling on a configured surface, which wgpu-core never
+            // does (it unconfigures first), on the other window's surface, which wgpu-core did not
+            // configure.
+            let (_, other) = &surfaces[1];
+            {
+                // SAFETY: Only wgpu-hal configures the surface, with no GPU work using it, and the
+                // device is idle; the surface is unconfigured before its device is dropped.
+                let hal_surface = unsafe { other.as_hal::<wgpu_hal::api::Dx12>() }.unwrap();
+                let hal_device = unsafe { device.as_hal::<wgpu_hal::api::Dx12>() }.unwrap();
+                for (scaling_mode, expected) in [
+                    (wgpu::SurfaceScalingMode::Stretch, DXGI_SCALING_STRETCH),
+                    (wgpu::SurfaceScalingMode::OneToOne, DXGI_SCALING_NONE),
+                    (wgpu::SurfaceScalingMode::Stretch, DXGI_SCALING_STRETCH),
+                ] {
+                    // SAFETY: As above.
+                    let configured =
+                        unsafe { hal_surface.configure(&hal_device, &hal_config(scaling_mode)) };
+                    let scaling = swapchain_scaling(&hal_surface);
+                    println!(
+                        "{name}: wgpu-hal configured with {scaling_mode:?}: {configured:?}, the \
+                         swapchain's scaling {scaling:?}"
+                    );
+                    if configured.is_err() || scaling != Some(expected) {
+                        failures.push(format!(
+                            "{name}: wgpu-hal configured with {scaling_mode:?}: {configured:?}, \
+                             the swapchain's scaling {scaling:?}, not {expected:?}"
+                        ));
+                    }
+                }
+                // The unlisted `AspectRatio`: refused, before the swapchain is touched.
+                // SAFETY: As above.
+                let configured = unsafe {
+                    hal_surface.configure(
+                        &hal_device,
+                        &hal_config(wgpu::SurfaceScalingMode::AspectRatio),
+                    )
+                };
+                let scaling = swapchain_scaling(&hal_surface);
+                println!(
+                    "{name}: wgpu-hal configured with AspectRatio: {configured:?}, the \
+                     swapchain's scaling {scaling:?}"
+                );
+                if !matches!(
+                    configured,
+                    Err(wgpu_hal::SurfaceError::UnsupportedScalingMode)
+                ) || scaling != Some(DXGI_SCALING_STRETCH)
+                {
+                    failures.push(format!(
+                        "{name}: wgpu-hal configured with AspectRatio: {configured:?}, the \
+                         swapchain's scaling {scaling:?}, not refused with the swapchain kept"
+                    ));
+                }
+                // SAFETY: As above.
+                unsafe { hal_surface.unconfigure(&hal_device) };
+            }
+
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+
+        // A composition swapchain, placed by its visual.
+        let visual = instance(wgpu::Dx12SwapchainKind::DxgiFromVisual);
+        let composition_adapters = match adapters(event_loop, &visual, 1) {
+            Ok(adapters) => adapters,
+            Err(error) => return failures.push(format!("DX12, composition swapchains: {error}")),
+        };
+        for (adapter, surfaces) in composition_adapters {
+            let name = adapter_name(&adapter);
+            let caps = surfaces[0].1.get_capabilities(&adapter);
+            println!(
+                "{name}, a composition swapchain: scaling modes {:?}",
+                caps.scaling_modes
+            );
+            if !caps.scaling_modes.is_empty() {
+                failures.push(format!(
+                    "{name}, a composition swapchain: scaling modes {:?}",
+                    caps.scaling_modes
+                ));
+            }
+            let (device, queue, errors) = device(&adapter);
+            {
+                // SAFETY: Only wgpu-hal uses the surface, which wgpu-core did not configure.
+                let hal_surface = unsafe { surfaces[0].1.as_hal::<wgpu_hal::api::Dx12>() }.unwrap();
+                // SAFETY: As above.
+                let hal_device = unsafe { device.as_hal::<wgpu_hal::api::Dx12>() }.unwrap();
+                // SAFETY: As above.
+                unsafe {
+                    hal_refuses_each_mode::<wgpu_hal::api::Dx12>(
+                        &format!("{name}, a composition swapchain"),
+                        &hal_surface,
+                        &hal_device,
+                        failures,
+                    )
+                };
+            }
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+    }
+
     pub fn main() {
         let mut args = libtest_mimic::Arguments::from_args();
         // `winit` requires the main thread; this makes libtest-mimic run inline.
@@ -660,6 +1390,7 @@ mod native {
             ("discarded_images", discarded_images),
             ("two_surfaces", two_surfaces),
             ("configure_race", configure_race),
+            ("scaling_modes", scaling_modes),
         ]
         .map(|(name, scenario)| {
             let trial = libtest_mimic::Trial::test(name, move || run(scenario));

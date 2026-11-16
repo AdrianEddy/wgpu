@@ -4519,6 +4519,8 @@ impl dispatch::SurfaceInterface for WebSurface {
                 wgt::CompositeAlphaMode::Opaque,
                 wgt::CompositeAlphaMode::PreMultiplied,
             ],
+            // A canvas is scaled by its CSS (`object-fit`), not by the presentation API.
+            scaling_modes: Vec::new(),
             // Statically set to RENDER_ATTACHMENT for now. See https://gpuweb.github.io/gpuweb/#dom-gpucanvasconfiguration-usage
             usages: wgt::TextureUsages::RENDER_ATTACHMENT,
         }
@@ -4552,6 +4554,21 @@ impl dispatch::SurfaceInterface for WebSurface {
 
     fn configure(&self, device: &dispatch::DispatchDevice, config: &crate::SurfaceConfiguration) {
         let device = device.as_webgpu();
+
+        if config.scaling_mode != wgt::SurfaceScalingMode::Auto {
+            // `get_capabilities` never lists a scaling mode, but an app may still request one
+            // without checking; record the failure and report the surface as lost (as for a
+            // rejected `configure`) rather than panicking, since there is no `catch_unwind` on
+            // wasm to recover an abort.
+            self.configure_failed.set(true);
+            log::error!(
+                "Surface scaling mode {mode:?} is not supported on the WebGPU backend; \
+                 the surface will report as lost. Check `get_capabilities` before \
+                 configuring.",
+                mode = config.scaling_mode
+            );
+            return;
+        }
 
         match self.canvas {
             Canvas::Canvas(ref canvas) => {

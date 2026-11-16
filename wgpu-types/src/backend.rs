@@ -646,6 +646,11 @@ pub struct NoopBackendOptions {
 
     /// Specify the reported maximum subgroup size.
     pub subgroup_max_size: Option<u32>,
+
+    /// Specify whether its devices can configure a surface with an explicit
+    /// [`SurfaceScalingMode`](crate::SurfaceScalingMode), as a device created
+    /// from a raw device may not. If `None`, they can.
+    pub present_scaling: Option<bool>,
 }
 
 impl NoopBackendOptions {

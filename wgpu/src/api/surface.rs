@@ -96,6 +96,7 @@ impl Surface<'_> {
             desired_maximum_frame_latency: 2,
             present_mode: *caps.present_modes.first()?,
             alpha_mode: wgt::CompositeAlphaMode::Auto,
+            scaling_mode: wgt::SurfaceScalingMode::Auto,
             view_formats: vec![],
         })
     }
@@ -126,6 +127,10 @@ impl Surface<'_> {
     /// - Texture format requested is unsupported on the surface.
     /// - The requested color space is unsupported for the requested format
     ///   (see [`SurfaceCapabilities::format_capabilities`]).
+    /// - The requested scaling mode is not `Auto`, and is not listed in
+    ///   [`SurfaceCapabilities::scaling_modes`] or is refused by the platform (see
+    ///   [`SurfaceScalingMode`](crate::SurfaceScalingMode)). On the web backend, which lists no
+    ///   scaling mode, the surface reports as lost instead, as there is no `catch_unwind` there.
     /// - `config.width` or `config.height` is zero.
     pub fn configure(&self, device: &Device, config: &SurfaceConfiguration) {
         self.inner.configure(&device.inner, config);

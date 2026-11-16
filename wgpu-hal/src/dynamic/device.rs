@@ -14,7 +14,7 @@ use super::{
     DynAccelerationStructure, DynBindGroup, DynBindGroupLayout, DynBuffer, DynCommandEncoder,
     DynComputePipeline, DynFence, DynPipelineCache, DynPipelineLayout, DynQuerySet, DynQueue,
     DynRayTracingPipeline, DynRenderPipeline, DynResource, DynResourceExt as _, DynSampler,
-    DynShaderModule, DynTexture, DynTextureView,
+    DynShaderModule, DynSurface, DynTexture, DynTextureView,
 };
 
 pub trait DynDevice: DynResource {
@@ -231,6 +231,8 @@ pub trait DynDevice: DynResource {
     fn limits(&self) -> wgt::Limits;
     /// Dynamic version of [Device::downlevel_capabilities]
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
+    /// Dynamic version of [Device::supports_present_scaling]
+    fn supports_present_scaling(&self, surface: &dyn DynSurface) -> bool;
     /// Dynamic version of [Device::generate_allocator_report]
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport>;
 
@@ -679,6 +681,11 @@ impl<D: Device + DynResource> DynDevice for D {
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         D::downlevel_capabilities(self)
+    }
+
+    fn supports_present_scaling(&self, surface: &dyn DynSurface) -> bool {
+        let surface = surface.expect_downcast_ref();
+        D::supports_present_scaling(self, surface)
     }
 
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {

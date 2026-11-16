@@ -307,6 +307,7 @@ impl<A: hal::Api> Example<A> {
                 .min(*surface_caps.maximum_frame_latency.end()),
             present_mode: wgpu_types::PresentMode::Fifo,
             composite_alpha_mode: wgpu_types::CompositeAlphaMode::Opaque,
+            scaling_mode: wgpu_types::SurfaceScalingMode::Auto,
             format: surface_format,
             color_space: wgpu_types::SurfaceColorSpace::Srgb,
             extent: wgpu_types::Extent3d {

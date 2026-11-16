@@ -189,6 +189,7 @@ fn config(caps: &crate::SurfaceCapabilities) -> crate::SurfaceConfiguration {
         ),
         present_mode: caps.present_modes[0],
         composite_alpha_mode: caps.composite_alpha_modes[0],
+        scaling_mode: wgt::SurfaceScalingMode::Auto,
         format: format.format,
         color_space: wgt::SurfaceColorSpace::Srgb,
         extent: wgt::Extent3d {

@@ -310,6 +310,8 @@ struct SwapChain {
     format: wgt::TextureFormat,
     size: wgt::Extent3d,
     restart_pending: bool,
+    /// Fixed at creation: `ResizeBuffers` cannot change it.
+    scaling: Dxgi::DXGI_SCALING,
 }
 
 pub struct Surface {
@@ -1130,6 +1132,12 @@ impl crate::Surface for Surface {
         device: &Device,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
+        // Before anything else: a refusal leaves a configured swapchain as it is.
+        let scaling = self
+            .target
+            .dxgi_scaling(config.scaling_mode)
+            .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+
         let mut flags = Dxgi::DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         // We always set ALLOW_TEARING on the swapchain no matter
         // what kind of swapchain we want because ResizeBuffers
@@ -1159,7 +1167,19 @@ impl crate::Surface for Surface {
 
         // A newly-created waitable object can be awaited `maximum_frame_latency` times before stall.
         let pending_present_count = config.maximum_frame_latency as usize;
-        let swap_chain = match self.swap_chain.write().take() {
+        // `ResizeBuffers` keeps the scaling the swapchain was created with: a swapchain of another
+        // scaling is released, and a new one created for the window. (wgpu-core unconfigures a
+        // surface before it configures it, so this is for wgpu-hal's direct users.)
+        let previous = self.swap_chain.write().take().and_then(|sc| {
+            if sc.scaling == scaling {
+                Some(sc)
+            } else {
+                drop(unsafe { sc.release_resources() });
+                None
+            }
+        });
+
+        let swap_chain = match previous {
             //Note: this path doesn't properly re-initialize all of the things
             Some(sc) => {
                 let raw = unsafe { sc.release_resources() };
@@ -1185,6 +1205,7 @@ impl crate::Surface for Surface {
                     swap_chain_buffer,
                     auxil::dxgi::conv::map_acomposite_alpha_mode(config.composite_alpha_mode),
                     flags,
+                    scaling,
                 );
                 let swap_chain1 = match self.target {
                     SurfaceTarget::Visual(_)
@@ -1352,6 +1373,7 @@ impl crate::Surface for Surface {
             format: config.format,
             size: config.extent,
             restart_pending: true,
+            scaling,
         });
 
         Ok(())

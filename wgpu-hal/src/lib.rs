@@ -573,6 +573,11 @@ pub enum SurfaceError {
     Timeout,
     #[error("The window is occluded (e.g. minimized or behind another window). Try again once the window is no longer occluded.")]
     Occluded,
+    /// [`Surface::configure`] cannot apply [`SurfaceConfiguration::scaling_mode`]: a mode that
+    /// [`SurfaceCapabilities::scaling_modes`] does not list, or one it lists that the platform
+    /// refuses for this configuration. Only `configure` returns it.
+    #[error("The surface does not support the requested scaling mode")]
+    UnsupportedScalingMode,
     #[error(transparent)]
     Device(#[from] DeviceError),
     #[error("Other reason: {0}")]
@@ -746,6 +751,11 @@ pub trait Surface: WasmNotSendSync {
     type A: Api;
 
     /// Configure `self` to use `device`.
+    ///
+    /// Returns [`SurfaceError::UnsupportedScalingMode`] for a
+    /// [`SurfaceConfiguration::scaling_mode`] that it cannot apply. A configuration that fails
+    /// may leave `self` unconfigured: some backends release the previous swapchain before they
+    /// can find out.
     ///
     /// # Safety
     ///
@@ -1346,6 +1356,15 @@ pub trait Device: WasmNotSendSync {
     /// feature or an extension behind a downlevel flag does
     /// (`vulkan::Adapter::device_downlevel_capabilities`). It has none that its adapter lacks.
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
+
+    /// Whether this device can configure `surface` with the scaling modes that its adapter
+    /// lists in [`SurfaceCapabilities::scaling_modes`]. The adapter lists them for the devices
+    /// that [`Adapter::open`] opens; a device created outside wgpu-hal may lack what they need,
+    /// as a Vulkan device without `swapchainMaintenance1` does for a Vulkan swapchain
+    /// (`VK_KHR_swapchain`), while the DXGI swapchain of the Vulkan backend needs nothing of
+    /// the device. For such a device, configuring `surface` with a mode other than
+    /// [`wgt::SurfaceScalingMode::Auto`] fails with [`SurfaceError::UnsupportedScalingMode`].
+    fn supports_present_scaling(&self, surface: &<Self::A as Api>::Surface) -> bool;
 
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {
         None
@@ -2423,6 +2442,22 @@ pub struct SurfaceCapabilities {
     ///
     /// Must be at least one.
     pub composite_alpha_modes: Vec<wgt::CompositeAlphaMode>,
+
+    /// List of the scaling modes [`Surface::configure`] accepts besides
+    /// [`wgt::SurfaceScalingMode::Auto`], which it always accepts and which this list never
+    /// holds. Each can be combined with every mode in [`Self::present_modes`]. The order is not
+    /// significant.
+    ///
+    /// A listed mode can still be refused for a configuration, with
+    /// [`SurfaceError::UnsupportedScalingMode`], where the platform has a condition the list
+    /// cannot express (for a Vulkan swapchain, an extent outside the surface's range for
+    /// scaled presentation).
+    ///
+    /// Empty when the backend gives no control over the placement of a texture whose size
+    /// differs from the surface's. It holds for the devices that [`Adapter::open`] opens; a
+    /// device for which [`Device::supports_present_scaling`] is false for the surface accepts
+    /// none of them.
+    pub scaling_modes: Vec<wgt::SurfaceScalingMode>,
 }
 
 impl SurfaceCapabilities {
@@ -2977,6 +3012,16 @@ pub struct SurfaceConfiguration {
     pub present_mode: wgt::PresentMode,
     /// Alpha composition mode.
     pub composite_alpha_mode: wgt::CompositeAlphaMode,
+    /// Placement of a presented texture whose size differs from the surface's: a mode listed
+    /// in [`SurfaceCapabilities::scaling_modes`], on a device for which
+    /// [`Device::supports_present_scaling`] is true for the surface, or
+    /// [`wgt::SurfaceScalingMode::Auto`], which leaves the placement to the backend: a DXGI
+    /// swapchain (DX12's, and the Vulkan backend's) and Metal stretch, a Vulkan swapchain asks
+    /// for no present scaling, OpenGL has no control. `wgpu-core` resolves `Auto` to the first of
+    /// `Stretch`, `AspectRatio` and `OneToOne` that is listed, so through it the HAL sees `Auto`
+    /// where none is, and where the backend refused the mode chosen: `wgpu-core` then
+    /// configures the surface again with `Auto`.
+    pub scaling_mode: wgt::SurfaceScalingMode,
     /// Format of the surface textures.
     pub format: wgt::TextureFormat,
     /// Color space in which the presentation engine interprets the surface

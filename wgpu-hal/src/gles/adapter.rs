@@ -1429,6 +1429,9 @@ impl crate::Adapter for super::Adapter {
                     vec![wgt::PresentMode::Fifo] //TODO
                 },
                 composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque], //TODO
+                // The present blit places the texture 1:1 at the default framebuffer's
+                // bottom-left corner, with no control over it yet.
+                scaling_modes: Vec::new(),
                 maximum_frame_latency: 2..=2, //TODO, unused currently
                 current_extent: None,
                 usage: wgt::TextureUses::COLOR_TARGET,
