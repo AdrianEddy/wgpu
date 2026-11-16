@@ -395,6 +395,11 @@ impl Instance {
 
     /// Converts a wgpu-hal [`hal::ExposedAdapter`] to a wgpu [`Adapter`].
     ///
+    /// The adapter offers what this instance's enumeration would offer of it: its limits fit
+    /// indirect validation where [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its
+    /// features and limits are WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
+    /// A device that requests [`Adapter::limits`] gets limits that its validation supports.
+    ///
     /// # Types
     ///
     /// The type of `hal_adapter.adapter` depends on the backend:

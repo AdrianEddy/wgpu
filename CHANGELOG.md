@@ -291,6 +291,7 @@ By @sagudev in [#10307](https://github.com/gfx-rs/wgpu/pull/10307).
 - A GPU wait that times out while configuring a surface is now the error `ConfigureSurfaceError::GpuWaitTimeout`, and the surface stays configured, apart from its acquired texture, which is destroyed as when configuring succeeds. Unconfiguring or dropping the surface logs the timeout and carries on. Each panicked, and GL's waits time out after about two seconds. By @AdrianEddy.
 - Fix deadlocks when `Device::on_uncaptured_error` or `Device::set_device_lost_callback` replaces a callback, or `Surface::configure` changes the surface's device, and drops the last reference to application state that calls wgpu when it drops, such as the last `Queue`, or the previous device with its callbacks. They were dropped with a lock held. By @AdrianEddy.
 - Refuse a `CubeArray` texture view on a device without `DownlevelFlags::CUBE_ARRAY_TEXTURES`. By @AdrianEddy.
+- `Instance::create_adapter_from_hal` offers what the instance's enumeration offers of the adapter: its buffer limits fit indirect validation where `InstanceFlags::VALIDATION_INDIRECT_CALL` is set, and its features and limits are WebGPU's under `InstanceFlags::STRICT_WEBGPU_COMPLIANCE`. A device that requested a wrapped adapter's limits panicked in indirect validation on an adapter whose buffer size exceeds `u32::MAX`, as NVIDIA's Vulkan adapters' does. By @AdrianEddy.
 
 #### naga
 
