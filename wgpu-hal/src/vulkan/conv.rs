@@ -599,6 +599,94 @@ pub fn map_vk_composite_alpha(flags: vk::CompositeAlphaFlagsKHR) -> Vec<wgt::Com
     modes
 }
 
+/// The present scaling and gravity of a scaling mode, or `None` for
+/// [`wgt::SurfaceScalingMode::Auto`], the platform's own placement. The gravity is empty where
+/// the mode does not depend on it: a stretch maps the whole image onto the whole surface. Both
+/// axes take the same gravity (VUID-VkSwapchainPresentScalingCreateInfoKHR-presentGravityX-07765
+/// and -07766 forbid setting only one).
+pub fn map_surface_scaling_mode(
+    mode: wgt::SurfaceScalingMode,
+) -> Option<(vk::PresentScalingFlagsEXT, vk::PresentGravityFlagsEXT)> {
+    match mode {
+        wgt::SurfaceScalingMode::Auto => None,
+        wgt::SurfaceScalingMode::Stretch => Some((
+            vk::PresentScalingFlagsEXT::STRETCH,
+            vk::PresentGravityFlagsEXT::empty(),
+        )),
+        wgt::SurfaceScalingMode::AspectRatio => Some((
+            vk::PresentScalingFlagsEXT::ASPECT_RATIO_STRETCH,
+            vk::PresentGravityFlagsEXT::CENTERED,
+        )),
+        wgt::SurfaceScalingMode::OneToOne => Some((
+            vk::PresentScalingFlagsEXT::ONE_TO_ONE,
+            vk::PresentGravityFlagsEXT::MIN,
+        )),
+    }
+}
+
+/// What a surface supports of present scaling with one present mode: the members of its
+/// `VkSurfacePresentScalingCapabilitiesKHR`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PresentScalingSupport {
+    pub scaling: vk::PresentScalingFlagsEXT,
+    pub gravity_x: vk::PresentGravityFlagsEXT,
+    pub gravity_y: vk::PresentGravityFlagsEXT,
+}
+
+impl PresentScalingSupport {
+    pub fn of(caps: &vk::SurfacePresentScalingCapabilitiesEXT<'_>) -> Self {
+        Self {
+            scaling: caps.supported_present_scaling,
+            gravity_x: caps.supported_present_gravity_x,
+            gravity_y: caps.supported_present_gravity_y,
+        }
+    }
+}
+
+/// Whether a swapchain of `extent` is in the surface's range for scaled presentation, from
+/// `min_scaled_image_extent` to `max_scaled_image_extent`
+/// (VUID-VkSwapchainCreateInfoKHR-pNext-07782). Either end may be the special value
+/// `(0xFFFFFFFF, 0xFFFFFFFF)`, "indicating that the surface size will be determined by the extent
+/// of a swapchain targeting the surface": that end does not bound it.
+pub fn extent_within_scaled_range(
+    caps: &vk::SurfacePresentScalingCapabilitiesEXT<'_>,
+    extent: wgt::Extent3d,
+) -> bool {
+    let unbounded = |e: vk::Extent2D| e.width == u32::MAX && e.height == u32::MAX;
+    let min = caps.min_scaled_image_extent;
+    let max = caps.max_scaled_image_extent;
+    (unbounded(min) || (min.width <= extent.width && min.height <= extent.height))
+        && (unbounded(max) || (extent.width <= max.width && extent.height <= max.height))
+}
+
+/// The scaling modes, other than [`wgt::SurfaceScalingMode::Auto`], that a surface supports with
+/// every present mode whose support `per_present_mode` holds: those whose scaling each lists, with
+/// the gravity on both axes that the mode needs (a stretch, which fills the surface, needs
+/// none). Empty for no present mode.
+pub fn surface_scaling_modes(
+    per_present_mode: &[PresentScalingSupport],
+) -> Vec<wgt::SurfaceScalingMode> {
+    if per_present_mode.is_empty() {
+        return Vec::new();
+    }
+    [
+        wgt::SurfaceScalingMode::Stretch,
+        wgt::SurfaceScalingMode::AspectRatio,
+        wgt::SurfaceScalingMode::OneToOne,
+    ]
+    .into_iter()
+    .filter(|&mode| {
+        let (scaling, gravity) =
+            map_surface_scaling_mode(mode).expect("only `Auto` maps to no scaling");
+        per_present_mode.iter().all(|support| {
+            support.scaling.contains(scaling)
+                && (gravity.is_empty()
+                    || (support.gravity_x.contains(gravity) && support.gravity_y.contains(gravity)))
+        })
+    })
+    .collect()
+}
+
 pub fn map_buffer_usage(usage: wgt::BufferUses) -> vk::BufferUsageFlags {
     let mut flags = vk::BufferUsageFlags::empty();
     if usage.contains(wgt::BufferUses::COPY_SRC) {
@@ -1473,5 +1561,150 @@ mod tests {
             vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR
                 | vk::AccessFlags::ACCELERATION_STRUCTURE_WRITE_KHR
         );
+    }
+
+    /// Each scaling mode asks for its present scaling, with the gravity that places what does not
+    /// fill the surface: centered for an aspect-ratio stretch, the top-left corner for one-to-one.
+    /// A stretch fills the surface and asks for no gravity, which the spec allows only on both axes
+    /// together (VUID-VkSwapchainPresentScalingCreateInfoKHR-presentGravityX-07765, -07766). `Auto`
+    /// asks for nothing.
+    #[test]
+    fn each_scaling_mode_asks_its_scaling_and_gravity() {
+        use wgt::SurfaceScalingMode as Mode;
+        assert_eq!(map_surface_scaling_mode(Mode::Auto), None);
+        assert_eq!(
+            map_surface_scaling_mode(Mode::Stretch),
+            Some((
+                vk::PresentScalingFlagsEXT::STRETCH,
+                vk::PresentGravityFlagsEXT::empty()
+            ))
+        );
+        assert_eq!(
+            map_surface_scaling_mode(Mode::AspectRatio),
+            Some((
+                vk::PresentScalingFlagsEXT::ASPECT_RATIO_STRETCH,
+                vk::PresentGravityFlagsEXT::CENTERED
+            ))
+        );
+        assert_eq!(
+            map_surface_scaling_mode(Mode::OneToOne),
+            Some((
+                vk::PresentScalingFlagsEXT::ONE_TO_ONE,
+                vk::PresentGravityFlagsEXT::MIN
+            ))
+        );
+    }
+
+    /// A surface lists the scaling modes that it supports with every present mode, each with the
+    /// gravity it needs on both axes, so that a configuration may combine any listed scaling mode
+    /// with any listed present mode; none for no present mode.
+    #[test]
+    fn a_surface_lists_the_scaling_modes_of_every_present_mode_with_their_gravity() {
+        use wgt::SurfaceScalingMode as Mode;
+        let all = PresentScalingSupport {
+            scaling: vk::PresentScalingFlagsEXT::STRETCH
+                | vk::PresentScalingFlagsEXT::ASPECT_RATIO_STRETCH
+                | vk::PresentScalingFlagsEXT::ONE_TO_ONE,
+            gravity_x: vk::PresentGravityFlagsEXT::MIN | vk::PresentGravityFlagsEXT::CENTERED,
+            gravity_y: vk::PresentGravityFlagsEXT::MIN | vk::PresentGravityFlagsEXT::CENTERED,
+        };
+        assert_eq!(surface_scaling_modes(&[]), []);
+        assert_eq!(
+            surface_scaling_modes(&[all]),
+            [Mode::Stretch, Mode::AspectRatio, Mode::OneToOne]
+        );
+        // Another present mode without one-to-one scaling.
+        let no_one_to_one = PresentScalingSupport {
+            scaling: all.scaling & !vk::PresentScalingFlagsEXT::ONE_TO_ONE,
+            ..all
+        };
+        assert_eq!(
+            surface_scaling_modes(&[all, no_one_to_one]),
+            [Mode::Stretch, Mode::AspectRatio]
+        );
+        assert_eq!(
+            surface_scaling_modes(&[no_one_to_one, all]),
+            [Mode::Stretch, Mode::AspectRatio]
+        );
+        // One-to-one without the top-left gravity on one axis, the aspect-ratio stretch without
+        // centering on the other: neither is listed.
+        let partial_gravity = PresentScalingSupport {
+            gravity_x: vk::PresentGravityFlagsEXT::CENTERED,
+            gravity_y: vk::PresentGravityFlagsEXT::MIN,
+            ..all
+        };
+        assert_eq!(surface_scaling_modes(&[partial_gravity]), [Mode::Stretch]);
+        // A stretch needs no gravity.
+        let stretch_alone = PresentScalingSupport {
+            scaling: vk::PresentScalingFlagsEXT::STRETCH,
+            ..PresentScalingSupport::default()
+        };
+        assert_eq!(surface_scaling_modes(&[stretch_alone]), [Mode::Stretch]);
+        // Gravity without a scaling lists nothing.
+        let gravity_alone = PresentScalingSupport {
+            scaling: vk::PresentScalingFlagsEXT::empty(),
+            ..all
+        };
+        assert_eq!(surface_scaling_modes(&[gravity_alone]), []);
+    }
+
+    fn scaled_range(
+        min: (u32, u32),
+        max: (u32, u32),
+    ) -> vk::SurfacePresentScalingCapabilitiesEXT<'static> {
+        vk::SurfacePresentScalingCapabilitiesEXT {
+            min_scaled_image_extent: vk::Extent2D {
+                width: min.0,
+                height: min.1,
+            },
+            max_scaled_image_extent: vk::Extent2D {
+                width: max.0,
+                height: max.1,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn extent(width: u32, height: u32) -> wgt::Extent3d {
+        wgt::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    /// The range for scaled presentation bounds the extent on both ends, inclusive, on each axis
+    /// alone.
+    #[test]
+    fn a_scaled_extent_must_be_within_the_range_on_both_axes() {
+        let caps = scaled_range((100, 50), (800, 600));
+        assert!(extent_within_scaled_range(&caps, extent(100, 50)));
+        assert!(extent_within_scaled_range(&caps, extent(400, 300)));
+        assert!(extent_within_scaled_range(&caps, extent(800, 600)));
+        assert!(!extent_within_scaled_range(&caps, extent(99, 300)));
+        assert!(!extent_within_scaled_range(&caps, extent(400, 49)));
+        assert!(!extent_within_scaled_range(&caps, extent(801, 300)));
+        assert!(!extent_within_scaled_range(&caps, extent(400, 601)));
+    }
+
+    /// `(0xFFFFFFFF, 0xFFFFFFFF)` at either end leaves that end unbounded, and only that end; a
+    /// single `0xFFFFFFFF` is an ordinary bound.
+    #[test]
+    fn the_special_extent_leaves_its_end_unbounded() {
+        let special = (u32::MAX, u32::MAX);
+        let both = scaled_range(special, special);
+        assert!(extent_within_scaled_range(&both, extent(1, 1)));
+        assert!(extent_within_scaled_range(
+            &both,
+            extent(u32::MAX - 1, u32::MAX - 1)
+        ));
+        let min = scaled_range(special, (800, 600));
+        assert!(extent_within_scaled_range(&min, extent(1, 1)));
+        assert!(!extent_within_scaled_range(&min, extent(801, 600)));
+        let max = scaled_range((100, 100), special);
+        assert!(extent_within_scaled_range(&max, extent(u32::MAX - 1, 100)));
+        assert!(!extent_within_scaled_range(&max, extent(99, 100)));
+        let one_axis = scaled_range((u32::MAX, 1), (u32::MAX, u32::MAX));
+        assert!(!extent_within_scaled_range(&one_axis, extent(100, 100)));
     }
 }

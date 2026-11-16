@@ -97,6 +97,8 @@ impl GPUCanvasContext {
         .map(Into::into)
         .unwrap_or_default(),
       alpha_mode: configuration.alpha_mode.into(),
+      // A canvas is scaled by its CSS, not by its configuration.
+      scaling_mode: wgpu_types::SurfaceScalingMode::Auto,
       view_formats: configuration
         .view_formats
         .into_iter()

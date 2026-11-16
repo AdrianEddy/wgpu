@@ -504,6 +504,8 @@ struct SwapChain {
     present_mode: wgt::PresentMode,
     format: wgt::TextureFormat,
     size: wgt::Extent3d,
+    /// Fixed at creation: `ResizeBuffers` cannot change it.
+    scaling: Dxgi::DXGI_SCALING,
 }
 
 enum SurfaceTarget {
@@ -518,6 +520,47 @@ enum SurfaceTarget {
     /// Borrowed, lifetime externally managed
     SurfaceHandle(Foundation::HANDLE),
     SwapChainPanel(types::ISwapChainPanelNative),
+}
+
+impl SurfaceTarget {
+    /// The `DXGI_SCALING` of a swapchain for this target that presents with `mode`, or `None`
+    /// for a mode the target does not offer.
+    ///
+    /// A swapchain made from a window offers `DXGI_SCALING_STRETCH` (DXGI's own default, also
+    /// for `Auto`) and `DXGI_SCALING_NONE`, which flip-model swapchains support.
+    /// `DXGI_SCALING_ASPECT_RATIO_STRETCH` "with legacy Win32 window swapchains ... works the same
+    /// as DXGI_SCALING_STRETCH" (`DXGI_SCALING`'s documentation), so it is not offered. A
+    /// composition swapchain must be `DXGI_SCALING_STRETCH` (`CreateSwapChainForComposition`'s
+    /// documentation), and its visual places it: it offers no mode.
+    fn dxgi_scaling(&self, mode: wgt::SurfaceScalingMode) -> Option<Dxgi::DXGI_SCALING> {
+        use wgt::SurfaceScalingMode as Mode;
+        match (self, mode) {
+            (_, Mode::Auto) | (Self::WndHandle(_), Mode::Stretch) => {
+                Some(Dxgi::DXGI_SCALING_STRETCH)
+            }
+            (Self::WndHandle(_), Mode::OneToOne) => Some(Dxgi::DXGI_SCALING_NONE),
+            (Self::WndHandle(_), Mode::AspectRatio)
+            | (
+                Self::VisualFromWndHandle { .. }
+                | Self::Visual(_)
+                | Self::SurfaceHandle(_)
+                | Self::SwapChainPanel(_),
+                Mode::Stretch | Mode::AspectRatio | Mode::OneToOne,
+            ) => None,
+        }
+    }
+
+    /// The scaling modes, other than `Auto`, that a swapchain for this target offers.
+    fn scaling_modes(&self) -> Vec<wgt::SurfaceScalingMode> {
+        [
+            wgt::SurfaceScalingMode::Stretch,
+            wgt::SurfaceScalingMode::AspectRatio,
+            wgt::SurfaceScalingMode::OneToOne,
+        ]
+        .into_iter()
+        .filter(|&mode| self.dxgi_scaling(mode).is_some())
+        .collect()
+    }
 }
 
 pub struct Surface {
@@ -1387,6 +1430,12 @@ impl crate::Surface for Surface {
         device: &Device,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
+        // Before anything else: a refusal leaves a configured swapchain as it is.
+        let scaling = self
+            .target
+            .dxgi_scaling(config.scaling_mode)
+            .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+
         let mut flags = Dxgi::DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         // We always set ALLOW_TEARING on the swapchain no matter
         // what kind of swapchain we want because ResizeBuffers
@@ -1414,7 +1463,19 @@ impl crate::Surface for Surface {
         // For high latency extra buffers seems excessive, so go with a minimum of 3 and beyond that add 1.
         let swap_chain_buffer = (config.maximum_frame_latency + 1).min(16);
 
-        let swap_chain = match self.swap_chain.write().take() {
+        // `ResizeBuffers` keeps the scaling the swapchain was created with: a swapchain of another
+        // scaling is released, and a new one created for the window. (wgpu-core unconfigures a
+        // surface before it configures it, so this is for wgpu-hal's direct users.)
+        let previous = self.swap_chain.write().take().and_then(|sc| {
+            if sc.scaling == scaling {
+                Some(sc)
+            } else {
+                drop(unsafe { sc.release_resources() });
+                None
+            }
+        });
+
+        let swap_chain = match previous {
             //Note: this path doesn't properly re-initialize all of the things
             Some(sc) => {
                 let raw = unsafe { sc.release_resources() };
@@ -1448,7 +1509,7 @@ impl crate::Surface for Surface {
                     },
                     BufferUsage: Dxgi::DXGI_USAGE_RENDER_TARGET_OUTPUT,
                     BufferCount: swap_chain_buffer,
-                    Scaling: Dxgi::DXGI_SCALING_STRETCH,
+                    Scaling: scaling,
                     SwapEffect: Dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
                     Flags: flags.0 as u32,
                 };
@@ -1616,6 +1677,7 @@ impl crate::Surface for Surface {
             present_mode: config.present_mode,
             format: config.format,
             size: config.extent,
+            scaling,
         });
 
         Ok(())

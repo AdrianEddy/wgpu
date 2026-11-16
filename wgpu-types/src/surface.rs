@@ -139,6 +139,70 @@ pub enum CompositeAlphaMode {
     Inherit = 4,
 }
 
+/// How the presentation engine places a presented surface texture whose size
+/// differs from the surface's.
+///
+/// The sizes differ whenever a window has been resized but the application has
+/// not yet presented a texture of the new size: during a live resize, that is
+/// every frame the compositor shows before the application catches up. What the
+/// compositor shows then is this mode's choice: a stretched picture, or the
+/// picture at its own size with the rest of the surface filled by the platform.
+///
+/// Support is listed per surface in [`SurfaceCapabilities::scaling_modes`]. An
+/// empty list means the platform gives no control, and only
+/// [`Auto`](Self::Auto) can be configured. The list assumes a device that its
+/// adapter opened: a device created from a raw device may lack what an explicit
+/// mode needs (on Vulkan, `swapchainMaintenance1`), and configuring its surfaces
+/// then treats the list as empty.
+///
+/// A listed mode can still be refused when the surface is configured, where the
+/// platform has a condition that the list cannot express: on Vulkan, a texture
+/// size outside the surface's range for scaled presentation. An explicit mode is
+/// then a validation error; [`Auto`](Self::Auto) is configured again without a
+/// scaling.
+///
+/// This maps to the backends as follows:
+/// - DX12, a swapchain made from a window (`HWND`): `DXGI_SCALING_STRETCH` for
+///   [`Stretch`](Self::Stretch), `DXGI_SCALING_NONE` for
+///   [`OneToOne`](Self::OneToOne). `DXGI_SCALING_ASPECT_RATIO_STRETCH` works as
+///   `DXGI_SCALING_STRETCH` on such a swapchain, so
+///   [`AspectRatio`](Self::AspectRatio) is not listed. A composition swapchain
+///   (a DirectComposition visual or surface handle, or a swapchain panel) must be
+///   `DXGI_SCALING_STRETCH`, and its visual places it, so it lists no modes.
+/// - Vulkan: `VkSwapchainPresentScalingCreateInfoKHR`, where the device has
+///   `swapchainMaintenance1` and the surface supports the mode, with the gravity
+///   that each mode documents, for every present mode the surface lists.
+/// - Metal: the layer's `contentsGravity`, which every configuration sets:
+///   `kCAGravityResize` (the layer's default) for [`Stretch`](Self::Stretch),
+///   `kCAGravityResizeAspect` for [`AspectRatio`](Self::AspectRatio).
+///   [`OneToOne`](Self::OneToOne) is not listed: it would take a corner gravity,
+///   whose vertical meaning depends on the layer's `contentsAreFlipped`.
+/// - OpenGL, WebGPU: no control.
+#[repr(C)]
+#[derive(Debug, ConstDefault!, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "lowercase"))]
+pub enum SurfaceScalingMode {
+    /// The first of [`Stretch`](Self::Stretch), [`AspectRatio`](Self::AspectRatio)
+    /// and [`OneToOne`](Self::OneToOne) that the surface lists, in that order;
+    /// the platform's own placement where it lists none, or where the platform
+    /// refuses the mode chosen when the surface is configured.
+    #[custom(default)]
+    Auto = 0,
+    /// The texture is scaled to the surface's size, whatever its aspect ratio.
+    Stretch = 1,
+    /// The texture is scaled to the largest size that fits the surface with its
+    /// aspect ratio kept, centered; the platform fills the rest of the surface.
+    AspectRatio = 2,
+    /// The texture is shown at its own size, its top-left corner at the surface's
+    /// top-left corner. Where it is smaller than the surface, the platform fills
+    /// the rest; where it is larger, it is cut at the surface's edges.
+    ///
+    /// With DX12, a window with the `WS_EX_LAYOUTRTL` style aligns the top-right
+    /// corners instead (`DXGI_SCALING_NONE`).
+    OneToOne = 3,
+}
+
 /// The color space in which the presentation engine interprets the values
 /// written to a surface texture.
 ///
@@ -529,6 +593,18 @@ pub struct SurfaceCapabilities {
     ///
     /// Will return at least one element, [`CompositeAlphaMode::Opaque`] or [`CompositeAlphaMode::Inherit`].
     pub alpha_modes: Vec<CompositeAlphaMode>,
+    /// List of the scaling modes the surface can be configured with, besides
+    /// [`SurfaceScalingMode::Auto`], which is always supported and never listed.
+    /// Each can be combined with every mode in [`present_modes`](Self::present_modes).
+    /// The order is not significant: `Auto` takes the first of `Stretch`,
+    /// `AspectRatio` and `OneToOne` that is listed. A listed mode can still be
+    /// refused when the surface is configured (see [`SurfaceScalingMode`]).
+    ///
+    /// Empty when the platform gives no control over the placement of a texture
+    /// whose size differs from the surface's. The list holds for a device that the
+    /// adapter opened; for a device created from a raw device without what the modes
+    /// need, configuring treats it as empty.
+    pub scaling_modes: Vec<SurfaceScalingMode>,
     /// Bitflag of supported texture usages for the surface to use with the given adapter.
     ///
     /// The usage [`TextureUsages::RENDER_ATTACHMENT`] is guaranteed.
@@ -558,6 +634,7 @@ impl Default for SurfaceCapabilities {
             format_capabilities: Vec::new(),
             present_modes: Vec::new(),
             alpha_modes: vec![CompositeAlphaMode::Opaque],
+            scaling_modes: Vec::new(),
             usages: TextureUsages::RENDER_ATTACHMENT,
         }
     }
@@ -785,16 +862,14 @@ pub struct SurfaceConfiguration<V> {
     /// Width of the swap chain. Must be the same size as the surface, and nonzero.
     ///
     /// If this is not the same size as the underlying surface (e.g. if it is
-    /// set once, and the window is later resized), the behaviour is defined
-    /// but platform-specific, and may change in the future (currently macOS
-    /// scales the surface, other platforms may do something else).
+    /// set once, and the window is later resized), [`scaling_mode`](Self::scaling_mode)
+    /// says how a presented texture is placed.
     pub width: u32,
     /// Height of the swap chain. Must be the same size as the surface, and nonzero.
     ///
     /// If this is not the same size as the underlying surface (e.g. if it is
-    /// set once, and the window is later resized), the behaviour is defined
-    /// but platform-specific, and may change in the future (currently macOS
-    /// scales the surface, other platforms may do something else).
+    /// set once, and the window is later resized), [`scaling_mode`](Self::scaling_mode)
+    /// says how a presented texture is placed.
     pub height: u32,
     /// Presentation mode of the swap chain. Fifo is the only mode guaranteed to be supported.
     /// `FifoRelaxed`, `Immediate`, and `Mailbox` will crash if unsupported, while `AutoVsync` and
@@ -838,6 +913,15 @@ pub struct SurfaceConfiguration<V> {
     pub desired_maximum_frame_latency: u32,
     /// Specifies how the alpha channel of the textures should be handled during compositing.
     pub alpha_mode: CompositeAlphaMode,
+    /// Specifies how a presented texture whose size differs from the surface's is placed,
+    /// for example while a window is being resized.
+    ///
+    /// [`SurfaceScalingMode::Auto`] (the default) is always supported: it is the first of
+    /// `Stretch`, `AspectRatio` and `OneToOne` that the surface lists, and the platform's own
+    /// placement where it lists none or refuses the mode chosen. Any other mode must be listed
+    /// in [`SurfaceCapabilities::scaling_modes`], and configuring fails with a validation error
+    /// where the platform refuses it.
+    pub scaling_mode: SurfaceScalingMode,
     /// Specifies what view formats will be allowed when calling `Texture::create_view` on
     /// the texture returned by `Surface::get_current_texture`.
     ///
@@ -868,6 +952,7 @@ impl<V: Clone> SurfaceConfiguration<V> {
             present_mode: self.present_mode,
             desired_maximum_frame_latency: self.desired_maximum_frame_latency,
             alpha_mode: self.alpha_mode,
+            scaling_mode: self.scaling_mode,
             view_formats: fun(&self.view_formats),
         }
     }

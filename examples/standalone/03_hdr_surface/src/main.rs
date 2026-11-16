@@ -313,6 +313,7 @@ impl State {
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: 2,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            scaling_mode: wgpu::SurfaceScalingMode::Auto,
             view_formats: vec![],
         };
         surface.configure(&device, &config);

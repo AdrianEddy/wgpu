@@ -1454,6 +1454,7 @@ impl crate::Adapter for super::Adapter {
                     wgt::CompositeAlphaMode::PreMultiplied,
                 ],
             },
+            scaling_modes: surface.target.scaling_modes(),
         })
     }
 

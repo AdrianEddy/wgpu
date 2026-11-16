@@ -533,6 +533,7 @@ impl crate::Adapter for super::Adapter {
                 wgt::CompositeAlphaMode::Opaque,
                 wgt::CompositeAlphaMode::PreMultiplied,
             ],
+            scaling_modes: super::surface::scaling_modes(),
 
             current_extent: Some(surface.dimensions()),
             usage: wgt::TextureUses::COLOR_TARGET

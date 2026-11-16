@@ -381,6 +381,140 @@ fn a_device_with_the_extension_but_not_swapchain_maintenance1_waits_for_the_queu
     }
 }
 
+/// On each adapter with a headless surface whose devices can have `swapchainMaintenance1`, a
+/// device created with the swapchain maintenance extension but without its feature supports no
+/// present scaling: it refuses a configuration with each scaling mode other than `Auto`, with
+/// `SurfaceError::UnsupportedScalingMode`, before it creates a swapchain, which the feature would
+/// need (VUID-VkSwapchainPresentScalingCreateInfoKHR-swapchainMaintenance1-10154), and takes one
+/// with `Auto`, which asks for nothing, and presents. The surface needn't list the modes: the
+/// device's refusal comes first. A refusal leaves the caller's swapchain creation chain set, a
+/// null chain withdraws it, and the configuration with `Auto` consumes it.
+#[test]
+fn a_device_without_swapchain_maintenance1_refuses_scaling_modes() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some((instance, surface)) = super::headless_instance(wgt::InstanceFlags::empty()) else {
+        return;
+    };
+    for (exposed, caps) in super::adapters(&instance, &surface) {
+        let adapter = &exposed.adapter;
+        let features = wgt::Features::empty();
+        let extensions = adapter.required_device_extensions(features);
+        if !super::super::adapter::SWAPCHAIN_MAINTENANCE1
+            .iter()
+            .any(|(name, _)| extensions.contains(name))
+        {
+            std::println!(
+                "skipped {:?}: no swapchain maintenance extension",
+                exposed.info.name
+            );
+            continue;
+        }
+        // wgpu-hal's own features for no feature, but with `swapchainMaintenance1` off.
+        let mut physical_features = adapter.physical_device_features(&extensions, features);
+        physical_features.swapchain_maintenance1 =
+            Some(vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default());
+        let priorities = [1.0];
+        let queues = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(0)
+            .queue_priorities(&priorities)];
+        let names = extensions
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<_>>();
+        let info = physical_features.add_to_device_create(
+            vk::DeviceCreateInfo::default()
+                .queue_create_infos(&queues)
+                .enabled_extension_names(&names),
+        );
+        // SAFETY: A valid create info, whose extensions and features the adapter offers.
+        let raw = unsafe {
+            instance
+                .shared
+                .raw
+                .create_device(adapter.raw_physical_device(), &info, None)
+        }
+        .unwrap();
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            adapter.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &physical_features,
+                features,
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        let (device, queue) = (open.device, open.queue);
+        std::println!(
+            "{:?}: the surface lists the scaling modes {:?}",
+            exposed.info.name,
+            caps.scaling_modes
+        );
+        assert!(!device.supports_present_scaling());
+        let config = super::config(&caps);
+        // A caller's chain: an empty format list, which may extend `VkSwapchainCreateInfoKHR` on
+        // a Vulkan 1.2 device (VUID-VkSwapchainCreateInfoKHR-pNext-pNext), as RADV's is.
+        assert!(adapter.phd_capabilities.device_api_version >= vk::API_VERSION_1_2);
+        let mut format_list = vk::ImageFormatListCreateInfo::default();
+        let pending = || {
+            surface
+                .inner
+                .as_any()
+                .downcast_ref::<super::super::swapchain::NativeSurface>()
+                .unwrap()
+                .has_pending_swapchain_create_chain()
+        };
+        // SAFETY: A valid chain, which stays valid until the surface is dropped.
+        unsafe { surface.set_next_swapchain_create_chain(<*mut _>::cast(&mut format_list)) };
+        for scaling_mode in [
+            wgt::SurfaceScalingMode::Stretch,
+            wgt::SurfaceScalingMode::AspectRatio,
+            wgt::SurfaceScalingMode::OneToOne,
+        ] {
+            let config = crate::SurfaceConfiguration {
+                scaling_mode,
+                ..config.clone()
+            };
+            // SAFETY: Nothing uses the surface, which is not configured.
+            match unsafe { surface.configure(&device, &config) } {
+                Err(crate::SurfaceError::UnsupportedScalingMode) => {}
+                Ok(()) => {
+                    // SAFETY: Configured just now, and nothing uses it.
+                    unsafe { surface.unconfigure(&device) };
+                    panic!("{:?}: configured with {scaling_mode:?}", exposed.info.name);
+                }
+                Err(other) => panic!("{:?}: {scaling_mode:?}: {other:?}", exposed.info.name),
+            }
+            // The refusal leaves the caller's chain for the next configuration.
+            assert!(pending(), "{:?}: {scaling_mode:?}", exposed.info.name);
+        }
+        // A null chain withdraws it.
+        // SAFETY: Null.
+        unsafe { surface.set_next_swapchain_create_chain(core::ptr::null_mut()) };
+        assert!(!pending());
+        // SAFETY: As above.
+        unsafe { surface.set_next_swapchain_create_chain(<*mut _>::cast(&mut format_list)) };
+        // SAFETY: The device's own fence.
+        let fence = unsafe { device.create_fence() }.unwrap();
+        // SAFETY: Each call meets wgpu-hal's requirements: the submission completes before the
+        // surface is unconfigured.
+        unsafe {
+            surface.configure(&device, &config).unwrap();
+            // `Auto` consumed the chain.
+            assert!(!pending());
+            super::present_frame(&device, &queue, &surface, &fence, 1);
+            surface.unconfigure(&device);
+            queue.wait_for_idle().unwrap();
+            device.destroy_fence(fence);
+        }
+        drop((queue, device));
+    }
+}
+
 /// Gives `device_from_raw` `raw`, created on `adapter` with `extensions` and `enabled`, with
 /// `features` requested, catching a refusal: then destroys `raw` and returns the refusal's message.
 fn take(

@@ -17,6 +17,11 @@
 //! - the surface is configured when it is unconfigured, acquired from, presented or discarded;
 //! - only an acquired image of the surface's current swapchain is presented or discarded, and on
 //!   the surface it was acquired from;
+//! - the surface is configured with [`wgt::SurfaceScalingMode::Auto`] or a scaling mode its
+//!   capabilities list ([`SCALING_MODES`]), the latter only on a device that supports present
+//!   scaling ([`crate::Device::supports_present_scaling`], from
+//!   [`wgt::NoopBackendOptions::present_scaling`]). It also refuses another, as a backend does,
+//!   with [`SurfaceError::UnsupportedScalingMode`], leaving its configuration as it was;
 //! - a submission uses only acquired images, and lists the surface texture of each one it uses.
 //!   This is stricter than [`crate::Queue::submit`], which requires the list for the images that
 //!   the submission writes to; wgpu-core lists every image a submission uses;
@@ -42,6 +47,7 @@
 //! to the image last presented ([`Surface::last_presented_write`]).
 //!
 //! [`SurfaceError::Timeout`]: crate::SurfaceError::Timeout
+//! [`SurfaceError::UnsupportedScalingMode`]: crate::SurfaceError::UnsupportedScalingMode
 
 #[cfg(feature = "noop_test_hooks")]
 use alloc::boxed::Box;
@@ -108,7 +114,18 @@ pub enum SurfaceViolation {
     /// `call` (replacing a configuration, or unconfiguring) while a submission to the device's
     /// queue had not completed.
     SubmissionsPending { call: SurfaceCall },
+    /// The surface was configured with a scaling mode that its capabilities do not list, or on a
+    /// device whose [`crate::Device::supports_present_scaling`] is false, with one other than
+    /// `Auto`.
+    UnlistedScalingMode(wgt::SurfaceScalingMode),
 }
+
+/// The scaling modes a noop surface lists in its capabilities: those of a DX12 swapchain made
+/// from a window.
+pub(super) const SCALING_MODES: [wgt::SurfaceScalingMode; 2] = [
+    wgt::SurfaceScalingMode::Stretch,
+    wgt::SurfaceScalingMode::OneToOne,
+];
 
 /// A command that wrote to an image of a noop surface's swapchain, as
 /// [`Surface::last_presented_write`] reports it.
@@ -347,6 +364,9 @@ struct Swapchain {
     images: Vec<Arc<Image>>,
     acquired: Vec<bool>,
     next: usize,
+    /// The scaling mode it was configured with ([`Surface::configured_scaling_mode`]).
+    #[cfg(feature = "noop_test_hooks")]
+    scaling_mode: wgt::SurfaceScalingMode,
     /// For each image, the command that last wrote to it since it was acquired.
     #[cfg(feature = "noop_test_hooks")]
     last_writes: Vec<Option<ImageWrite>>,
@@ -428,6 +448,18 @@ impl Surface {
     #[cfg(feature = "noop_test_hooks")]
     pub fn last_presented_write(&self) -> Option<ImageWrite> {
         self.shared.with_state(|state| state.last_presented_write)
+    }
+
+    /// Returns the scaling mode the current swapchain was configured with, or `None` while the
+    /// surface is not configured.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn configured_scaling_mode(&self) -> Option<wgt::SurfaceScalingMode> {
+        self.shared.with_state(|state| {
+            state
+                .swapchain
+                .as_ref()
+                .map(|swapchain| swapchain.scaling_mode)
+        })
     }
 
     /// Runs `f` inside the next `call` on this surface, on the thread making the call, while the
@@ -573,6 +605,13 @@ impl crate::Surface for Surface {
                 });
             }
             state.check_images_released(SurfaceCall::Configure);
+            if config.scaling_mode != wgt::SurfaceScalingMode::Auto
+                && !(SCALING_MODES.contains(&config.scaling_mode)
+                    && crate::Device::supports_present_scaling(device))
+            {
+                state.violation(SurfaceViolation::UnlistedScalingMode(config.scaling_mode));
+                return Err(crate::SurfaceError::UnsupportedScalingMode);
+            }
             if let Some(error) = failure {
                 state.swapchain = None;
                 return Err(error);
@@ -593,6 +632,8 @@ impl crate::Surface for Surface {
                     .collect(),
                 acquired: vec![false; image_count],
                 next: 0,
+                #[cfg(feature = "noop_test_hooks")]
+                scaling_mode: config.scaling_mode,
                 #[cfg(feature = "noop_test_hooks")]
                 last_writes: vec![None; image_count],
             });

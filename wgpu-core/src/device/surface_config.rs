@@ -1,5 +1,5 @@
 //! Validation of a surface configuration against its capabilities, including
-//! resolving `SurfaceColorSpace::Auto` (and present/alpha `Auto`) to concrete
+//! resolving `SurfaceColorSpace::Auto` (and present/alpha/scaling `Auto`) to concrete
 //! values. Split out of the very large `resource.rs`.
 
 use crate::{api_log, present};
@@ -172,6 +172,31 @@ pub(crate) fn validate_surface_configuration(
         );
         config.composite_alpha_mode = new_alpha_mode;
     }
+    match config.scaling_mode {
+        // `Auto` is the first of these that the surface offers, and the backend's own placement
+        // where it offers none. (`Surface::configure` configures it again as `Auto` where the
+        // backend refuses the mode chosen.)
+        wgt::SurfaceScalingMode::Auto => {
+            if let Some(chosen) = [
+                wgt::SurfaceScalingMode::Stretch,
+                wgt::SurfaceScalingMode::AspectRatio,
+                wgt::SurfaceScalingMode::OneToOne,
+            ]
+            .into_iter()
+            .find(|mode| caps.scaling_modes.contains(mode))
+            {
+                api_log!("Automatically choosing scaling mode by rule Auto. Chose {chosen:?}");
+                config.scaling_mode = chosen;
+            }
+        }
+        requested if !caps.scaling_modes.contains(&requested) => {
+            return Err(E::UnsupportedScalingMode {
+                requested,
+                available: caps.scaling_modes.clone(),
+            });
+        }
+        _ => {}
+    }
     if !caps.usage.contains(config.usage) {
         return Err(E::UnsupportedUsage {
             requested: config.usage,
@@ -199,6 +224,7 @@ mod surface_configuration_tests {
             usage: wgt::TextureUses::COLOR_TARGET,
             present_modes: vec![wgt::PresentMode::Fifo],
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
+            scaling_modes: Vec::new(),
         }
     }
 
@@ -210,6 +236,7 @@ mod surface_configuration_tests {
             maximum_frame_latency: 2,
             present_mode: wgt::PresentMode::Fifo,
             composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
+            scaling_mode: wgt::SurfaceScalingMode::Auto,
             format,
             color_space,
             extent: wgt::Extent3d {
@@ -351,6 +378,88 @@ mod surface_configuration_tests {
         );
         validate_surface_configuration(&mut config, &caps, 4096).unwrap();
         assert_eq!(config.color_space, wgt::SurfaceColorSpace::Bt2100Pq);
+    }
+
+    fn srgb_caps(scaling_modes: Vec<wgt::SurfaceScalingMode>) -> hal::SurfaceCapabilities {
+        hal::SurfaceCapabilities {
+            scaling_modes,
+            ..caps(vec![format_caps(
+                wgt::TextureFormat::Bgra8UnormSrgb,
+                wgt::SurfaceColorSpaces::SRGB,
+            )])
+        }
+    }
+
+    fn srgb_config(scaling_mode: wgt::SurfaceScalingMode) -> hal::SurfaceConfiguration {
+        hal::SurfaceConfiguration {
+            scaling_mode,
+            ..config(
+                wgt::TextureFormat::Bgra8UnormSrgb,
+                wgt::SurfaceColorSpace::Auto,
+            )
+        }
+    }
+
+    /// `Auto` scaling resolves to the first of `Stretch`, `AspectRatio` and `OneToOne` that the
+    /// surface offers, whatever the order of its list.
+    #[test]
+    fn auto_scaling_takes_the_first_offered_of_stretch_aspect_ratio_one_to_one() {
+        use wgt::SurfaceScalingMode::{AspectRatio, OneToOne, Stretch};
+        for (modes, chosen) in [
+            (vec![OneToOne, AspectRatio, Stretch], Stretch),
+            (vec![Stretch], Stretch),
+            (vec![OneToOne, AspectRatio], AspectRatio),
+            (vec![AspectRatio], AspectRatio),
+            (vec![OneToOne], OneToOne),
+        ] {
+            let caps = srgb_caps(modes.clone());
+            let mut config = srgb_config(wgt::SurfaceScalingMode::Auto);
+            validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+            assert_eq!(config.scaling_mode, chosen, "{modes:?}");
+        }
+    }
+
+    /// `Auto` scaling stays `Auto`, the backend's own placement, on a surface that offers no
+    /// scaling mode.
+    #[test]
+    fn auto_scaling_stays_auto_without_scaling_modes() {
+        let caps = srgb_caps(Vec::new());
+        let mut config = srgb_config(wgt::SurfaceScalingMode::Auto);
+        validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+        assert_eq!(config.scaling_mode, wgt::SurfaceScalingMode::Auto);
+    }
+
+    /// A listed scaling mode is configured as asked.
+    #[test]
+    fn listed_scaling_mode_is_honored() {
+        use wgt::SurfaceScalingMode::{AspectRatio, OneToOne, Stretch};
+        let caps = srgb_caps(vec![Stretch, AspectRatio, OneToOne]);
+        for mode in [Stretch, AspectRatio, OneToOne] {
+            let mut config = srgb_config(mode);
+            validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+            assert_eq!(config.scaling_mode, mode);
+        }
+    }
+
+    /// A scaling mode the surface does not list fails validation, also on a surface that offers
+    /// no control at all.
+    #[test]
+    fn unlisted_scaling_mode_errors() {
+        for modes in [Vec::new(), vec![wgt::SurfaceScalingMode::Stretch]] {
+            let caps = srgb_caps(modes.clone());
+            let mut config = srgb_config(wgt::SurfaceScalingMode::OneToOne);
+            let err = validate_surface_configuration(&mut config, &caps, 4096).unwrap_err();
+            assert!(
+                matches!(
+                    &err,
+                    ConfigureSurfaceError::UnsupportedScalingMode {
+                        requested: wgt::SurfaceScalingMode::OneToOne,
+                        available,
+                    } if *available == modes
+                ),
+                "{err:?}"
+            );
+        }
     }
 
     /// Explicitly requesting an unsupported color space fails validation.

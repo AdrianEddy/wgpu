@@ -764,6 +764,11 @@ impl crate::Surface for Surface {
         device: &super::Device,
         config: &crate::SurfaceConfiguration,
     ) -> Result<(), crate::SurfaceError> {
+        // The backend places the texture itself (`SurfaceCapabilities::scaling_modes` is empty).
+        if config.scaling_mode != wgt::SurfaceScalingMode::Auto {
+            return Err(crate::SurfaceError::UnsupportedScalingMode);
+        }
+
         // Remove the old configuration.
         unsafe { self.unconfigure(device) };
 

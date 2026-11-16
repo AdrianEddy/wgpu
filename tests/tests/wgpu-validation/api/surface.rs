@@ -40,10 +40,15 @@ struct Setup {
 }
 
 fn setup() -> Setup {
+    setup_with(wgpu::NoopBackendOptions::enabled())
+}
+
+/// A noop surface, configured by default, of a device of a noop instance with `noop`.
+fn setup_with(noop: wgpu::NoopBackendOptions) -> Setup {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::NOOP,
         backend_options: wgpu::BackendOptions {
-            noop: wgpu::NoopBackendOptions::enabled(),
+            noop,
             ..Default::default()
         },
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -1051,4 +1056,218 @@ fn reconfiguring_after_the_teardown_wait_gave_up_meets_the_teardowns_requirement
         [] as [noop::DeviceViolation; 0]
     );
     s.noop_device().resume_gpu();
+}
+
+/// A noop surface lists the scaling modes of a DX12 swapchain made from a window, and
+/// `get_default_config` asks for `Auto`.
+#[test]
+fn a_surface_lists_its_scaling_modes() {
+    let s = setup();
+    let adapter = pollster::block_on(s.instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&s.surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_eq!(
+        s.surface.get_capabilities(&adapter).scaling_modes,
+        [
+            wgpu::SurfaceScalingMode::Stretch,
+            wgpu::SurfaceScalingMode::OneToOne
+        ]
+    );
+    assert_eq!(s.config.scaling_mode, wgpu::SurfaceScalingMode::Auto);
+}
+
+/// `Auto` reaches the HAL as `Stretch` on a surface that lists it, and a listed mode as itself.
+#[test]
+fn a_scaling_mode_reaches_the_hal() {
+    let s = setup();
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Stretch)
+    );
+    s.surface.configure(
+        &s.device,
+        &wgpu::SurfaceConfiguration {
+            scaling_mode: wgpu::SurfaceScalingMode::OneToOne,
+            ..s.config.clone()
+        },
+    );
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::OneToOne)
+    );
+    s.assert_no_violations();
+}
+
+/// A scaling mode the surface does not list is a validation error, and the surface keeps its
+/// configuration.
+#[test]
+fn an_unlisted_scaling_mode_is_a_validation_error() {
+    let s = setup();
+    fail(
+        &s.device,
+        || {
+            s.surface.configure(
+                &s.device,
+                &wgpu::SurfaceConfiguration {
+                    scaling_mode: wgpu::SurfaceScalingMode::AspectRatio,
+                    ..s.config.clone()
+                },
+            )
+        },
+        Some(
+            "The requested scaling mode AspectRatio could not be applied; \
+             supported modes: [Stretch, OneToOne]",
+        ),
+    );
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Stretch)
+    );
+    s.assert_no_violations();
+}
+
+/// On a device that cannot configure a scaling mode, as a device created from a raw device may not
+/// (`NoopBackendOptions::present_scaling`): the surface still lists its modes for the adapter, but
+/// `Auto` reaches the HAL as `Auto`, asking for nothing (not as a mode that the HAL refuses), and
+/// an explicit mode is a validation error that lists none, keeping the configuration.
+#[test]
+fn a_device_without_present_scaling_is_configured_with_auto_only() {
+    let s = setup_with(wgpu::NoopBackendOptions {
+        present_scaling: Some(false),
+        ..wgpu::NoopBackendOptions::enabled()
+    });
+    let adapter = pollster::block_on(s.instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&s.surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    assert_eq!(
+        s.surface.get_capabilities(&adapter).scaling_modes,
+        [
+            wgpu::SurfaceScalingMode::Stretch,
+            wgpu::SurfaceScalingMode::OneToOne
+        ]
+    );
+    assert_eq!(s.config.scaling_mode, wgpu::SurfaceScalingMode::Auto);
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Auto)
+    );
+    fail(
+        &s.device,
+        || {
+            s.surface.configure(
+                &s.device,
+                &wgpu::SurfaceConfiguration {
+                    scaling_mode: wgpu::SurfaceScalingMode::OneToOne,
+                    ..s.config.clone()
+                },
+            )
+        },
+        Some("The requested scaling mode OneToOne could not be applied; supported modes: []"),
+    );
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Auto)
+    );
+    s.assert_no_violations();
+}
+
+/// Counts the configurations of the noop surface of `s`, up to `up_to`: the next `up_to` run a hook
+/// that adds one to the count returned.
+fn count_configurations(s: &Setup, up_to: usize) -> Arc<Mutex<usize>> {
+    let count = Arc::new(Mutex::new(0));
+    for _ in 0..up_to {
+        let count = Arc::clone(&count);
+        s.noop_surface()
+            .run_during_next(SurfaceCall::Configure, move || *count.lock().unwrap() += 1);
+    }
+    count
+}
+
+/// Where the HAL refuses the mode that `Auto` chose (`SurfaceError::UnsupportedScalingMode`), as
+/// Vulkan does for an extent outside the surface's range for scaled presentation, the surface is
+/// configured again at once with `Auto`, the backend's own placement: no error.
+#[test]
+fn auto_is_configured_again_without_a_scaling_where_the_hal_refuses_the_mode_chosen() {
+    let s = setup();
+    let configurations = count_configurations(&s, 2);
+    s.noop_surface().fail_next(
+        SurfaceCall::Configure,
+        wgpu_hal::SurfaceError::UnsupportedScalingMode,
+    );
+    let error_scope = s.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    s.surface.configure(&s.device, &s.resized(1));
+    assert!(pollster::block_on(error_scope.pop()).is_none());
+    assert_eq!(*configurations.lock().unwrap(), 2);
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Auto)
+    );
+    s.queue.present(s.acquire());
+    s.assert_no_violations();
+}
+
+/// Where the HAL refuses an explicit mode, which the surface lists, configuring is a validation
+/// error that lists the surface's modes, after one configuration of the HAL: an explicit mode is
+/// not configured again without a scaling.
+#[test]
+fn an_explicit_mode_the_hal_refuses_is_a_validation_error() {
+    let s = setup();
+    let configurations = count_configurations(&s, 2);
+    s.noop_surface().fail_next(
+        SurfaceCall::Configure,
+        wgpu_hal::SurfaceError::UnsupportedScalingMode,
+    );
+    fail(
+        &s.device,
+        || {
+            s.surface.configure(
+                &s.device,
+                &wgpu::SurfaceConfiguration {
+                    scaling_mode: wgpu::SurfaceScalingMode::OneToOne,
+                    ..s.config.clone()
+                },
+            )
+        },
+        Some(
+            "The requested scaling mode OneToOne could not be applied; \
+             supported modes: [Stretch, OneToOne]",
+        ),
+    );
+    assert_eq!(*configurations.lock().unwrap(), 1);
+    // The configuration after it runs the second hook.
+    s.surface.configure(&s.device, &s.config);
+    assert_eq!(*configurations.lock().unwrap(), 2);
+    assert_eq!(
+        s.noop_surface().configured_scaling_mode(),
+        Some(wgpu::SurfaceScalingMode::Stretch)
+    );
+    s.assert_no_violations();
+}
+
+/// `Auto` that reached the HAL as `Auto`, on a surface that lists no mode for the device, is not
+/// configured again where the HAL refuses it: there is nothing to fall back to.
+#[test]
+fn an_auto_that_chose_no_mode_is_not_configured_again() {
+    let s = setup_with(wgpu::NoopBackendOptions {
+        present_scaling: Some(false),
+        ..wgpu::NoopBackendOptions::enabled()
+    });
+    let configurations = count_configurations(&s, 2);
+    s.noop_surface().fail_next(
+        SurfaceCall::Configure,
+        wgpu_hal::SurfaceError::UnsupportedScalingMode,
+    );
+    fail(
+        &s.device,
+        || s.surface.configure(&s.device, &s.resized(1)),
+        Some("The requested scaling mode Auto could not be applied; supported modes: []"),
+    );
+    assert_eq!(*configurations.lock().unwrap(), 1);
+    s.surface.configure(&s.device, &s.config);
+    assert_eq!(*configurations.lock().unwrap(), 2);
+    s.assert_no_violations();
 }

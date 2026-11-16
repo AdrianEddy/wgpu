@@ -911,6 +911,7 @@ impl Surface {
             format_capabilities: hal_caps.formats,
             present_modes: hal_caps.present_modes,
             alpha_modes: hal_caps.composite_alpha_modes,
+            scaling_modes: hal_caps.scaling_modes,
             usages,
         })
     }
@@ -920,6 +921,20 @@ impl Surface {
         adapter: &Adapter,
     ) -> Result<hal::SurfaceCapabilities, GetSurfaceSupportError> {
         self.get_capabilities_with_raw(&adapter.raw)
+    }
+
+    /// The capabilities of the surface for configuring it with `device`: its adapter's, without
+    /// the scaling modes where the device cannot use them (a device created from a raw device
+    /// may lack what they need, see [`hal::Device::supports_present_scaling`]).
+    fn hal_capabilities_for_device(
+        &self,
+        device: &Device,
+    ) -> Result<hal::SurfaceCapabilities, GetSurfaceSupportError> {
+        let mut caps = self.get_hal_capabilities(&device.adapter)?;
+        if !device.raw().supports_present_scaling() {
+            caps.scaling_modes.clear();
+        }
+        Ok(caps)
     }
 
     pub fn get_capabilities_with_raw(
@@ -1121,7 +1136,7 @@ impl Surface {
         log::debug!("configuring surface with {config:?}");
 
         let caps = self
-            .get_hal_capabilities(&device.adapter)
+            .hal_capabilities_for_device(device)
             .map_err(|_| E::UnsupportedQueueFamily)?;
 
         let mut hal_view_formats = Vec::new();
@@ -1153,6 +1168,7 @@ impl Surface {
             maximum_frame_latency,
             present_mode: config.present_mode,
             composite_alpha_mode: config.alpha_mode,
+            scaling_mode: config.scaling_mode,
             format: config.format,
             color_space: config.color_space,
             extent: wgt::Extent3d {
@@ -1221,7 +1237,24 @@ impl Surface {
                 } else {
                     device.command_indices.write()
                 };
-                unsafe { surface_raw.configure(device.raw(), &hal_config) }
+                let mut result = unsafe { surface_raw.configure(device.raw(), &hal_config) };
+                // `Auto` resolved to a listed mode, which the backend can still refuse when it
+                // configures the surface (on Vulkan, an extent outside the surface's range for
+                // scaled presentation). `Auto` then takes the backend's own placement: it is
+                // configured again without a scaling.
+                if matches!(result, Err(hal::SurfaceError::UnsupportedScalingMode))
+                    && config.scaling_mode == wgt::SurfaceScalingMode::Auto
+                    && hal_config.scaling_mode != wgt::SurfaceScalingMode::Auto
+                {
+                    log::info!(
+                        "the surface refused scaling mode {:?}, chosen for Auto: \
+                         configuring it again with the backend's own placement",
+                        hal_config.scaling_mode
+                    );
+                    hal_config.scaling_mode = wgt::SurfaceScalingMode::Auto;
+                    result = unsafe { surface_raw.configure(device.raw(), &hal_config) };
+                }
+                result
             };
             match result {
                 Ok(()) => {
@@ -1233,6 +1266,10 @@ impl Surface {
                     | hal::SurfaceError::Lost
                     | hal::SurfaceError::Occluded
                     | hal::SurfaceError::Timeout => E::InvalidSurface,
+                    hal::SurfaceError::UnsupportedScalingMode => E::UnsupportedScalingMode {
+                        requested: config.scaling_mode,
+                        available: caps.scaling_modes.clone(),
+                    },
                     hal::SurfaceError::Device(error) => E::Device(device.handle_hal_error(error)),
                     hal::SurfaceError::Other(message) => {
                         log::error!("surface configuration failed: {message}");

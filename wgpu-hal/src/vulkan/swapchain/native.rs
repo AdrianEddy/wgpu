@@ -58,8 +58,190 @@ impl NativeSurface {
     ///
     /// See [`Surface::set_next_swapchain_create_chain()`](crate::vulkan::Surface::set_next_swapchain_create_chain).
     pub unsafe fn set_next_swapchain_create_chain(&self, chain: *mut core::ffi::c_void) {
-        *self.next_swapchain_create_chain.lock() = Some(PnextChain::new(chain));
+        *self.next_swapchain_create_chain.lock() =
+            (!chain.is_null()).then(|| PnextChain::new(chain));
     }
+
+    /// Whether a chain set by [`Self::set_next_swapchain_create_chain`] waits for a
+    /// configuration to consume it.
+    #[cfg(test)]
+    pub(crate) fn has_pending_swapchain_create_chain(&self) -> bool {
+        self.next_swapchain_create_chain.lock().is_some()
+    }
+
+    /// Whether the instance can query the present scaling that the surface supports: it has
+    /// `VK_KHR_get_surface_capabilities2` and a surface maintenance extension. The swapchain
+    /// maintenance extension of a device depends on the latter.
+    fn queries_present_scaling(&self) -> bool {
+        let extensions = &self.instance.extensions;
+        extensions.contains(&khr::get_surface_capabilities2::NAME)
+            && super::super::adapter::SWAPCHAIN_MAINTENANCE1
+                .iter()
+                .any(|(_, surface_extension)| extensions.contains(surface_extension))
+    }
+
+    /// What the surface supports of present scaling with `present_mode`
+    /// (`VkSurfacePresentScalingCapabilitiesKHR`).
+    ///
+    /// # Safety
+    ///
+    /// - [`Self::queries_present_scaling`] must be true.
+    /// - `present_mode` must be one that the surface lists for `physical_device`
+    ///   (VUID-VkSurfacePresentModeKHR-presentMode-07780).
+    unsafe fn present_scaling_capabilities(
+        &self,
+        physical_device: vk::PhysicalDevice,
+        present_mode: vk::PresentModeKHR,
+    ) -> Result<vk::SurfacePresentScalingCapabilitiesEXT<'static>, vk::Result> {
+        let functor =
+            khr::get_surface_capabilities2::Instance::new(&self.instance.entry, &self.instance.raw);
+        let mut scaling = vk::SurfacePresentScalingCapabilitiesEXT::default();
+        let mut caps = vk::SurfaceCapabilities2KHR::default().push_next(&mut scaling);
+        let mut mode = vk::SurfacePresentModeEXT::default().present_mode(present_mode);
+        let info = vk::PhysicalDeviceSurfaceInfo2KHR::default()
+            .surface(self.raw)
+            .push_next(&mut mode);
+        profiling::scope!("vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+        // SAFETY: Our caller's contract.
+        unsafe {
+            functor.get_physical_device_surface_capabilities2(physical_device, &info, &mut caps)
+        }?;
+        // Last in the chain: its `pNext` is null.
+        Ok(scaling)
+    }
+
+    /// The scaling modes the surface supports with every present mode of `present_modes` that
+    /// wgpu configures, so that a configuration may combine any listed scaling with any listed
+    /// present mode (VUID-VkSwapchainPresentScalingCreateInfoKHR-scalingBehavior-07770,
+    /// -presentGravityX-07772 and -presentGravityY-07774).
+    ///
+    /// Only for an adapter whose devices enable `swapchainMaintenance1`
+    /// ([`super::super::Adapter::opens_with_swapchain_maintenance1`]): its instance then has the
+    /// surface maintenance extension and `VK_KHR_get_surface_capabilities2`.
+    fn scaling_modes(
+        &self,
+        adapter: &crate::vulkan::Adapter,
+        present_modes: &[vk::PresentModeKHR],
+    ) -> Vec<wgt::SurfaceScalingMode> {
+        let mut supported = Vec::new();
+        for &present_mode in present_modes
+            .iter()
+            .filter(|&&mode| conv::map_vk_present_mode(mode).is_some())
+        {
+            // SAFETY: The instance has the extensions, and `present_mode` is one the surface
+            // lists.
+            match unsafe { self.present_scaling_capabilities(adapter.raw, present_mode) } {
+                Ok(caps) => supported.push(conv::PresentScalingSupport::of(&caps)),
+                Err(e) => {
+                    log::error!("get_physical_device_surface_capabilities2: {e}");
+                    return Vec::new();
+                }
+            }
+        }
+        conv::surface_scaling_modes(&supported)
+    }
+
+    /// Refuses, with [`crate::SurfaceError::UnsupportedScalingMode`], a configuration whose
+    /// scaling mode, other than `Auto`, `device` cannot create this surface's swapchain with
+    /// ([`present_scaling_refusal`]).
+    fn check_present_scaling(
+        &self,
+        device: &crate::vulkan::Device,
+        config: &crate::SurfaceConfiguration,
+    ) -> Result<(), crate::SurfaceError> {
+        let refusal = present_scaling_refusal(
+            device.shared.swapchain_maintenance1,
+            self.queries_present_scaling(),
+            || {
+                // SAFETY: `present_scaling_refusal` asks only where the instance can query. The
+                // present mode of a valid configuration is one the surface lists.
+                unsafe {
+                    self.present_scaling_capabilities(
+                        device.shared.physical_device,
+                        conv::map_present_mode(config.present_mode),
+                    )
+                }
+            },
+            config.scaling_mode,
+            config.extent,
+        )
+        .map_err(|error| match error {
+            vk::Result::ERROR_SURFACE_LOST_KHR => crate::SurfaceError::Lost,
+            other => crate::SurfaceError::Device(super::super::map_host_device_oom_err(other)),
+        })?;
+        match refusal {
+            None => Ok(()),
+            Some(refusal) => {
+                log::warn!(
+                    "the surface refuses scaling mode {:?}: {}",
+                    config.scaling_mode,
+                    refusal.reason()
+                );
+                Err(crate::SurfaceError::UnsupportedScalingMode)
+            }
+        }
+    }
+}
+
+/// Why a swapchain cannot be created with the present scaling of a configuration's scaling mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PresentScalingRefusal {
+    /// The device has no `swapchainMaintenance1`
+    /// (VUID-VkSwapchainPresentScalingCreateInfoKHR-swapchainMaintenance1-10154).
+    NoSwapchainMaintenance1,
+    /// The instance cannot query the surface's support: it has no surface maintenance extension or
+    /// no `VK_KHR_get_surface_capabilities2`.
+    NoSurfaceQuery,
+    /// The surface does not support the scaling with the configured present mode, with the gravity
+    /// that the mode asks for (VUID-VkSwapchainPresentScalingCreateInfoKHR-scalingBehavior-07770,
+    /// -presentGravityX-07772 and -presentGravityY-07774).
+    NotWithPresentMode,
+    /// The extent is outside the surface's range for scaled presentation
+    /// (VUID-VkSwapchainCreateInfoKHR-pNext-07782), which the list of scaling modes cannot express.
+    ExtentOutOfRange,
+}
+
+impl PresentScalingRefusal {
+    fn reason(self) -> &'static str {
+        match self {
+            Self::NoSwapchainMaintenance1 => "the device has no swapchainMaintenance1",
+            Self::NoSurfaceQuery => "the instance cannot query the surface's present scaling",
+            Self::NotWithPresentMode => "not supported with the present mode configured",
+            Self::ExtentOutOfRange => {
+                "the extent is outside the surface's range for scaled presentation"
+            }
+        }
+    }
+}
+
+/// Whether a device can create a swapchain with the present scaling of `mode`, other than `Auto`,
+/// for a configuration of `extent`, and if not, why. The device comes first: the adapter lists
+/// scaling modes for the devices it opens itself, and a device created from a raw device without
+/// `swapchainMaintenance1` must not use them (its `supports_present_scaling` is false, so wgpu-core
+/// asks it for `Auto` only). Then the instance, and only then `query`, the surface's support with
+/// the configured present mode: the list holds for every present mode, but a caller of wgpu-hal
+/// may not have read it, and the extent's range is not in it.
+fn present_scaling_refusal(
+    device_has_swapchain_maintenance1: bool,
+    instance_queries_present_scaling: bool,
+    query: impl FnOnce() -> Result<vk::SurfacePresentScalingCapabilitiesEXT<'static>, vk::Result>,
+    mode: wgt::SurfaceScalingMode,
+    extent: wgt::Extent3d,
+) -> Result<Option<PresentScalingRefusal>, vk::Result> {
+    if !device_has_swapchain_maintenance1 {
+        return Ok(Some(PresentScalingRefusal::NoSwapchainMaintenance1));
+    }
+    if !instance_queries_present_scaling {
+        return Ok(Some(PresentScalingRefusal::NoSurfaceQuery));
+    }
+    let caps = query()?;
+    if !conv::surface_scaling_modes(&[conv::PresentScalingSupport::of(&caps)]).contains(&mode) {
+        return Ok(Some(PresentScalingRefusal::NotWithPresentMode));
+    }
+    if !conv::extent_within_scaled_range(&caps, extent) {
+        return Ok(Some(PresentScalingRefusal::ExtentOutOfRange));
+    }
+    Ok(None)
 }
 
 impl Drop for NativeSurface {
@@ -160,6 +342,12 @@ impl Surface for NativeSurface {
             }
         };
 
+        let scaling_modes = if adapter.opens_with_swapchain_maintenance1().is_some() {
+            self.scaling_modes(adapter, &raw_present_modes)
+        } else {
+            Vec::new()
+        };
+
         // Group the driver's (format, color space) pairs into one entry per
         // format, preserving the driver's format order.
         let mut formats: Vec<wgt::SurfaceFormatCapabilities> = Vec::new();
@@ -190,6 +378,7 @@ impl Surface for NativeSurface {
                 .flat_map(conv::map_vk_present_mode)
                 .collect(),
             composite_alpha_modes: conv::map_vk_composite_alpha(caps.supported_composite_alpha),
+            scaling_modes,
         })
     }
 
@@ -200,6 +389,39 @@ impl Surface for NativeSurface {
         provided_old_swapchain: Option<Box<dyn Swapchain>>,
     ) -> Result<Box<dyn Swapchain>, crate::SurfaceError> {
         profiling::scope!("Device::create_swapchain");
+        // The present scaling comes first. A configuration refused for its scaling mode leaves
+        // the caller's chain set, for the next configuration: wgpu-core configures `Auto` again
+        // at once without a scaling. Every other configuration consumes the chain
+        // (`Surface::set_next_swapchain_create_chain()`).
+        let (create_chain, scaling) = {
+            let mut pending_chain = self.next_swapchain_create_chain.lock();
+            // A caller's chain may give the swapchain its own present scaling. A structure type
+            // appears once in a chain, so the configuration's mode then adds none.
+            // SAFETY: The contract on `Surface::set_next_swapchain_create_chain()` keeps the
+            // chain valid.
+            let callers_scaling = pending_chain.as_ref().is_some_and(|chain| unsafe {
+                chain.contains(vk::StructureType::SWAPCHAIN_PRESENT_SCALING_CREATE_INFO_EXT)
+            });
+            // `Auto` asks for nothing: no scaling structure, the platform's own placement.
+            let scaling = match conv::map_surface_scaling_mode(config.scaling_mode) {
+                Some(scaling) if !callers_scaling => {
+                    match self.check_present_scaling(device, config) {
+                        Ok(()) => Some(scaling),
+                        Err(crate::SurfaceError::UnsupportedScalingMode) => {
+                            return Err(crate::SurfaceError::UnsupportedScalingMode);
+                        }
+                        Err(other) => {
+                            // Any other failure consumes the chain.
+                            *pending_chain = None;
+                            return Err(other);
+                        }
+                    }
+                }
+                _ => None,
+            };
+            (pending_chain.take(), scaling)
+        };
+
         // A swapchain needs `VK_KHR_swapchain` on the device, and presentation to the surface from
         // the device's queue family (VUID-vkQueuePresentKHR-pSwapchains-01292), which a device
         // created elsewhere may lack: `surface_capabilities` asks of the adapter's family 0.
@@ -279,7 +501,15 @@ impl Surface for NativeSurface {
             info = info.push_next(&mut format_list_info);
         }
 
-        let create_chain = self.next_swapchain_create_chain.lock().take();
+        let mut scaling_info = vk::SwapchainPresentScalingCreateInfoEXT::default();
+        if let Some((behavior, gravity)) = scaling {
+            scaling_info = scaling_info
+                .scaling_behavior(behavior)
+                .present_gravity_x(gravity)
+                .present_gravity_y(gravity);
+            info = info.push_next(&mut scaling_info);
+        }
+
         if let Some(chain) = create_chain {
             // SAFETY: The contract on `Surface::set_next_swapchain_create_chain()` keeps
             // the chain valid and unaliased until this swapchain creation returns.
@@ -356,7 +586,10 @@ impl Surface for NativeSurface {
             acquire_semaphores,
             next_acquire_index: 0,
             present_semaphores,
-            present_fences: device.shared.present_fences.then(PresentFences::default),
+            present_fences: device
+                .shared
+                .swapchain_maintenance1
+                .then(PresentFences::default),
             discarded: None,
             acquired_suboptimal: false,
             next_present_time: None,
@@ -421,7 +654,7 @@ pub(crate) struct NativeSwapchain {
     present_semaphores: Vec<Arc<Mutex<SwapchainPresentSemaphores>>>,
 
     /// The fences that the presents to the swapchain signal, on which its teardown waits, where
-    /// presents signal fences ([`DeviceShared::present_fences`]).
+    /// presents signal fences ([`DeviceShared::swapchain_maintenance1`]).
     present_fences: Option<PresentFences>,
 
     /// The texture last discarded, which the next [`acquire`] returns.
@@ -1277,5 +1510,157 @@ impl<'a> SwapchainSubmissionSemaphoreGuard for NativeSwapchainSubmissionSemaphor
         self.present_semaphores_guard
             .get_submit_signal_semaphore(device)
             .map(SemaphoreType::Binary)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{present_scaling_refusal, PresentScalingRefusal};
+    use ash::vk;
+    use wgt::SurfaceScalingMode as Mode;
+
+    const EXTENT: wgt::Extent3d = wgt::Extent3d {
+        width: 400,
+        height: 300,
+        depth_or_array_layers: 1,
+    };
+
+    /// A surface's support with one present mode: every scaling and gravity, scaled extents from
+    /// 100x100 to 800x600.
+    fn all() -> vk::SurfacePresentScalingCapabilitiesEXT<'static> {
+        let gravity = vk::PresentGravityFlagsEXT::MIN | vk::PresentGravityFlagsEXT::CENTERED;
+        vk::SurfacePresentScalingCapabilitiesEXT {
+            supported_present_scaling: vk::PresentScalingFlagsEXT::STRETCH
+                | vk::PresentScalingFlagsEXT::ASPECT_RATIO_STRETCH
+                | vk::PresentScalingFlagsEXT::ONE_TO_ONE,
+            supported_present_gravity_x: gravity,
+            supported_present_gravity_y: gravity,
+            min_scaled_image_extent: vk::Extent2D {
+                width: 100,
+                height: 100,
+            },
+            max_scaled_image_extent: vk::Extent2D {
+                width: 800,
+                height: 600,
+            },
+            ..Default::default()
+        }
+    }
+
+    fn refusal(
+        device: bool,
+        instance: bool,
+        caps: vk::SurfacePresentScalingCapabilitiesEXT<'static>,
+        mode: Mode,
+        extent: wgt::Extent3d,
+    ) -> Option<PresentScalingRefusal> {
+        present_scaling_refusal(device, instance, || Ok(caps), mode, extent).unwrap()
+    }
+
+    /// A device without `swapchainMaintenance1` is refused each mode before the surface is asked,
+    /// whatever the instance can do; an instance that cannot query is refused before it asks.
+    #[test]
+    fn the_device_then_the_instance_refuse_before_the_surface_is_asked() {
+        for mode in [Mode::Stretch, Mode::AspectRatio, Mode::OneToOne] {
+            for instance in [false, true] {
+                assert_eq!(
+                    present_scaling_refusal(
+                        false,
+                        instance,
+                        || panic!("asked the surface"),
+                        mode,
+                        EXTENT
+                    ),
+                    Ok(Some(PresentScalingRefusal::NoSwapchainMaintenance1))
+                );
+            }
+            assert_eq!(
+                present_scaling_refusal(true, false, || panic!("asked the surface"), mode, EXTENT),
+                Ok(Some(PresentScalingRefusal::NoSurfaceQuery))
+            );
+            assert_eq!(refusal(true, true, all(), mode, EXTENT), None);
+        }
+    }
+
+    /// The configured present mode's support decides: a scaling it lacks, or the gravity that the
+    /// mode asks for on either axis, refuses the mode.
+    #[test]
+    fn a_mode_the_present_mode_lacks_with_its_gravity_is_refused() {
+        let stretch_only = vk::SurfacePresentScalingCapabilitiesEXT {
+            supported_present_scaling: vk::PresentScalingFlagsEXT::STRETCH,
+            ..all()
+        };
+        assert_eq!(
+            refusal(true, true, stretch_only, Mode::Stretch, EXTENT),
+            None
+        );
+        for mode in [Mode::AspectRatio, Mode::OneToOne] {
+            assert_eq!(
+                refusal(true, true, stretch_only, mode, EXTENT),
+                Some(PresentScalingRefusal::NotWithPresentMode)
+            );
+        }
+        // One-to-one needs `MIN` on both axes, the aspect-ratio stretch `CENTERED`.
+        let centered_x = vk::SurfacePresentScalingCapabilitiesEXT {
+            supported_present_gravity_x: vk::PresentGravityFlagsEXT::CENTERED,
+            ..all()
+        };
+        assert_eq!(
+            refusal(true, true, centered_x, Mode::OneToOne, EXTENT),
+            Some(PresentScalingRefusal::NotWithPresentMode)
+        );
+        assert_eq!(
+            refusal(true, true, centered_x, Mode::AspectRatio, EXTENT),
+            None
+        );
+        let min_y = vk::SurfacePresentScalingCapabilitiesEXT {
+            supported_present_gravity_y: vk::PresentGravityFlagsEXT::MIN,
+            ..all()
+        };
+        assert_eq!(
+            refusal(true, true, min_y, Mode::AspectRatio, EXTENT),
+            Some(PresentScalingRefusal::NotWithPresentMode)
+        );
+        assert_eq!(refusal(true, true, min_y, Mode::OneToOne, EXTENT), None);
+    }
+
+    /// An extent outside the range for scaled presentation refuses a supported mode; its ends are
+    /// inside.
+    #[test]
+    fn an_extent_outside_the_scaled_range_is_refused() {
+        let extent = |width, height| wgt::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        for (width, height, inside) in [
+            (100, 100, true),
+            (800, 600, true),
+            (99, 300, false),
+            (400, 99, false),
+            (801, 300, false),
+            (400, 601, false),
+        ] {
+            assert_eq!(
+                refusal(true, true, all(), Mode::Stretch, extent(width, height)),
+                (!inside).then_some(PresentScalingRefusal::ExtentOutOfRange),
+                "{width}x{height}"
+            );
+        }
+    }
+
+    /// A query that fails is an error, not a refusal.
+    #[test]
+    fn a_failed_query_is_an_error() {
+        assert_eq!(
+            present_scaling_refusal(
+                true,
+                true,
+                || Err(vk::Result::ERROR_SURFACE_LOST_KHR),
+                Mode::Stretch,
+                EXTENT
+            ),
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR)
+        );
     }
 }

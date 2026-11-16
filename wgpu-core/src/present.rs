@@ -169,6 +169,13 @@ pub enum ConfigureSurfaceError {
         requested: wgt::CompositeAlphaMode,
         available: Vec<wgt::CompositeAlphaMode>,
     },
+    #[error(
+        "The requested scaling mode {requested:?} could not be applied; supported modes: {available:?}"
+    )]
+    UnsupportedScalingMode {
+        requested: wgt::SurfaceScalingMode,
+        available: Vec<wgt::SurfaceScalingMode>,
+    },
     #[error("Requested usage {requested:?} is not in the list of supported usages: {available:?}")]
     UnsupportedUsage {
         requested: wgt::TextureUses,
@@ -202,6 +209,7 @@ impl WebGpuError for ConfigureSurfaceError {
             | Self::UnsupportedColorSpace { .. }
             | Self::UnsupportedPresentMode { .. }
             | Self::UnsupportedAlphaMode { .. }
+            | Self::UnsupportedScalingMode { .. }
             | Self::UnsupportedUsage { .. } => ErrorType::Validation,
         }
     }
@@ -270,6 +278,11 @@ impl Surface {
                         return Err(device.handle_hal_error(err).into());
                     }
                     hal::SurfaceError::Outdated => Status::Outdated,
+                    // Only `configure` returns it.
+                    hal::SurfaceError::UnsupportedScalingMode => {
+                        log::error!("acquire error: unsupported surface scaling mode");
+                        Status::Lost
+                    }
                     hal::SurfaceError::Other(msg) => {
                         log::error!("acquire error: {msg}");
                         Status::Lost
@@ -485,6 +498,11 @@ impl Queue {
                     Err(SurfaceError::from(device.handle_hal_error(err)))
                 }
                 hal::SurfaceError::Outdated => Ok(Status::Outdated),
+                // Only `configure` returns it.
+                hal::SurfaceError::UnsupportedScalingMode => {
+                    log::error!("present error: unsupported surface scaling mode");
+                    Err(SurfaceError::Invalid)
+                }
                 hal::SurfaceError::Other(msg) => {
                     log::error!("present error: {msg}");
                     Err(SurfaceError::Invalid)

@@ -2765,6 +2765,11 @@ impl crate::Device for super::Device {
         self.downlevel.clone()
     }
 
+    fn supports_present_scaling(&self) -> bool {
+        // A swapchain's `DXGI_SCALING` needs nothing of the device.
+        true
+    }
+
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport> {
         Some(self.mem_allocator.generate_report())
     }

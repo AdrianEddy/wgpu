@@ -700,6 +700,7 @@ impl<E: Example + wgpu::WasmNotSendSync> From<ExampleTestParams<E>>
                         // Fifo corresponds to traditional VSync. It's supported everywhere.
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                        scaling_mode: wgpu::SurfaceScalingMode::Auto,
                         view_formats: vec![format],
                     },
                     &ctx.adapter,

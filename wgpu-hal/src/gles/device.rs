@@ -2000,6 +2000,11 @@ impl crate::Device for super::Device {
         self.shared.downlevel.clone()
     }
 
+    fn supports_present_scaling(&self) -> bool {
+        // Surfaces list no scaling mode.
+        true
+    }
+
     fn check_if_oom(&self) -> Result<(), crate::DeviceError> {
         Ok(())
     }

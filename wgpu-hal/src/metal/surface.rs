@@ -10,10 +10,40 @@ use objc2_core_foundation::{CFString, CGSize};
 use objc2_core_graphics::CGColorSpace;
 use objc2_foundation::NSObjectProtocol;
 use objc2_metal::MTLTextureType;
-use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
+use objc2_quartz_core::{
+    kCAGravityResize, kCAGravityResizeAspect, CALayerContentsGravity, CAMetalDrawable, CAMetalLayer,
+};
 use wgpu_sync::{Lazy, Mutex, RwLock};
 
 use super::OsFeatures;
+
+/// The layer's `contentsGravity` for a texture presented with `mode`, or `None` for a mode the
+/// backend does not offer. It places a drawable whose size differs from the layer's bounds:
+/// `kCAGravityResize`, the layer's default, stretches it (also for `Auto`), and
+/// `kCAGravityResizeAspect` keeps its aspect ratio, centered. `OneToOne` would take a corner
+/// gravity, whose vertical meaning depends on the layer's `contentsAreFlipped`: not offered.
+fn contents_gravity(mode: wgt::SurfaceScalingMode) -> Option<&'static CALayerContentsGravity> {
+    use wgt::SurfaceScalingMode as Mode;
+    match mode {
+        // SAFETY: Immutable constants of Core Animation.
+        Mode::Auto | Mode::Stretch => Some(unsafe { kCAGravityResize }),
+        // SAFETY: As above.
+        Mode::AspectRatio => Some(unsafe { kCAGravityResizeAspect }),
+        Mode::OneToOne => None,
+    }
+}
+
+/// The scaling modes, other than `Auto`, that a surface offers.
+pub(super) fn scaling_modes() -> alloc::vec::Vec<wgt::SurfaceScalingMode> {
+    [
+        wgt::SurfaceScalingMode::Stretch,
+        wgt::SurfaceScalingMode::AspectRatio,
+        wgt::SurfaceScalingMode::OneToOne,
+    ]
+    .into_iter()
+    .filter(|&mode| contents_gravity(mode).is_some())
+    .collect()
+}
 
 /// Walks up from `start` to the `NSWindow` hosting this layer: the first ancestor
 /// layer with a delegate is the backing `NSView`, and we return its `window`.
@@ -254,6 +284,10 @@ impl crate::Surface for super::Surface {
     ) -> Result<(), crate::SurfaceError> {
         log::debug!("build swapchain {config:?}");
 
+        // Before anything else: a refusal leaves the surface as it is.
+        let gravity = contents_gravity(config.scaling_mode)
+            .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+
         let caps = &device.shared.private_texture_format_caps;
         *self.swapchain_format.write() = Some(config.format);
         *self.extent.write() = config.extent;
@@ -339,6 +373,7 @@ impl crate::Surface for super::Surface {
         };
         let colorspace = colorspace_name.and_then(|name| CGColorSpace::with_name(Some(name)));
         render_layer.setColorspace(colorspace.as_deref());
+        render_layer.setContentsGravity(gravity);
 
         // this gets ignored on iOS for certain OS/device combinations (iphone5s iOS 10.3)
         render_layer.setMaximumDrawableCount(config.maximum_frame_latency as usize + 1);

@@ -349,19 +349,31 @@ impl Surface {
     /// The device extension itself must be enabled at device creation, for example
     /// with [`Adapter::open_with_callback()`](super::vulkan::Adapter::open_with_callback).
     ///
-    /// The next configuration consumes the chain. A later call replaces a chain that
-    /// hasn't been consumed yet. If the surface is dropped first, the chain is
-    /// discarded unread. Every configuration creates a new swapchain, so you must set
-    /// the chain again before each configuration, including on resize.
+    /// The next configuration consumes the chain, whether it succeeds or fails, except
+    /// one that fails with [`SurfaceError::UnsupportedScalingMode`](crate::SurfaceError::UnsupportedScalingMode):
+    /// that leaves the chain set for the configuration after it. (wgpu-core configures a
+    /// surface whose `Auto` scaling mode was refused again at once without a scaling, which
+    /// consumes it; through wgpu, a `configure` that fails with
+    /// `ConfigureSurfaceError::UnsupportedScalingMode` leaves it set, and so does one that
+    /// fails validation, which never reaches wgpu-hal.) A later call replaces
+    /// a chain that hasn't been consumed yet, and a null `chain` withdraws it. If the surface
+    /// is dropped first, the chain is discarded unread. Every configuration creates a new
+    /// swapchain, so you must set the chain again before each configuration, including on
+    /// resize.
+    ///
+    /// A `VkSwapchainPresentScalingCreateInfoKHR` in the chain gives the swapchain its
+    /// present scaling: the configuration's
+    /// [`scaling_mode`](crate::SurfaceConfiguration::scaling_mode) then adds none.
     ///
     /// # Safety
     ///
-    /// - `chain` must point to a valid `pNext` chain of structs that can extend
+    /// - `chain` must be null, or point to a valid `pNext` chain of structs that can extend
     ///   [`vk::SwapchainCreateInfoKHR`]. The extensions in the chain must be enabled
     ///   on the device the surface is configured with.
-    /// - The chain must stay valid until the configuration that consumes it returns
-    ///   or the surface is dropped. Don't read or write the chain during that time.
-    ///   Fields the driver wrote during swapchain creation may be read afterwards.
+    /// - The chain must stay valid until the configuration that consumes it returns, a
+    ///   later call replaces or withdraws it, or the surface is dropped: after a
+    ///   configuration that leaves it set, too. Don't read or write the chain during that
+    ///   time. Fields the driver wrote during swapchain creation may be read afterwards.
     ///
     /// # Panics
     ///
@@ -640,9 +652,10 @@ struct DeviceShared {
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
     enabled_extensions: Vec<&'static CStr>,
-    /// Whether presents signal fences (`swapchainMaintenance1`): a swapchain's teardown then waits
-    /// on its presents' fences, instead of for the queue to become idle.
-    present_fences: bool,
+    /// Whether the device has `swapchainMaintenance1`: presents signal fences, so that a
+    /// swapchain's teardown waits on its presents' fences instead of for the queue to become
+    /// idle, and swapchains can be created with a present scaling.
+    swapchain_maintenance1: bool,
     extension_fns: DeviceExtensionFunctions,
     vendor_id: u32,
     pipeline_cache_validation_key: [u8; 16],

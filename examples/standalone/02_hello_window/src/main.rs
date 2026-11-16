@@ -65,6 +65,7 @@ impl State {
             // Request compatibility with the sRGB-format texture view we‘re going to create later.
             view_formats: vec![self.surface_format.add_srgb_suffix()],
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            scaling_mode: wgpu::SurfaceScalingMode::Auto,
             width: self.size.width,
             height: self.size.height,
             desired_maximum_frame_latency: 2,
