@@ -4453,8 +4453,9 @@ mod rgba16float_probe {
     }
 }
 
-impl dispatch::SurfaceInterface for WebSurface {
-    fn get_capabilities(&self, _adapter: &dispatch::DispatchAdapter) -> wgt::SurfaceCapabilities {
+impl WebSurface {
+    /// The capabilities of a canvas, which are the same for every adapter and device.
+    fn capabilities(&self) -> wgt::SurfaceCapabilities {
         let mut formats = vec![
             wgt::TextureFormat::Rgba8Unorm,
             wgt::TextureFormat::Bgra8Unorm,
@@ -4524,6 +4525,19 @@ impl dispatch::SurfaceInterface for WebSurface {
             // Statically set to RENDER_ATTACHMENT for now. See https://gpuweb.github.io/gpuweb/#dom-gpucanvasconfiguration-usage
             usages: wgt::TextureUsages::RENDER_ATTACHMENT,
         }
+    }
+}
+
+impl dispatch::SurfaceInterface for WebSurface {
+    fn get_capabilities(&self, _adapter: &dispatch::DispatchAdapter) -> wgt::SurfaceCapabilities {
+        self.capabilities()
+    }
+
+    fn get_capabilities_for_device(
+        &self,
+        _device: &dispatch::DispatchDevice,
+    ) -> wgt::SurfaceCapabilities {
+        self.capabilities()
     }
 
     fn display_hdr_info(&self, _adapter: &dispatch::DispatchAdapter) -> wgt::DisplayHdrInfo {

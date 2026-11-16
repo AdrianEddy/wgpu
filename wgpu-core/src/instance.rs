@@ -890,8 +890,26 @@ impl Surface {
         adapter: &Adapter,
     ) -> Result<wgt::SurfaceCapabilities, GetSurfaceSupportError> {
         profiling::scope!("Surface::get_capabilities");
-        let mut hal_caps = self.get_hal_capabilities(adapter)?;
+        Ok(Self::capabilities_from_hal(
+            self.get_hal_capabilities(adapter)?,
+        ))
+    }
 
+    /// The capabilities of the surface for configuring it with `device`, against which
+    /// [`Surface::configure`] validates a configuration: [`Self::get_capabilities`] of the
+    /// device's adapter, without the scaling modes where the device cannot use them, as a
+    /// device created from a raw device may not.
+    pub fn get_capabilities_for_device(
+        &self,
+        device: &Device,
+    ) -> Result<wgt::SurfaceCapabilities, GetSurfaceSupportError> {
+        profiling::scope!("Surface::get_capabilities_for_device");
+        Ok(Self::capabilities_from_hal(
+            self.hal_capabilities_for_device(device)?,
+        ))
+    }
+
+    fn capabilities_from_hal(mut hal_caps: hal::SurfaceCapabilities) -> wgt::SurfaceCapabilities {
         hal_caps
             .formats
             .sort_by_key(|fc| !fc.format.has_srgb_suffix());
@@ -903,7 +921,7 @@ impl Surface {
         // `SurfaceColorSpace::Auto`, i.e. those for which `Auto` resolves to a
         // concrete color space. (The full `format_capabilities` still reports
         // every color space, including HDR ones, for explicit opt-in.)
-        Ok(wgt::SurfaceCapabilities {
+        wgt::SurfaceCapabilities {
             formats: hal_caps
                 .formats
                 .iter()
@@ -921,7 +939,7 @@ impl Surface {
             alpha_modes: hal_caps.composite_alpha_modes,
             scaling_modes: hal_caps.scaling_modes,
             usages,
-        })
+        }
     }
 
     pub fn get_hal_capabilities(
@@ -933,7 +951,8 @@ impl Surface {
 
     /// The capabilities of the surface for configuring it with `device`: its adapter's, without
     /// the scaling modes where the device cannot use them (a device created from a raw device
-    /// may lack what they need, see [`hal::Device::supports_present_scaling`]).
+    /// may lack what they need, see [`hal::Device::supports_present_scaling`]). What
+    /// [`Self::get_capabilities_for_device`] reports.
     fn hal_capabilities_for_device(
         &self,
         device: &Device,

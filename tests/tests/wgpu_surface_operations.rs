@@ -728,7 +728,8 @@ mod native {
         wgpu::SurfaceScalingMode::OneToOne,
     ];
 
-    /// `scaling_modes`: on each adapter, the scaling modes its surface lists (printed); `Auto` and
+    /// `scaling_modes`: on each adapter, the scaling modes its surface lists (printed), the same
+    /// for the adapter and for a device it opened (`get_capabilities_for_device`); `Auto` and
     /// each listed mode configure and present with no error or validation message; a mode the
     /// surface does not list is a validation error that keeps the configuration. On DX12, a
     /// window's swapchain lists `Stretch` and `OneToOne`, has the `DXGI_SCALING` of the mode it was
@@ -737,8 +738,8 @@ mod native {
     /// `AspectRatio` with `SurfaceError::UnsupportedScalingMode`, keeping the swapchain; a
     /// composition swapchain lists none, and wgpu-hal refuses each. On OpenGL, which lists none,
     /// wgpu-hal refuses each. With the DXGI swapchain of the Vulkan backend, a window's surface
-    /// lists `Stretch` and `OneToOne`, and `Auto` and each listed mode configure and present on
-    /// a device created without `swapchainMaintenance1`.
+    /// lists `Stretch` and `OneToOne`, the same for a device created without
+    /// `swapchainMaintenance1`, and `Auto` and each listed mode configure and present on it.
     /// On Vulkan, a caller's present scaling in the swapchain's creation chain is the only one
     /// (a second would break the chain's unique structure types), and for each scaling, and for
     /// the platform's own placement, it prints what a frame presented to a window that changed
@@ -756,6 +757,15 @@ mod native {
             let (device, queue, errors) = device(&adapter);
             let errs = [&errors];
             let base = config(surface, &adapter);
+
+            // The device, which its adapter opened, has the adapter's list.
+            let for_device = surface.get_capabilities_for_device(&device).scaling_modes;
+            if for_device != caps.scaling_modes {
+                failures.push(format!(
+                    "{name}: the scaling modes for the device {for_device:?}, for the adapter {:?}",
+                    caps.scaling_modes
+                ));
+            }
 
             // `Auto`, and each listed mode.
             for scaling_mode in
@@ -1167,6 +1177,14 @@ mod native {
                 failures.push(format!("{name}: scaling modes {:?}", caps.scaling_modes));
             }
             let (device, queue, errors) = device_without_swapchain_maintenance1(&adapter);
+            let for_device = surface.get_capabilities_for_device(&device).scaling_modes;
+            if for_device != caps.scaling_modes {
+                failures.push(format!(
+                    "{name}: the scaling modes for a device without swapchainMaintenance1 \
+                     {for_device:?}, for the adapter {:?}",
+                    caps.scaling_modes
+                ));
+            }
             let base = config(surface, &adapter);
             for scaling_mode in
                 core::iter::once(wgpu::SurfaceScalingMode::Auto).chain(caps.scaling_modes.clone())

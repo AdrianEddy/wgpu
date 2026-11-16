@@ -1079,6 +1079,31 @@ fn a_surface_lists_its_scaling_modes() {
     assert_eq!(s.config.scaling_mode, wgpu::SurfaceScalingMode::Auto);
 }
 
+/// The capabilities of a surface for a device that its adapter opened are those for the adapter.
+#[test]
+fn the_capabilities_for_a_device_its_adapter_opened_are_the_adapters() {
+    let s = setup();
+    let adapter = pollster::block_on(s.instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&s.surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    let for_adapter = s.surface.get_capabilities(&adapter);
+    let for_device = s.surface.get_capabilities_for_device(&s.device);
+    assert_eq!(
+        for_device.scaling_modes,
+        [
+            wgpu::SurfaceScalingMode::Stretch,
+            wgpu::SurfaceScalingMode::OneToOne
+        ]
+    );
+    assert_eq!(
+        format!("{for_device:?}"),
+        format!("{for_adapter:?}"),
+        "the capabilities differ"
+    );
+}
+
 /// `Auto` reaches the HAL as `Stretch` on a surface that lists it, and a listed mode as itself.
 #[test]
 fn a_scaling_mode_reaches_the_hal() {
@@ -1131,8 +1156,9 @@ fn an_unlisted_scaling_mode_is_a_validation_error() {
 
 /// On a device that cannot configure a scaling mode, as a device created from a raw device may not
 /// (`NoopBackendOptions::present_scaling`): the surface still lists its modes for the adapter, but
-/// `Auto` reaches the HAL as `Auto`, asking for nothing (not as a mode that the HAL refuses), and
-/// an explicit mode is a validation error that lists none, keeping the configuration.
+/// none for the device (`get_capabilities_for_device`), `Auto` reaches the HAL as `Auto`, asking
+/// for nothing (not as a mode that the HAL refuses), and an explicit mode is a validation error
+/// that lists none, keeping the configuration.
 #[test]
 fn a_device_without_present_scaling_is_configured_with_auto_only() {
     let s = setup_with(wgpu::NoopBackendOptions {
@@ -1150,6 +1176,12 @@ fn a_device_without_present_scaling_is_configured_with_auto_only() {
             wgpu::SurfaceScalingMode::Stretch,
             wgpu::SurfaceScalingMode::OneToOne
         ]
+    );
+    assert_eq!(
+        s.surface
+            .get_capabilities_for_device(&s.device)
+            .scaling_modes,
+        [] as [wgpu::SurfaceScalingMode; 0]
     );
     assert_eq!(s.config.scaling_mode, wgpu::SurfaceScalingMode::Auto);
     assert_eq!(

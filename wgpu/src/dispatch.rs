@@ -676,6 +676,7 @@ pub trait RenderBundleInterface: CommonTraits {}
 
 pub trait SurfaceInterface: CommonTraits {
     fn get_capabilities(&self, adapter: &DispatchAdapter) -> crate::SurfaceCapabilities;
+    fn get_capabilities_for_device(&self, device: &DispatchDevice) -> crate::SurfaceCapabilities;
 
     /// The backing display's current HDR / luminance characteristics.
     ///
