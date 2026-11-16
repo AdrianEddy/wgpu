@@ -400,6 +400,14 @@ impl Instance {
     /// features and limits are WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
     /// A device that requests [`Adapter::limits`] gets limits that its validation supports.
     ///
+    /// It takes the adapter it is given: an adapter made by the caller is the caller's
+    /// responsibility. Enumeration would not offer one whose
+    /// [`min_uniform_buffer_offset_alignment`](crate::Limits::min_uniform_buffer_offset_alignment)
+    /// or [`min_storage_buffer_offset_alignment`](crate::Limits::min_storage_buffer_offset_alignment)
+    /// is not a power of two, as WebGPU requires of every alignment limit and wgpu assumes, nor,
+    /// where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is set, one without
+    /// [`Features::CORE_FEATURES_AND_LIMITS`](crate::Features::CORE_FEATURES_AND_LIMITS).
+    ///
     /// # Types
     ///
     /// The type of `hal_adapter.adapter` depends on the backend:
