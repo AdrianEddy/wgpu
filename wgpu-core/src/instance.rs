@@ -677,15 +677,7 @@ impl Instance {
         let backend_adapters = backend_adapters
             .into_iter()
             .map(|mut raw| {
-                self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
-                raw
-            })
-            .map(|mut raw| {
-                filter_features_and_limits(
-                    self.flags,
-                    &mut raw.features,
-                    &mut raw.capabilities.limits,
-                );
+                self.adjust_exposed_adapter(&mut raw);
                 raw
             })
             .filter(|raw| self.adapter_allowed(raw));
@@ -697,6 +689,18 @@ impl Instance {
         } else {
             backend_adapters.collect()
         }
+    }
+
+    /// Makes `raw`, an adapter that a backend of this instance exposed, the adapter this
+    /// instance offers: its limits fit indirect validation where
+    /// [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its features and limits are
+    /// WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is. Every adapter of this
+    /// instance takes it, whether enumerated or given by a hal user
+    /// ([`Self::create_adapter_from_hal`]): a device's validation relies on its adapter's
+    /// features and limits having taken it.
+    fn adjust_exposed_adapter(&self, raw: &mut hal::DynExposedAdapter) {
+        self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
+        filter_features_and_limits(self.flags, &mut raw.features, &mut raw.capabilities.limits);
     }
 
     /// This is similar to wgpu-hal's `adjust_raw_limits` but tailored to
@@ -724,7 +728,10 @@ impl Instance {
     /// Create an adapter from a HAL adapter.
     ///
     /// The HAL adapter may be obtained e.g. by calling `enumerate_adapters` on
-    /// the HAL directly.
+    /// the HAL directly. The adapter offers what this instance's enumeration would offer of
+    /// it: its limits fit indirect validation where [`InstanceFlags::VALIDATION_INDIRECT_CALL`]
+    /// is set, and its features and limits are WebGPU's where
+    /// [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
     ///
     /// If [limit bucketing][lt] is desired, [`crate::limits::apply_limit_buckets`]
     /// should be called with the HAL adapter before calling this function.
@@ -736,10 +743,11 @@ impl Instance {
     /// [lt]: crate::limits#Limit-bucketing
     pub unsafe fn create_adapter_from_hal(
         self: &Arc<Self>,
-        hal_adapter: hal::DynExposedAdapter,
+        mut hal_adapter: hal::DynExposedAdapter,
     ) -> Arc<Adapter> {
         profiling::scope!("Instance::create_adapter_from_hal");
 
+        self.adjust_exposed_adapter(&mut hal_adapter);
         let adapter = Adapter::new(hal_adapter, self.clone());
 
         resource_log!("Created Adapter {:?}", Arc::as_ptr(&adapter));
@@ -2078,6 +2086,105 @@ mod tests {
             res.is_empty(),
             "Downlevel limits are greater than default limits",
         )
+    }
+
+    /// What [`Instance::create_adapter_from_hal`] makes of the noop backend's adapter, which
+    /// offers every feature and here reports buffer limits above `u32::MAX`.
+    mod hal_adapters {
+        use super::*;
+
+        /// A buffer size above `u32::MAX`, as NVIDIA's Vulkan drivers report `maxBufferSize`.
+        const DRIVER_BUFFER_SIZE: u64 = 1 << 40;
+
+        /// An instance of the noop backend alone, with `flags`, whose adapter reports buffer
+        /// limits of [`DRIVER_BUFFER_SIZE`].
+        fn noop_instance(flags: InstanceFlags) -> Arc<Instance> {
+            let desc = hal::InstanceDescriptor {
+                name: "hal adapters",
+                flags,
+                memory_budget_thresholds: wgt::MemoryBudgetThresholds::default(),
+                backend_options: wgt::BackendOptions {
+                    noop: wgt::NoopBackendOptions {
+                        limits: Some(wgt::Limits {
+                            max_buffer_size: DRIVER_BUFFER_SIZE,
+                            max_uniform_buffer_binding_size: DRIVER_BUFFER_SIZE,
+                            max_storage_buffer_binding_size: DRIVER_BUFFER_SIZE,
+                            ..wgt::Limits::unlimited()
+                        }),
+                        ..wgt::NoopBackendOptions::enabled()
+                    },
+                    ..Default::default()
+                },
+                telemetry: None,
+                display: None,
+            };
+            // SAFETY: The noop backend has no requirements.
+            let noop = unsafe { <hal::noop::Context as hal::Instance>::init(&desc) }.unwrap();
+            let noop: Box<dyn hal::DynInstance> = Box::new(noop);
+            Arc::new(Instance {
+                instance_per_backend: alloc::vec![(Backend::Noop, noop)],
+                flags,
+                ..Default::default()
+            })
+        }
+
+        /// The adapter that `instance`'s backend exposes, as a hal user takes it.
+        fn exposed(instance: &Instance) -> hal::DynExposedAdapter {
+            let backend = instance.raw(Backend::Noop).unwrap();
+            // SAFETY: No surface.
+            unsafe { backend.enumerate_adapters(None) }.pop().unwrap()
+        }
+
+        /// A hal adapter given to `create_adapter_from_hal` offers what enumeration offers of
+        /// it, with each instance flag that changes an adapter's offer: its buffer limits fit
+        /// indirect validation, and its features and limits are WebGPU's under strict
+        /// compliance. Before, it offered the driver's buffer limits and every feature.
+        #[test]
+        fn a_hal_adapter_offers_what_enumeration_offers() {
+            for flags in [
+                InstanceFlags::empty(),
+                InstanceFlags::VALIDATION_INDIRECT_CALL,
+                InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+                InstanceFlags::VALIDATION_INDIRECT_CALL | InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+            ] {
+                let instance = noop_instance(flags);
+                let raw = exposed(&instance);
+                assert_eq!(raw.capabilities.limits.max_buffer_size, DRIVER_BUFFER_SIZE);
+                // SAFETY: Exposed by this instance's backend.
+                let adapter = unsafe { instance.create_adapter_from_hal(raw) };
+                let enumerated = instance.enumerate_adapters(Backends::NOOP, false);
+                let [enumerated] = enumerated.as_slice() else {
+                    panic!("{flags:?}: {} adapters enumerated", enumerated.len());
+                };
+                assert_eq!(
+                    adapter.raw.capabilities.limits, enumerated.raw.capabilities.limits,
+                    "{flags:?}"
+                );
+                assert_eq!(adapter.raw.features, enumerated.raw.features, "{flags:?}");
+            }
+        }
+
+        /// A device made from a hal adapter, requesting the adapter's limits, opens with
+        /// indirect validation on: the adapter's buffer limits fit its `u32` offsets. Before,
+        /// the adapter offered the driver's buffer size, and the device's indirect validation
+        /// asserted on it, as it did on Vulkan adapters whose `maxBufferSize` exceeds
+        /// `u32::MAX`.
+        #[cfg(feature = "wgsl")]
+        #[test]
+        fn a_device_of_a_hal_adapter_opens_with_indirect_validation() {
+            let instance = noop_instance(InstanceFlags::VALIDATION_INDIRECT_CALL);
+            let raw = exposed(&instance);
+            assert_eq!(raw.capabilities.limits.max_buffer_size, DRIVER_BUFFER_SIZE);
+            // SAFETY: Exposed by this instance's backend.
+            let adapter = unsafe { instance.create_adapter_from_hal(raw) };
+            let (device, _queue) = adapter
+                .request_device(&DeviceDescriptor {
+                    required_limits: adapter.raw.capabilities.limits.clone(),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert!(device.indirect_validation.is_some());
+        }
     }
 
     /// `request_adapter` asks the backends in order, and only until the adapters found

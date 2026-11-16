@@ -1,4 +1,5 @@
 mod downlevel;
+mod hal_adapter;
 mod injected;
 mod internal;
 mod queue_lock;
