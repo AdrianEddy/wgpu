@@ -3050,6 +3050,17 @@ impl dispatch::SurfaceInterface for CoreSurface {
             .unwrap_or_default()
     }
 
+    fn get_capabilities_for_device(
+        &self,
+        device: &dispatch::DispatchDevice,
+    ) -> wgt::SurfaceCapabilities {
+        let device = device.as_core();
+
+        self.wgpu_surface
+            .get_capabilities_for_device(&device.wgpu_device)
+            .unwrap_or_default()
+    }
+
     fn display_hdr_info(&self, adapter: &dispatch::DispatchAdapter) -> wgt::DisplayHdrInfo {
         let adapter = adapter.as_core();
 

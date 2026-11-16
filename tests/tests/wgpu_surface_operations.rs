@@ -722,7 +722,8 @@ mod native {
         wgpu::SurfaceScalingMode::OneToOne,
     ];
 
-    /// `scaling_modes`: on each adapter, the scaling modes its surface lists (printed); `Auto` and
+    /// `scaling_modes`: on each adapter, the scaling modes its surface lists (printed), the same
+    /// for the adapter and for a device it opened (`get_capabilities_for_device`); `Auto` and
     /// each listed mode configure and present with no error or validation message; a mode the
     /// surface does not list is a validation error that keeps the configuration. On DX12, a
     /// window's swapchain lists `Stretch` and `OneToOne`, has the `DXGI_SCALING` of the mode it was
@@ -748,6 +749,15 @@ mod native {
             let (device, queue, errors) = device(&adapter);
             let errs = [&errors];
             let base = config(surface, &adapter);
+
+            // The device, which its adapter opened, has the adapter's list.
+            let for_device = surface.get_capabilities_for_device(&device).scaling_modes;
+            if for_device != caps.scaling_modes {
+                failures.push(format!(
+                    "{name}: the scaling modes for the device {for_device:?}, for the adapter {:?}",
+                    caps.scaling_modes
+                ));
+            }
 
             // `Auto`, and each listed mode.
             for scaling_mode in

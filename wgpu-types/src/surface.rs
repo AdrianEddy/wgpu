@@ -150,10 +150,10 @@ pub enum CompositeAlphaMode {
 ///
 /// Support is listed per surface in [`SurfaceCapabilities::scaling_modes`]. An
 /// empty list means the platform gives no control, and only
-/// [`Auto`](Self::Auto) can be configured. The list assumes a device that its
-/// adapter opened: a device created from a raw device may lack what an explicit
-/// mode needs (on Vulkan, `swapchainMaintenance1`), and configuring its surfaces
-/// then treats the list as empty.
+/// [`Auto`](Self::Auto) can be configured. The list of a surface's capabilities
+/// for an adapter assumes a device that the adapter opened: a device created from
+/// a raw device may lack what an explicit mode needs (on Vulkan,
+/// `swapchainMaintenance1`), and the capabilities for that device list none.
 ///
 /// A listed mode can still be refused when the surface is configured, where the
 /// platform has a condition that the list cannot express: on Vulkan, a texture
@@ -601,9 +601,12 @@ pub struct SurfaceCapabilities {
     /// refused when the surface is configured (see [`SurfaceScalingMode`]).
     ///
     /// Empty when the platform gives no control over the placement of a texture
-    /// whose size differs from the surface's. The list holds for a device that the
-    /// adapter opened; for a device created from a raw device without what the modes
-    /// need, configuring treats it as empty.
+    /// whose size differs from the surface's. The capabilities for an adapter list the
+    /// modes for a device that the adapter opened; those for a device
+    /// ([`Surface::get_capabilities_for_device`]) list none where the device lacks what
+    /// the modes need, as a device created from a raw device may.
+    ///
+    #[doc = link_to_wgpu_docs!(["`Surface::get_capabilities_for_device`"]: "struct.Surface.html#method.get_capabilities_for_device")]
     pub scaling_modes: Vec<SurfaceScalingMode>,
     /// Bitflag of supported texture usages for the surface to use with the given adapter.
     ///

@@ -56,6 +56,22 @@ impl Surface<'_> {
         self.inner.get_capabilities(&adapter.inner)
     }
 
+    /// Returns the capabilities of the surface when configured with the given device, against
+    /// which [`Surface::configure`] validates a configuration.
+    ///
+    /// They are [`Surface::get_capabilities`] of the device's adapter, except where the device
+    /// lacks what the adapter's devices have: a device created from a raw device (for example
+    /// one that another library made, as [`Adapter::create_device_from_hal`] takes it) may not
+    /// support the [`SurfaceCapabilities::scaling_modes`] its adapter lists, and then lists
+    /// none. Use this to choose the configuration of a surface for a device you did not request
+    /// from wgpu.
+    ///
+    /// Returns specified values (see [`SurfaceCapabilities`]) if surface is incompatible with the
+    /// device's adapter.
+    pub fn get_capabilities_for_device(&self, device: &Device) -> SurfaceCapabilities {
+        self.inner.get_capabilities_for_device(&device.inner)
+    }
+
     /// Returns the HDR and luminance characteristics of the display backing this
     /// surface, or [`DisplayHdrInfo::default`] (all fields `None`) when nothing is
     /// known - which means unknown, not an SDR display. Never panics, including on
