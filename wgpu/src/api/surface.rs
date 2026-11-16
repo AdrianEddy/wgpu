@@ -113,6 +113,7 @@ impl Surface<'_> {
             present_mode: *caps.present_modes.first()?,
             alpha_mode: wgt::CompositeAlphaMode::Auto,
             scaling_mode: wgt::SurfaceScalingMode::Auto,
+            background_color: None,
             view_formats: vec![],
         })
     }
@@ -147,6 +148,9 @@ impl Surface<'_> {
     ///   [`SurfaceCapabilities::scaling_modes`] or is refused by the platform (see
     ///   [`SurfaceScalingMode`](crate::SurfaceScalingMode)). On the web backend, which lists no
     ///   scaling mode, the surface reports as lost instead, as there is no `catch_unwind` there.
+    /// - A background color is requested where
+    ///   [`SurfaceCapabilities::supports_background_color`] is false (on the web backend, the
+    ///   surface reports as lost instead).
     /// - `config.width` or `config.height` is zero.
     pub fn configure(&self, device: &Device, config: &SurfaceConfiguration) {
         self.inner.configure(&device.inner, config);

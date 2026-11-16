@@ -367,6 +367,9 @@ struct Swapchain {
     /// The scaling mode it was configured with ([`Surface::configured_scaling_mode`]).
     #[cfg(feature = "noop_test_hooks")]
     scaling_mode: wgt::SurfaceScalingMode,
+    /// The background colour it was configured with ([`Surface::configured_background_color`]).
+    #[cfg(feature = "noop_test_hooks")]
+    background_color: Option<wgt::SurfaceBackgroundColor>,
     /// For each image, the command that last wrote to it since it was acquired.
     #[cfg(feature = "noop_test_hooks")]
     last_writes: Vec<Option<ImageWrite>>,
@@ -459,6 +462,18 @@ impl Surface {
                 .swapchain
                 .as_ref()
                 .map(|swapchain| swapchain.scaling_mode)
+        })
+    }
+
+    /// Returns the background colour the current swapchain was configured with: `None` for none,
+    /// or while the surface is not configured.
+    #[cfg(feature = "noop_test_hooks")]
+    pub fn configured_background_color(&self) -> Option<wgt::SurfaceBackgroundColor> {
+        self.shared.with_state(|state| {
+            state
+                .swapchain
+                .as_ref()
+                .and_then(|swapchain| swapchain.background_color)
         })
     }
 
@@ -634,6 +649,8 @@ impl crate::Surface for Surface {
                 next: 0,
                 #[cfg(feature = "noop_test_hooks")]
                 scaling_mode: config.scaling_mode,
+                #[cfg(feature = "noop_test_hooks")]
+                background_color: config.background_color,
                 #[cfg(feature = "noop_test_hooks")]
                 last_writes: vec![None; image_count],
             });

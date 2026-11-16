@@ -2458,6 +2458,9 @@ pub struct SurfaceCapabilities {
     /// device for which [`Device::supports_present_scaling`] is false for the surface accepts
     /// none of them.
     pub scaling_modes: Vec<wgt::SurfaceScalingMode>,
+
+    /// Whether [`Surface::configure`] accepts a [`SurfaceConfiguration::background_color`].
+    pub supports_background_color: bool,
 }
 
 impl SurfaceCapabilities {
@@ -3022,6 +3025,11 @@ pub struct SurfaceConfiguration {
     /// where none is, and where the backend refused the mode chosen: `wgpu-core` then
     /// configures the surface again with `Auto`.
     pub scaling_mode: wgt::SurfaceScalingMode,
+    /// The colour of the part of the surface that a presented texture leaves uncovered:
+    /// `None` for the platform's own, or a colour where
+    /// [`SurfaceCapabilities::supports_background_color`] is true. A backend refuses a colour
+    /// otherwise.
+    pub background_color: Option<wgt::SurfaceBackgroundColor>,
     /// Format of the surface textures.
     pub format: wgt::TextureFormat,
     /// Color space in which the presentation engine interprets the surface

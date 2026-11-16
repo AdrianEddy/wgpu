@@ -175,6 +175,8 @@ pub enum ConfigureSurfaceError {
         requested: wgt::SurfaceScalingMode,
         available: Vec<wgt::SurfaceScalingMode>,
     },
+    #[error("The surface does not support a background color")]
+    UnsupportedBackgroundColor,
     #[error("Requested usage {requested:?} is not in the list of supported usages: {available:?}")]
     UnsupportedUsage {
         requested: wgt::TextureUses,
@@ -209,6 +211,7 @@ impl WebGpuError for ConfigureSurfaceError {
             | Self::UnsupportedPresentMode { .. }
             | Self::UnsupportedAlphaMode { .. }
             | Self::UnsupportedScalingMode { .. }
+            | Self::UnsupportedBackgroundColor
             | Self::UnsupportedUsage { .. } => ErrorType::Validation,
         }
     }

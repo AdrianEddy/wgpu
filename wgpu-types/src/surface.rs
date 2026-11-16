@@ -206,6 +206,21 @@ pub enum SurfaceScalingMode {
     OneToOne = 3,
 }
 
+/// An opaque colour for the part of a surface that a presented texture leaves uncovered
+/// ([`SurfaceConfiguration::background_color`]), as the 8-bit components of its sRGB encoding:
+/// how the colours of windows are written, `#2b333d` being `{ r: 0x2b, g: 0x33, b: 0x3d }`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct SurfaceBackgroundColor {
+    /// Red, sRGB-encoded.
+    pub r: u8,
+    /// Green, sRGB-encoded.
+    pub g: u8,
+    /// Blue, sRGB-encoded.
+    pub b: u8,
+}
+
 /// The color space in which the presentation engine interprets the values
 /// written to a surface texture.
 ///
@@ -643,6 +658,13 @@ pub struct SurfaceCapabilities {
     ///
     #[doc = link_to_wgpu_docs!(["`Surface::get_capabilities_for_device`"]: "struct.Surface.html#method.get_capabilities_for_device")]
     pub scaling_modes: Vec<SurfaceScalingMode>,
+    /// Whether the surface can be configured with a
+    /// [`background_color`](SurfaceConfiguration::background_color): a DXGI
+    /// swapchain made from a window (`HWND`), on DX12 and with the DXGI swapchain of
+    /// the Vulkan backend. Elsewhere the platform fills the part of the surface that
+    /// a presented texture leaves uncovered with a colour of its own, or the texture
+    /// always covers it.
+    pub supports_background_color: bool,
     /// Bitflag of supported texture usages for the surface to use with the given adapter.
     ///
     /// The usage [`TextureUsages::RENDER_ATTACHMENT`] is guaranteed.
@@ -673,6 +695,7 @@ impl Default for SurfaceCapabilities {
             present_modes: Vec::new(),
             alpha_modes: vec![CompositeAlphaMode::Opaque],
             scaling_modes: Vec::new(),
+            supports_background_color: false,
             usages: TextureUsages::RENDER_ATTACHMENT,
         }
     }
@@ -960,6 +983,21 @@ pub struct SurfaceConfiguration<V> {
     /// in [`SurfaceCapabilities::scaling_modes`], and configuring fails with a validation error
     /// where the platform refuses it.
     pub scaling_mode: SurfaceScalingMode,
+    /// The colour with which the platform fills the part of the surface that a presented
+    /// texture leaves uncovered, or `None` for the platform's own colour.
+    ///
+    /// A texture leaves part of the surface uncovered where it is smaller than the surface and
+    /// not stretched to it, as with [`SurfaceScalingMode::OneToOne`] while a window grows
+    /// faster than the application presents textures of its new size. The window's own colour
+    /// there makes that strip blend with the window. A colour needs a surface whose
+    /// [`SurfaceCapabilities::supports_background_color`] is true; it is a validation error
+    /// elsewhere.
+    ///
+    /// With DXGI (`IDXGISwapChain1::SetBackgroundColor`), the colour shows only with
+    /// [`SurfaceScalingMode::OneToOne`] (`DXGI_SCALING_NONE`), and wgpu gives it to DXGI only
+    /// then; with the other modes the texture covers the whole surface. wgpu gives DXGI its
+    /// sRGB-encoded components, as the desktop composition takes them.
+    pub background_color: Option<SurfaceBackgroundColor>,
     /// Specifies what view formats will be allowed when calling `Texture::create_view` on
     /// the texture returned by `Surface::get_current_texture`.
     ///
@@ -991,6 +1029,7 @@ impl<V: Clone> SurfaceConfiguration<V> {
             desired_maximum_frame_latency: self.desired_maximum_frame_latency,
             alpha_mode: self.alpha_mode,
             scaling_mode: self.scaling_mode,
+            background_color: self.background_color,
             view_formats: fun(&self.view_formats),
         }
     }

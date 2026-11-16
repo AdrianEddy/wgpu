@@ -1308,6 +1308,11 @@ impl crate::Surface for Surface {
         if config.scaling_mode != wgt::SurfaceScalingMode::Auto {
             return Err(crate::SurfaceError::UnsupportedScalingMode);
         }
+        if config.background_color.is_some() {
+            return Err(crate::SurfaceError::Other(
+                "the surface does not support a background color",
+            ));
+        }
 
         use raw_window_handle::RawWindowHandle as Rwh;
 

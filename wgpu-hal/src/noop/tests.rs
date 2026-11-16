@@ -74,6 +74,7 @@ impl Setup {
             present_mode: wgt::PresentMode::Fifo,
             composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
             scaling_mode: wgt::SurfaceScalingMode::Auto,
+            background_color: None,
             format: wgt::TextureFormat::Bgra8Unorm,
             color_space: wgt::SurfaceColorSpace::Srgb,
             extent: wgt::Extent3d {
@@ -424,6 +425,7 @@ mod hooks {
             present_mode: wgt::PresentMode::Fifo,
             composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
             scaling_mode: wgt::SurfaceScalingMode::Auto,
+            background_color: None,
             format: wgt::TextureFormat::Bgra8Unorm,
             color_space: wgt::SurfaceColorSpace::Srgb,
             extent: wgt::Extent3d {

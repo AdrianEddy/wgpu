@@ -287,6 +287,11 @@ impl crate::Surface for super::Surface {
         // Before anything else: a refusal leaves the surface as it is.
         let gravity = contents_gravity(config.scaling_mode)
             .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+        if config.background_color.is_some() {
+            return Err(crate::SurfaceError::Other(
+                "the surface does not support a background color",
+            ));
+        }
 
         let caps = &device.shared.private_texture_format_caps;
         *self.swapchain_format.write() = Some(config.format);

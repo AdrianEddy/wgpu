@@ -659,6 +659,7 @@ impl crate::Adapter for Context {
             ],
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
             scaling_modes: surface::SCALING_MODES.to_vec(),
+            supports_background_color: true,
         })
     }
 

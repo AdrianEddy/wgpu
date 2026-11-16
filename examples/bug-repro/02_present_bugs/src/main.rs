@@ -130,6 +130,7 @@ impl State {
             present_mode: wgpu::PresentMode::AutoVsync,
             alpha_mode: wgpu::CompositeAlphaMode::Auto,
             scaling_mode: wgpu::SurfaceScalingMode::Auto,
+            background_color: None,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };

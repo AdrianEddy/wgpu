@@ -652,6 +652,17 @@ impl Surface for DxgiSurface {
             .target
             .dxgi_scaling(config.scaling_mode)
             .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+        if config.background_color.is_some() && !self.target.supports_background_color() {
+            return Err(crate::SurfaceError::Other(
+                "the surface does not support a background color",
+            ));
+        }
+        // The colour given to DXGI: "The background color affects only swap chains that you create
+        // with DXGI_SCALING_NONE" (`IDXGISwapChain1::SetBackgroundColor`'s documentation). With
+        // another scaling the texture covers the whole surface.
+        let background_color = config
+            .background_color
+            .filter(|_| scaling == DXGI_SCALING_NONE);
 
         // `Surface::configure` already released the resources of the old swapchain. DXGI allows
         // only one swapchain per window, so the old one must be gone before the new one is created.
@@ -679,6 +690,12 @@ impl Surface for DxgiSurface {
             flags,
             scaling,
         )?;
+
+        // It takes effect at the next `Present1`, which every present is.
+        if let Some(color) = background_color {
+            // SAFETY: `swapchain` is a live swapchain.
+            unsafe { dxgi::swapchain::set_background_color(&swapchain, color) }?;
+        }
 
         // Apply the color space unconditionally so reconfiguring away from HDR resets state.
         unsafe {
@@ -1217,9 +1234,18 @@ impl Swapchain for DxgiSwapchain {
             )
         }?;
 
-        let present_result = unsafe { self.swapchain.Present(sync_interval, present_flags_value) }
-            .ok()
-            .into_device_result("IDXGISwapChain::Present");
+        // `Present1`, which a background colour takes effect with
+        // (`IDXGISwapChain1::SetBackgroundColor`'s documentation), with no dirty or scrolled
+        // rectangle, as `Present` presents.
+        let present_result = unsafe {
+            self.swapchain.Present1(
+                sync_interval,
+                present_flags_value,
+                &DXGI_PRESENT_PARAMETERS::default(),
+            )
+        }
+        .ok()
+        .into_device_result("IDXGISwapChain1::Present1");
         if present_result.is_ok() {
             self.pending_present_count += 1;
         }

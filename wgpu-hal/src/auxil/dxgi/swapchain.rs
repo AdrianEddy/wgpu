@@ -60,6 +60,19 @@ impl SurfaceTarget {
         }
     }
 
+    /// Whether a swapchain for this target takes a background colour: "The background color
+    /// affects only swap chains that you create with DXGI_SCALING_NONE in windowed mode"
+    /// (`IDXGISwapChain1::SetBackgroundColor`'s documentation), which only a window's swapchain
+    /// can be made with.
+    pub(crate) fn supports_background_color(&self) -> bool {
+        match self {
+            Self::WndHandle(_) => true,
+            Self::VisualFromWndHandle { .. } => false,
+            #[cfg(dx12)]
+            Self::Visual(_) | Self::SurfaceHandle(_) | Self::SwapChainPanel(_) => false,
+        }
+    }
+
     /// The scaling modes, other than `Auto`, that a swapchain for this target offers.
     pub(crate) fn scaling_modes(&self) -> Vec<wgt::SurfaceScalingMode> {
         [
@@ -126,6 +139,35 @@ pub(crate) fn swap_chain_descriptor(
         Scaling: scaling,
         SwapEffect: Dxgi::DXGI_SWAP_EFFECT_FLIP_DISCARD,
         Flags: flags.0 as u32,
+    }
+}
+
+/// Gives `swapchain` the background `color`, which takes effect at its next `Present1`.
+///
+/// # Safety
+///
+/// `swapchain` is a live swapchain.
+pub(crate) unsafe fn set_background_color(
+    swapchain: &Dxgi::IDXGISwapChain1,
+    color: wgt::SurfaceBackgroundColor,
+) -> Result<(), crate::SurfaceError> {
+    // SAFETY: A live swapchain, as our caller guarantees, and components in 0.0..=1.0.
+    unsafe { swapchain.SetBackgroundColor(&dxgi_background_color(color)) }.map_err(|err| {
+        log::error!("SetBackgroundColor failed: {err}");
+        crate::SurfaceError::Other("IDXGISwapChain1::SetBackgroundColor")
+    })
+}
+
+/// The `DXGI_RGBA` of an opaque `color`: its sRGB-encoded components, over 255. The desktop
+/// composition takes the background colour's components as encoded values, although the note on
+/// `IDXGISwapChain1::SetBackgroundColor` recommends linear components for presentation data.
+fn dxgi_background_color(color: wgt::SurfaceBackgroundColor) -> Dxgi::DXGI_RGBA {
+    let encoded = |component: u8| f32::from(component) / 255.0;
+    Dxgi::DXGI_RGBA {
+        r: encoded(color.r),
+        g: encoded(color.g),
+        b: encoded(color.b),
+        a: 1.0,
     }
 }
 
@@ -260,6 +302,7 @@ pub(crate) fn surface_capabilities(
         present_modes,
         composite_alpha_modes,
         scaling_modes: target.scaling_modes(),
+        supports_background_color: target.supports_background_color(),
     }
 }
 
@@ -285,5 +328,29 @@ fn surface_extent(target: &SurfaceTarget) -> Option<wgt::Extent3d> {
     } else {
         log::warn!("Unable to get the window client rect");
         None
+    }
+}
+
+#[cfg(test)]
+mod background_color_tests {
+    /// A colour is given to DXGI as its sRGB-encoded components over 255, opaque: `#00800a` is
+    /// 0, 128/255 and 10/255, where its linear components would be 0, 0.2158605 and 0.0030353.
+    #[test]
+    fn a_background_color_is_given_to_dxgi_encoded_and_opaque() {
+        let rgba = super::dxgi_background_color(wgt::SurfaceBackgroundColor {
+            r: 0,
+            g: 0x80,
+            b: 10,
+        });
+        assert_eq!(
+            (rgba.r, rgba.g, rgba.b, rgba.a),
+            (0.0, 128.0 / 255.0, 10.0 / 255.0, 1.0)
+        );
+        let white = super::dxgi_background_color(wgt::SurfaceBackgroundColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        });
+        assert_eq!((white.r, white.g, white.b, white.a), (1.0, 1.0, 1.0, 1.0));
     }
 }
