@@ -732,6 +732,14 @@ mod native {
     /// `AspectRatio` with `SurfaceError::UnsupportedScalingMode`, keeping the swapchain; a
     /// composition swapchain lists none, and wgpu-hal refuses each. On OpenGL, which lists none,
     /// wgpu-hal refuses each.
+    ///
+    /// The background colour: a window's DX12 swapchain supports it, and is given the linear
+    /// components of the colour configured (`GetBackgroundColor`) with each scaling mode it
+    /// lists; through wgpu-hal, a swapchain kept for a new configuration takes its new colour,
+    /// and one that had a colour is replaced for none, which has DXGI's own colour (that of a new
+    /// swapchain). Every other surface does not support it: a colour is a validation error, and
+    /// on a composition swapchain wgpu-hal refuses it. A frame presents (through `Present1`) with
+    /// each present mode the surface lists, on a window's swapchain and on a composition one.
     /// On Vulkan, a caller's present scaling in the swapchain's creation chain is the only one
     /// (a second would break the chain's unique structure types), and for each scaling, and for
     /// the platform's own placement, it prints what a frame presented to a window that changed
@@ -777,6 +785,24 @@ mod native {
                         failures.push(format!("{name}: {scaling_mode:?}: acquired {got}"));
                         break;
                     }
+                }
+            }
+
+            // A background colour where the surface does not support one: a validation error.
+            if !caps.supports_background_color {
+                configure(surface, &device, &base, &name, &errs);
+                let config = wgpu::SurfaceConfiguration {
+                    background_color: Some(GUTTER),
+                    ..base.clone()
+                };
+                match try_configure(surface, &device, &config) {
+                    Some(error)
+                        if error
+                            .to_string()
+                            .contains("The surface does not support a background color") => {}
+                    other => failures.push(format!(
+                        "{name}: a background color: expected a validation error, got {other:?}"
+                    )),
                 }
             }
 
@@ -839,6 +865,41 @@ mod native {
         failures.into_result()
     }
 
+    /// A window colour for the part of a surface that a texture leaves uncovered: the resize
+    /// lane's probe UI.
+    const GUTTER: wgpu::SurfaceBackgroundColor = wgpu::SurfaceBackgroundColor {
+        r: 0x2b,
+        g: 0x33,
+        b: 0x3d,
+    };
+
+    /// Another one: mid-grey. Only the DX12 half uses it.
+    #[cfg(windows)]
+    const GREY: wgpu::SurfaceBackgroundColor = wgpu::SurfaceBackgroundColor {
+        r: 0x80,
+        g: 0x80,
+        b: 0x80,
+    };
+
+    /// DXGI's own background colour: "The default value of the background color is black with
+    /// full opacity: 0,0,0,1" (`IDXGISwapChain1::GetBackgroundColor`'s documentation).
+    #[cfg(windows)]
+    const DXGI_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
+    /// The linear components of `color` (the sRGB transfer function), opaque.
+    #[cfg(windows)]
+    fn linear(color: wgpu::SurfaceBackgroundColor) -> [f32; 4] {
+        let decode = |c: u8| {
+            let c = f32::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        [decode(color.r), decode(color.g), decode(color.b), 1.0]
+    }
+
     /// A wgpu-hal configuration of a window's surface at the windows' size with `scaling_mode`.
     #[cfg(any(windows, target_os = "linux"))]
     fn hal_config(scaling_mode: wgpu::SurfaceScalingMode) -> wgpu_hal::SurfaceConfiguration {
@@ -847,6 +908,7 @@ mod native {
             present_mode: wgpu::PresentMode::Fifo,
             composite_alpha_mode: wgpu::CompositeAlphaMode::Opaque,
             scaling_mode,
+            background_color: None,
             format: wgpu::TextureFormat::Bgra8Unorm,
             color_space: wgpu::SurfaceColorSpace::Srgb,
             extent: wgpu::Extent3d {
@@ -1087,6 +1149,66 @@ mod native {
                 .map(|desc| desc.Scaling)
         }
 
+        /// The background colour of `surface`'s swapchain.
+        fn swapchain_background(surface: &wgpu_hal::dx12::Surface) -> Option<[f32; 4]> {
+            let swap_chain = surface.swap_chain()?;
+            // SAFETY: A live swapchain.
+            let color = unsafe { swap_chain.GetBackgroundColor() }.ok()?;
+            Some([color.r, color.g, color.b, color.a])
+        }
+
+        /// The name of a mark on a swapchain (its private data), which tells a swapchain kept by
+        /// a configuration from one it created. (A reference held to the swapchain would keep it
+        /// alive, which a window's next swapchain cannot be created beside, and its address can
+        /// be reused.)
+        const MARK: windows::core::GUID =
+            windows::core::GUID::from_u128(0x6a1e_5c0b_2d0f_4d63_9a49_8b6d_7a3f_2e11);
+
+        /// Marks `surface`'s swapchain.
+        fn mark(surface: &wgpu_hal::dx12::Surface) {
+            let swap_chain = surface.swap_chain().unwrap();
+            let mark = 1u32;
+            // SAFETY: A live swapchain; DXGI copies the 4 bytes.
+            unsafe { swap_chain.SetPrivateData(&MARK, 4, (&raw const mark).cast()) }.unwrap();
+        }
+
+        /// Whether `surface`'s swapchain has the mark.
+        fn marked(surface: &wgpu_hal::dx12::Surface) -> bool {
+            let Some(swap_chain) = surface.swap_chain() else {
+                return false;
+            };
+            let (mut mark, mut size) = (0u32, 4u32);
+            // SAFETY: A live swapchain, and room for the 4 bytes.
+            unsafe { swap_chain.GetPrivateData(&MARK, &mut size, (&raw mut mark).cast()) }.is_ok()
+                && mark == 1
+        }
+
+        /// Configures `surface` with each present mode it lists, and presents a frame with each.
+        fn present_with_each_mode(
+            name: &str,
+            surface: &wgpu::Surface<'_>,
+            (device, queue): (&wgpu::Device, &wgpu::Queue),
+            base: &wgpu::SurfaceConfiguration,
+            present_modes: &[wgpu::PresentMode],
+            failures: &mut Failures,
+        ) {
+            for &present_mode in present_modes {
+                let config = wgpu::SurfaceConfiguration {
+                    present_mode,
+                    ..base.clone()
+                };
+                if let Some(error) = try_configure(surface, device, &config) {
+                    failures.push(format!("{name}: {present_mode:?}: {error}"));
+                    continue;
+                }
+                let got = acquire_and_present(surface, device, queue);
+                println!("{name}: presented with {present_mode:?}: {got}");
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!("{name}: {present_mode:?}: acquired {got}"));
+                }
+            }
+        }
+
         let instance = |kind| {
             let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
                 event_loop.owned_display_handle(),
@@ -1148,6 +1270,61 @@ mod native {
                 }
             }
 
+            // A background colour, with each scaling mode: DXGI is given it with `OneToOne`
+            // (`DXGI_SCALING_NONE`), the only scaling it affects, and the other swapchains keep
+            // DXGI's own, black.
+            if !caps.supports_background_color {
+                failures.push(format!("{name}, a window's swapchain: no background color"));
+            }
+            for (scaling_mode, color, given) in [
+                (wgpu::SurfaceScalingMode::Auto, GUTTER, false),
+                (wgpu::SurfaceScalingMode::Stretch, GREY, false),
+                (wgpu::SurfaceScalingMode::OneToOne, GUTTER, true),
+                (wgpu::SurfaceScalingMode::OneToOne, GREY, true),
+            ] {
+                let expected = if given { linear(color) } else { DXGI_DEFAULT };
+                let config = wgpu::SurfaceConfiguration {
+                    scaling_mode,
+                    background_color: Some(color),
+                    ..base.clone()
+                };
+                if let Some(error) = try_configure(surface, &device, &config) {
+                    failures.push(format!("{name}: {scaling_mode:?} with {color:?}: {error}"));
+                    continue;
+                }
+                // SAFETY: Only inspected.
+                let got = swapchain_background(
+                    &unsafe { surface.as_hal::<wgpu_hal::api::Dx12>() }.unwrap(),
+                );
+                println!("{name}: {scaling_mode:?} with {color:?}: the swapchain's {got:?}");
+                if got != Some(expected) {
+                    failures.push(format!(
+                        "{name}: {scaling_mode:?} with {color:?}: the swapchain's {got:?}, not \
+                         {expected:?}"
+                    ));
+                }
+                let got = acquire_and_present(surface, &device, &queue);
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!(
+                        "{name}: {scaling_mode:?} with {color:?}: acquired {got}"
+                    ));
+                }
+            }
+
+            // A frame with each present mode (`Present1`, and its tearing flag).
+            present_with_each_mode(
+                &format!("{name}, a window's swapchain"),
+                surface,
+                (&device, &queue),
+                &wgpu::SurfaceConfiguration {
+                    scaling_mode: wgpu::SurfaceScalingMode::OneToOne,
+                    background_color: Some(GUTTER),
+                    ..base.clone()
+                },
+                &caps.present_modes,
+                failures,
+            );
+
             // wgpu-hal asked for another scaling on a configured surface, which wgpu-core never
             // does (it unconfigures first), on the other window's surface, which wgpu-core did not
             // configure.
@@ -1200,6 +1377,36 @@ mod native {
                          swapchain's scaling {scaling:?}, not refused with the swapchain kept"
                     ));
                 }
+
+                // A colour on a new swapchain (`NONE` replaces `STRETCH`), another on the same
+                // one (kept), then none (replaced: a colour cannot be taken back, and the new one
+                // has DXGI's own).
+                for (step, color, replaced) in [
+                    ("a color", Some(GUTTER), true),
+                    ("another color", Some(GREY), false),
+                    ("no color", None, true),
+                ] {
+                    mark(&hal_surface);
+                    let config = wgpu_hal::SurfaceConfiguration {
+                        background_color: color,
+                        ..hal_config(wgpu::SurfaceScalingMode::OneToOne)
+                    };
+                    // SAFETY: As above.
+                    let configured = unsafe { hal_surface.configure(&hal_device, &config) };
+                    let got = swapchain_background(&hal_surface);
+                    let expected = Some(color.map(linear).unwrap_or(DXGI_DEFAULT));
+                    let was_replaced = !marked(&hal_surface);
+                    println!(
+                        "{name}: wgpu-hal configured with {step}: {configured:?}, the \
+                         swapchain's {got:?}, replaced: {was_replaced}"
+                    );
+                    if configured.is_err() || got != expected || was_replaced != replaced {
+                        failures.push(format!(
+                            "{name}: wgpu-hal configured with {step}: {configured:?}, the \
+                             swapchain's {got:?} (not {expected:?}), replaced: {was_replaced}"
+                        ));
+                    }
+                }
                 // SAFETY: As above.
                 unsafe { hal_surface.unconfigure(&hal_device) };
             }
@@ -1230,6 +1437,11 @@ mod native {
                     caps.scaling_modes
                 ));
             }
+            if caps.supports_background_color {
+                failures.push(format!(
+                    "{name}, a composition swapchain: a background color"
+                ));
+            }
             let (device, queue, errors) = device(&adapter);
             {
                 // SAFETY: Only wgpu-hal uses the surface, which wgpu-core did not configure.
@@ -1245,7 +1457,36 @@ mod native {
                         failures,
                     )
                 };
+                let config = wgpu_hal::SurfaceConfiguration {
+                    background_color: Some(GUTTER),
+                    ..hal_config(wgpu::SurfaceScalingMode::Auto)
+                };
+                // SAFETY: As above; refused before the surface is touched.
+                let configured = unsafe { hal_surface.configure(&hal_device, &config) };
+                println!(
+                    "{name}, a composition swapchain: wgpu-hal configured with a background \
+                     color: {configured:?}"
+                );
+                if !matches!(configured, Err(wgpu_hal::SurfaceError::Other(_))) {
+                    if configured.is_ok() {
+                        // SAFETY: As above.
+                        unsafe { hal_surface.unconfigure(&hal_device) };
+                    }
+                    failures.push(format!(
+                        "{name}, a composition swapchain: wgpu-hal configured with a \
+                         background color: {configured:?}"
+                    ));
+                }
             }
+            // A frame with each present mode, through wgpu.
+            present_with_each_mode(
+                &format!("{name}, a composition swapchain"),
+                &surfaces[0].1,
+                (&device, &queue),
+                &config(&surfaces[0].1, &adapter),
+                &caps.present_modes,
+                failures,
+            );
             drop(surfaces);
             drop((device, queue));
             if let Err(failure) = check(&name, &[errors]) {

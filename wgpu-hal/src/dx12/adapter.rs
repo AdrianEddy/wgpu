@@ -1455,6 +1455,7 @@ impl crate::Adapter for super::Adapter {
                 ],
             },
             scaling_modes: surface.target.scaling_modes(),
+            supports_background_color: surface.target.supports_background_color(),
         })
     }
 

@@ -4501,6 +4501,8 @@ impl WebSurface {
             ],
             // A canvas is scaled by its CSS (`object-fit`), not by the presentation API.
             scaling_modes: Vec::new(),
+            // A canvas shows its CSS background where it is not drawn.
+            supports_background_color: false,
             // Statically set to RENDER_ATTACHMENT for now. See https://gpuweb.github.io/gpuweb/#dom-gpucanvasconfiguration-usage
             usages: wgt::TextureUsages::RENDER_ATTACHMENT,
         }
@@ -4559,6 +4561,15 @@ impl dispatch::SurfaceInterface for WebSurface {
                  the surface will report as lost. Check `get_capabilities` before \
                  configuring.",
                 mode = config.scaling_mode
+            );
+            return;
+        }
+        if config.background_color.is_some() {
+            // As for a scaling mode: never listed, a lost surface rather than a panic.
+            self.configure_failed.set(true);
+            log::error!(
+                "A surface background color is not supported on the WebGPU backend; the \
+                 surface will report as lost. Check `get_capabilities` before configuring."
             );
             return;
         }

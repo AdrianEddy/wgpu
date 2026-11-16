@@ -99,6 +99,8 @@ impl GPUCanvasContext {
       alpha_mode: configuration.alpha_mode.into(),
       // A canvas is scaled by its CSS, not by its configuration.
       scaling_mode: wgpu_types::SurfaceScalingMode::Auto,
+      // A canvas has no such colour of its own: its CSS background shows.
+      background_color: None,
       view_formats: configuration
         .view_formats
         .into_iter()

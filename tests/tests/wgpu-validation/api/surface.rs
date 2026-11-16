@@ -1303,3 +1303,39 @@ fn an_auto_that_chose_no_mode_is_not_configured_again() {
     assert_eq!(*configurations.lock().unwrap(), 2);
     s.assert_no_violations();
 }
+
+/// A noop surface supports a background colour, as a DX12 swapchain made from a window does: the
+/// colour configured reaches the HAL, and no colour reaches it as none.
+#[test]
+fn a_background_color_reaches_the_hal() {
+    let s = setup();
+    let adapter = pollster::block_on(s.instance.request_adapter(&wgpu::RequestAdapterOptions {
+        compatible_surface: Some(&s.surface),
+        ..Default::default()
+    }))
+    .unwrap();
+    assert!(
+        s.surface
+            .get_capabilities(&adapter)
+            .supports_background_color
+    );
+    assert_eq!(s.config.background_color, None);
+    assert_eq!(s.noop_surface().configured_background_color(), None);
+    let color = wgpu::SurfaceBackgroundColor {
+        r: 0x2b,
+        g: 0x33,
+        b: 0x3d,
+    };
+    s.surface.configure(
+        &s.device,
+        &wgpu::SurfaceConfiguration {
+            scaling_mode: wgpu::SurfaceScalingMode::OneToOne,
+            background_color: Some(color),
+            ..s.config.clone()
+        },
+    );
+    assert_eq!(s.noop_surface().configured_background_color(), Some(color));
+    s.surface.configure(&s.device, &s.config);
+    assert_eq!(s.noop_surface().configured_background_color(), None);
+    s.assert_no_violations();
+}

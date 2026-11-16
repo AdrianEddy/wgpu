@@ -938,6 +938,7 @@ impl Surface {
             present_modes: hal_caps.present_modes,
             alpha_modes: hal_caps.composite_alpha_modes,
             scaling_modes: hal_caps.scaling_modes,
+            supports_background_color: hal_caps.supports_background_color,
             usages,
         }
     }
@@ -1196,6 +1197,7 @@ impl Surface {
             present_mode: config.present_mode,
             composite_alpha_mode: config.alpha_mode,
             scaling_mode: config.scaling_mode,
+            background_color: config.background_color,
             format: config.format,
             color_space: config.color_space,
             extent: wgt::Extent3d {

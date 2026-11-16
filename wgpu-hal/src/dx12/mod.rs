@@ -506,6 +506,9 @@ struct SwapChain {
     size: wgt::Extent3d,
     /// Fixed at creation: `ResizeBuffers` cannot change it.
     scaling: Dxgi::DXGI_SCALING,
+    /// The colour given to `SetBackgroundColor`, if any: `None` leaves DXGI's own, black. Only a
+    /// `DXGI_SCALING_NONE` swapchain is given one.
+    background_color: Option<wgt::SurfaceBackgroundColor>,
 }
 
 enum SurfaceTarget {
@@ -547,6 +550,20 @@ impl SurfaceTarget {
                 | Self::SwapChainPanel(_),
                 Mode::Stretch | Mode::AspectRatio | Mode::OneToOne,
             ) => None,
+        }
+    }
+
+    /// Whether a swapchain for this target takes a background colour: "The background color
+    /// affects only swap chains that you create with DXGI_SCALING_NONE in windowed mode"
+    /// (`IDXGISwapChain1::SetBackgroundColor`'s documentation), which only a window's swapchain
+    /// can be made with.
+    fn supports_background_color(&self) -> bool {
+        match self {
+            Self::WndHandle(_) => true,
+            Self::VisualFromWndHandle { .. }
+            | Self::Visual(_)
+            | Self::SurfaceHandle(_)
+            | Self::SwapChainPanel(_) => false,
         }
     }
 
@@ -1422,6 +1439,29 @@ fn map_surface_color_space(
     }
 }
 
+/// The `DXGI_RGBA` of an opaque `color`: its linear components, decoded from sRGB. Microsoft
+/// recommends linear components for presentation data, which the operating system converts to
+/// sRGB to compose in a fixed bit depth (`IDXGISwapChain1::SetBackgroundColor`'s note).
+fn dxgi_background_color(color: wgt::SurfaceBackgroundColor) -> Dxgi::DXGI_RGBA {
+    Dxgi::DXGI_RGBA {
+        r: srgb_to_linear(color.r),
+        g: srgb_to_linear(color.g),
+        b: srgb_to_linear(color.b),
+        a: 1.0,
+    }
+}
+
+/// The linear value of an 8-bit sRGB-encoded component (the sRGB transfer function, IEC
+/// 61966-2-1).
+fn srgb_to_linear(component: u8) -> f32 {
+    let c = f32::from(component) / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 impl crate::Surface for Surface {
     type A = Api;
 
@@ -1435,6 +1475,17 @@ impl crate::Surface for Surface {
             .target
             .dxgi_scaling(config.scaling_mode)
             .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+        if config.background_color.is_some() && !self.target.supports_background_color() {
+            return Err(crate::SurfaceError::Other(
+                "the surface does not support a background color",
+            ));
+        }
+        // The colour given to DXGI: "The background color affects only swap chains that you create
+        // with DXGI_SCALING_NONE" (`IDXGISwapChain1::SetBackgroundColor`'s documentation). With
+        // another scaling the texture covers the whole surface.
+        let background_color = config
+            .background_color
+            .filter(|_| scaling == Dxgi::DXGI_SCALING_NONE);
 
         let mut flags = Dxgi::DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
         // We always set ALLOW_TEARING on the swapchain no matter
@@ -1464,10 +1515,14 @@ impl crate::Surface for Surface {
         let swap_chain_buffer = (config.maximum_frame_latency + 1).min(16);
 
         // `ResizeBuffers` keeps the scaling the swapchain was created with: a swapchain of another
-        // scaling is released, and a new one created for the window. (wgpu-core unconfigures a
-        // surface before it configures it, so this is for wgpu-hal's direct users.)
+        // scaling is released, and a new one created for the window. So is one that was given a
+        // background colour, for a configuration without one: `SetBackgroundColor` takes only a
+        // value, and no call restores DXGI's own state, which a new swapchain has. (wgpu-core
+        // unconfigures a surface before it configures it, so this is for wgpu-hal's direct users.)
         let previous = self.swap_chain.write().take().and_then(|sc| {
-            if sc.scaling == scaling {
+            if sc.scaling == scaling
+                && (sc.background_color.is_none() || background_color.is_some())
+            {
                 Some(sc)
             } else {
                 drop(unsafe { sc.release_resources() });
@@ -1633,6 +1688,18 @@ impl crate::Surface for Surface {
             crate::SurfaceError::Other("IDXGISwapChain3::SetColorSpace1")
         })?;
 
+        // It takes effect at the next `Present1`, which every present is.
+        if let Some(color) = background_color {
+            // SAFETY: `swap_chain` is a live swapchain, and the colour's components are in
+            // 0.0..=1.0.
+            unsafe { swap_chain.SetBackgroundColor(&dxgi_background_color(color)) }.map_err(
+                |err| {
+                    log::error!("SetBackgroundColor failed: {err}");
+                    crate::SurfaceError::Other("IDXGISwapChain1::SetBackgroundColor")
+                },
+            )?;
+        }
+
         match self.target {
             SurfaceTarget::WndHandle(wnd_handle) => {
                 // Disable automatic Alt+Enter handling by DXGI.
@@ -1678,6 +1745,7 @@ impl crate::Surface for Surface {
             format: config.format,
             size: config.extent,
             scaling,
+            background_color,
         });
 
         Ok(())
@@ -1814,10 +1882,17 @@ impl crate::Queue for Queue {
             m => unreachable!("Cannot make surface with present mode {m:?}"),
         };
 
-        profiling::scope!("IDXGISwapchain3::Present");
-        unsafe { sc.raw.Present(interval, flags) }
-            .ok()
-            .into_device_result("Present")?;
+        // `Present1`, which a background colour takes effect with
+        // (`IDXGISwapChain1::SetBackgroundColor`'s documentation). No dirty rectangle: "You can
+        // set this member to 0 to indicate that you update the whole frame", and no scrolled
+        // rectangle (`DXGI_PRESENT_PARAMETERS`' documentation), as `Present` presents.
+        profiling::scope!("IDXGISwapChain1::Present1");
+        unsafe {
+            sc.raw
+                .Present1(interval, flags, &Dxgi::DXGI_PRESENT_PARAMETERS::default())
+        }
+        .ok()
+        .into_device_result("Present1")?;
 
         Ok(())
     }
@@ -1882,4 +1957,30 @@ pub enum ShaderModel {
     V6_7,
     V6_8,
     V6_9,
+}
+
+#[cfg(test)]
+mod background_color_tests {
+    /// An sRGB component decodes to the linear value of the sRGB transfer function: the linear
+    /// segment at the bottom, the power curve above it, and the ends exact; the colour is opaque.
+    #[test]
+    fn a_background_color_is_given_to_dxgi_linear_and_opaque() {
+        use super::srgb_to_linear;
+        assert_eq!(srgb_to_linear(0), 0.0);
+        assert_eq!(srgb_to_linear(255), 1.0);
+        // 10 / 255 is below 0.04045: linear segment.
+        assert!((srgb_to_linear(10) - 10.0 / 255.0 / 12.92).abs() < 1e-7);
+        // Values of the curve: 0x80 is 0.2158605, 0xbc is 0.5028865.
+        assert!((srgb_to_linear(0x80) - 0.215_860_5).abs() < 1e-6);
+        assert!((srgb_to_linear(0xbc) - 0.502_886_5).abs() < 1e-6);
+        let rgba = super::dxgi_background_color(wgt::SurfaceBackgroundColor {
+            r: 0,
+            g: 0x80,
+            b: 255,
+        });
+        assert_eq!(
+            (rgba.r, rgba.g, rgba.b, rgba.a),
+            (0.0, srgb_to_linear(0x80), 1.0, 1.0)
+        );
+    }
 }

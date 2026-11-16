@@ -197,6 +197,9 @@ pub(crate) fn validate_surface_configuration(
         }
         _ => {}
     }
+    if config.background_color.is_some() && !caps.supports_background_color {
+        return Err(E::UnsupportedBackgroundColor);
+    }
     if !caps.usage.contains(config.usage) {
         return Err(E::UnsupportedUsage {
             requested: config.usage,
@@ -225,6 +228,7 @@ mod surface_configuration_tests {
             present_modes: vec![wgt::PresentMode::Fifo],
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
             scaling_modes: Vec::new(),
+            supports_background_color: false,
         }
     }
 
@@ -237,6 +241,7 @@ mod surface_configuration_tests {
             present_mode: wgt::PresentMode::Fifo,
             composite_alpha_mode: wgt::CompositeAlphaMode::Opaque,
             scaling_mode: wgt::SurfaceScalingMode::Auto,
+            background_color: None,
             format,
             color_space,
             extent: wgt::Extent3d {
@@ -459,6 +464,42 @@ mod surface_configuration_tests {
                 ),
                 "{err:?}"
             );
+        }
+    }
+
+    /// A background colour is configured on a surface that supports one, and is a validation
+    /// error on one that does not; no colour is configured on either.
+    #[test]
+    fn a_background_color_needs_a_surface_that_supports_one() {
+        let color = wgt::SurfaceBackgroundColor {
+            r: 0x2b,
+            g: 0x33,
+            b: 0x3d,
+        };
+        for supports_background_color in [false, true] {
+            let caps = hal::SurfaceCapabilities {
+                supports_background_color,
+                ..srgb_caps(Vec::new())
+            };
+            let mut config = hal::SurfaceConfiguration {
+                background_color: Some(color),
+                ..srgb_config(wgt::SurfaceScalingMode::Auto)
+            };
+            let result = validate_surface_configuration(&mut config, &caps, 4096);
+            if supports_background_color {
+                result.unwrap();
+                assert_eq!(config.background_color, Some(color));
+            } else {
+                assert!(
+                    matches!(
+                        result,
+                        Err(ConfigureSurfaceError::UnsupportedBackgroundColor)
+                    ),
+                    "{result:?}"
+                );
+            }
+            let mut config = srgb_config(wgt::SurfaceScalingMode::Auto);
+            validate_surface_configuration(&mut config, &caps, 4096).unwrap();
         }
     }
 
