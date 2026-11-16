@@ -733,6 +733,14 @@ impl Instance {
     /// is set, and its features and limits are WebGPU's where
     /// [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
     ///
+    /// It takes the adapter it is given: an adapter made by the caller is the caller's
+    /// responsibility. Enumeration would not offer one whose
+    /// [`min_uniform_buffer_offset_alignment`](wgt::Limits::min_uniform_buffer_offset_alignment)
+    /// or [`min_storage_buffer_offset_alignment`](wgt::Limits::min_storage_buffer_offset_alignment)
+    /// is not a power of two, as WebGPU requires of every alignment limit and wgpu assumes, nor,
+    /// where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is set, one without
+    /// [`wgt::Features::CORE_FEATURES_AND_LIMITS`].
+    ///
     /// If [limit bucketing][lt] is desired, [`crate::limits::apply_limit_buckets`]
     /// should be called with the HAL adapter before calling this function.
     ///
