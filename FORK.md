@@ -99,7 +99,9 @@ no release has, so it has no entry of its own.
 | 67 | `8fb87e180` | fix(vulkan): keep the RADV memory budget workaround for raw devices | Review 5 item 12 (H3): a raw RADV device that enabled `VK_EXT_memory_budget`, which wgpu-hal hides there, was queried for budgets; they need the physical device's offer as well now. Unit test fails without it. | a release contains it |
 | 68 | `8413e2dc3` | fix(vulkan): refuse a swapchain the device cannot create or present | Review 5 item 12 (H4): a device created without `VK_KHR_swapchain` panicked in `create_swapchain`, and surface support was asked of queue family 0 (`VUID-vkQueuePresentKHR-pSwapchains-01292`). Both are refused with a `SurfaceError`, asking of the device's own family. Device test fails without it on RADV, the only driver here with `VK_EXT_headless_surface`: the old path called the unloaded swapchain functions and panicked. | a release contains it |
 | 69 | `ee5022307` | fix(naga,vulkan): declare binding-array indexing capabilities in SPIR-V | Review 5 item 5, the lane's decision 4: Naga's SPIR-V declared no `*ArrayDynamicIndexing` or `*ArrayNonUniformIndexing` capability (`VUID-StandaloneSpirv-*ArrayDynamicIndexing-10127` to `-10130`, `VUID-RuntimeSpirv-*ArrayNonUniformIndexing-10134` to `-10137`), and `arrayLength` of a non-uniform element lacked its `NonUniform` decoration. Naga declares them where it indexes so, and wgpu-hal allows those of the features the device was created with, which 47 enables. Uniform buffer arrays declare theirs only where allowed (Residual behaviour). Two SPIR-V snapshots change. Naga tests fail without it. | a release contains it |
-| 70 | (this commit) | docs: FORK.md: describe the fixes for devices created elsewhere | This file | the branch is dropped |
+| 70 | `c8ff0f28d` | docs: FORK.md: describe the fixes for devices created elsewhere | This file | the branch is dropped |
+| 71 | `6fc02c33f` | fix(core): offer a hal adapter as enumeration offers it | Found by the consumers' lane (fix round 2, item 1): `Instance::create_adapter_from_hal` skipped what enumeration does to an adapter, so a wrapped adapter kept the driver's buffer limit, and a device that requested the adapter's limits panicked in indirect validation on an adapter whose `maxBufferSize` exceeds `u32::MAX`: NVIDIA's Vulkan adapters, as wgpu-interop wraps the devices FFmpeg creates. One step now makes the adapter the instance offers, enumerated or wrapped: its buffer limits fit indirect validation, and strict compliance filters its features and limits. Upstream `trunk` has the same gap (`60cef2be8`). Unit tests fail without it, and the device test on NVIDIA. | a release contains it |
+| 72 | (this commit) | docs: FORK.md: describe the hal adapter fix and the open questions | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after it (their tests use
 it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25 as two docs PRs (its row); 26 and 27 with the PRs
@@ -144,6 +146,10 @@ that upstream's devices never enable (`VUID-VkShaderModuleCreateInfo-pCode-08740
 the subset on the implementation alone would make wgpu-hal's own opening on a non-Apple subset implementation refuse
 the requests it offers.
 
+71 alone, a candidate PR: upstream has the same gap. On `trunk`, whose `request_adapters` applies the two steps
+itself (35 moved them into `suitable_adapters`), the shared step goes there. Its unit tests need nothing of the
+series; its Vulkan device test sits in the fork's `wgpu_vulkan` binary, so the PR carries the unit tests.
+
 ## The future of lazy adapter selection
 
 The owner's decision 1 of review 4: keep 35 until gfx-rs/wgpu#10775 is released. That PR, open when review 4 read
@@ -162,7 +168,7 @@ Either way, 35's core restructuring and 38's early stop stay, as a core-only cha
 `hal::Instance::request_adapter`: with `Backends::all()` and no LUID, a Vulkan adapter of the best rank still means
 that DX12 and GL are never asked.
 
-## Devices created elsewhere (commits 42, 43, 45 to 53 and 55 to 69)
+## Devices created elsewhere (commits 42, 43, 45 to 53, 55 to 69 and 71)
 
 `Adapter::device_from_raw` takes the extensions and the features that the device was created with, and wgpu-hal
 takes its paths from them, never from what the adapter offers (the owner's ruling on the consumers' decision 11):
@@ -205,6 +211,9 @@ takes its paths from them, never from what the adapter offers (the owner's rulin
   callback is dropped uncalled.
 - **A surface** is configured only on a device with `VK_KHR_swapchain` whose queue family can present to it (commit
   68); a device created elsewhere without either gets a `SurfaceError`.
+- **A wrapped adapter** (`create_adapter_from_hal`) offers what enumeration offers of it (commit 71): with
+  `VALIDATION_INDIRECT_CALL`, which an instance made from a hal instance always has, its buffer limits fit indirect
+  validation, so a device that requests the adapter's limits gets limits its validation supports.
 - `fullDrawIndexUint32`, behind `DownlevelFlags::FULL_DRAW_INDEX_UINT32`, is enabled on wgpu-hal's own devices
   where offered, and a device has the flag only with it (the owner's decision on review 5): "If a feature is
   supported by a physical device, it must be enabled when creating a VkDevice in order to use its associated
@@ -452,6 +461,29 @@ polyfills it), `shaderUniformBufferArrayDynamicIndexing` with buffer arrays wher
     Firefox's telemetry counts them (per review 4, from summaries of its source): it would see fewer, and with
     `force_fallback_adapter` only the software adapters. None of the owner's consumers uses it.
 
+## Open, ledgered
+
+The owner's decisions on review 5's open questions (2026-11-16). Kept as they are: Naga's leniency for uniform buffer
+arrays (69), the subgroup stage rule in the derivation (60), the error of wgpu-hal's own opening (53) and 69's place
+at the end of the series. Ledgered:
+
+- **A device's own alignments.** wgpu-core takes a device's `Alignments` from its adapter, also for a device created
+  elsewhere. Since 43 relies on robustness2 only where the physical device reports its properties, the adapter's
+  `uniform_bounds_check_alignment` is never below what a device's bounds checks need: it can only over-pad lazy
+  initialization, which the init tracker clips. A known over-pad; a `hal::Device` accessor for the device's own
+  alignments, as 51 did for downlevel capabilities, is ledgered (review 5 item 2's optional part).
+- **48's doc line.** `EXTENDED_ACCELERATION_STRUCTURE_VERTEX_FORMATS` does nothing without
+  `EXPERIMENTAL_RAY_QUERY` or `EXPERIMENTAL_RAY_TRACING_PIPELINES`, as wgpu-core creates acceleration structures
+  only with one of them; its doc says so with 48's next change (review 5, decision 3).
+- **N2, the "all six" descriptor-indexing rule** (review 5): every binding-array feature needs each descriptor
+  indexing member that wgpu-hal enables for binding arrays, though update-after-bind is set per binding, so a device
+  without `shaderStorageImageArrayNonUniformIndexing` offers no binding array at all. Deriving each feature from its
+  own members would widen offers on such devices; ledgered as untestable here.
+- **A wrapped adapter's admission** (71): enumeration drops an adapter that `adapter_allowed` refuses (alignments
+  that are not powers of two; without `CORE_FEATURES_AND_LIMITS` under strict compliance), while
+  `create_adapter_from_hal` takes the adapter it is given. Refusing it would make `create_adapter_from_hal`
+  fallible: the owner's call.
+
 ## Proposal: texture-aware present, discard and release (first review, owner decision 2, not carried)
 
 `wgpu-core`'s `present`, `discard` and `release` act on the surface's current texture, not on the caller's.
@@ -572,6 +604,9 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   `Adapter::device_features` instead. #9980's validated alternatives would carry this check.
 - **`hal::Device::features`** (commit 56, `BREAKING:`): every hal backend reports the features a device was opened
   with, and `create_device_from_hal` refuses others with the new `RequestDeviceError::FeaturesNotOpened`.
+- **A wrapped adapter's offer** (commit 71): `create_adapter_from_hal` now changes the limits, and under strict
+  compliance the features, that a hal user's adapter reports, as enumeration changes an enumerated adapter's. A
+  caller that relied on the driver's limits through a wrapped adapter sees enumeration's.
 - **The subgroup rules** (commits 59 and 60) are in the derivation, not in Naga: upstream #8207 aligned Naga's
   capabilities with wgpu's features, and Dawn likewise offers no `subgroups` with `shader-f16` on a device without
   `shaderSubgroupExtendedTypes`.
