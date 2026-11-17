@@ -229,6 +229,11 @@ impl Bucket {
 /// happen with downlevel devices, and attempting to use limit bucketing with
 /// downlevel devices is not recommended.
 ///
+/// `raw` is the adapter as its backend exposed it, and the bucket records its capabilities
+/// ([`wgt::AdapterLimitBucketInfo`]). The instance adjusts the bucket afterwards, as it adjusts
+/// any adapter: under [`wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE`], it offers the bucket's
+/// WebGPU features and limits, without its native-only ones.
+///
 /// [lt]: self#Limit-bucketing
 pub fn apply_limit_buckets(mut raw: hal::DynExposedAdapter) -> Option<hal::DynExposedAdapter> {
     for bucket in buckets() {
