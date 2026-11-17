@@ -98,12 +98,14 @@ has, so it has no entry of its own; 40 changes a test only.
 | 70 | `70bda05ae` | docs: FORK.md: carry review 5's fixes | This file | the branch is dropped |
 | 71 | `44bc875df` | fix(core): offer a hal adapter as enumeration offers it | Found by the consumers' lane (fix round 2, item 1): `Instance::create_adapter_from_hal` skipped what enumeration does to an adapter, so a wrapped adapter kept the driver's buffer limit, and a device that requested the adapter's limits panicked in indirect validation on an adapter whose `maxBufferSize` exceeds `u32::MAX`: NVIDIA's Vulkan adapters, as wgpu-interop wraps the devices FFmpeg creates. One step now makes the adapter the instance offers, enumerated or wrapped: its buffer limits fit indirect validation, and strict compliance filters its features and limits. Upstream `trunk` has the same gap (`4fe54b020`, and `trunk` read on 2026-11-16). Unit tests fail without it, and the device test on NVIDIA. | a release contains it |
 | 72 | `4afb24d08` | docs: FORK.md: carry the hal adapter fix and the decisions on review 5 | This file | the branch is dropped |
-| 73 | `7d32fe839` | feat!: a present-scaling mode on SurfaceConfiguration | The resize lane's R1 (`OXQ-resize-smoothness.md` §6.2 and §7.5.1), landed by the owner's "Land the set" (2026-11-16) and matched to gfx-rs/wgpu#10196's branch (the owner's "Match their branch now", the same day): `SurfaceConfiguration::scaling_mode` and `SurfaceCapabilities::scaling_modes`, `Auto` being the first of `Stretch`, `AspectRatio` and `OneToOne` listed (it still prefers `Stretch`, the owner's earlier ruling) and configured again without a scaling where the backend refuses the mode chosen (`hal::SurfaceError::UnsupportedScalingMode`, breaking). A DX12 window's swapchain offers `Stretch` and `OneToOne` (`DXGI_SCALING_NONE`; another scaling replaces the swapchain), a composition swapchain none; Vulkan offers what `VkSurfacePresentScalingCapabilitiesKHR` reports for every present mode wgpu configures, through `swapchainMaintenance1`, and refuses an extent outside the scaled range; Metal offers `Stretch` and `AspectRatio` (`contentsGravity`). `hal::Device::supports_present_scaling` (breaking): a device created elsewhere without what the modes need accepts `Auto` only. Measured on this machine by the resize lane (DX12 window swapchains: stretched frames 17 % to 0 %). | a release contains #10196's scaling mode |
+| 73 | `7d32fe839` | feat!: a present-scaling mode on SurfaceConfiguration | The resize lane's R1 (`OXQ-resize-smoothness.md` §6.2 and §7.5.1), landed by the owner's "Land the set" (2026-11-16) and matched to gfx-rs/wgpu#10196's branch (the owner's "Match their branch now", the same day): `SurfaceConfiguration::scaling_mode` and `SurfaceCapabilities::scaling_modes`, `Auto` being the first of `Stretch`, `AspectRatio` and `OneToOne` listed (it still prefers `Stretch`, the owner's earlier ruling) and configured again without a scaling where the backend refuses the mode chosen (`hal::SurfaceError::UnsupportedScalingMode`, breaking). A DX12 window's swapchain offers `Stretch` and `OneToOne` (`DXGI_SCALING_NONE`; another scaling replaces the swapchain), a composition swapchain none; Vulkan offers what `VkSurfacePresentScalingCapabilitiesKHR` reports for every present mode wgpu configures, through `swapchainMaintenance1`, and refuses an extent outside the scaled range; Metal offers `Stretch` and `AspectRatio` (`contentsGravity`, set only for an explicit mode since 79). `hal::Device::supports_present_scaling` (breaking): a device created elsewhere without what the modes need accepts `Auto` only. Measured on this machine by the resize lane (DX12 window swapchains: stretched frames 17 % to 0 %). | a release contains #10196's scaling mode |
 | 74 | `af5d457b3` | docs: create_adapter_from_hal: a caller-made adapter is the caller's responsibility | The owner's ruling on 71's open question, "Keep accepting them" (2026-11-16): the documentation says what enumeration would not have offered. | a release contains 71 |
 | 75 | `6ab2657d5` | docs: FORK.md: carry present scaling, the doc line and the open list | This file | the branch is dropped |
 | 76 | `7fc31127f` | feat: the capabilities of a surface for a device | The owner's "Add it now" (2026-11-16): `Surface::get_capabilities_for_device`, the capabilities against which `configure` validates for a device, so that a consumer on a device created elsewhere (wgpu-interop, FFmpeg; OxQuick is one) picks `OneToOne` only where it is valid. `wgpu::custom::SurfaceInterface` requires it (breaking for custom backends). | a release contains #10196's scaling mode and a per-device query |
-| 77 | `846d1d7fa` | feat: a background colour for the part of a surface that a texture leaves uncovered | The resize lane's R2, window half (`OXQ-resize-smoothness.md` §7.5.4), sent to this lane by the owner (2026-11-16): `SurfaceConfiguration::background_color` and `SurfaceCapabilities::supports_background_color`. A DX12 window's swapchain takes it with `OneToOne` (`IDXGISwapChain1::SetBackgroundColor`, linear components); DX12 presents with `Present1`. Other surfaces refuse a colour. | a release has an equivalent |
-| 78 | (this commit) | docs: FORK.md: carry the capabilities for a device and the background colour | This file | the branch is dropped |
+| 77 | `846d1d7fa` | feat: a background colour for the part of a surface that a texture leaves uncovered | The resize lane's R2, window half (`OXQ-resize-smoothness.md` §7.5.4), sent to this lane by the owner (2026-11-16): `SurfaceConfiguration::background_color` and `SurfaceCapabilities::supports_background_color`. A DX12 window's swapchain takes it with `OneToOne` (`IDXGISwapChain1::SetBackgroundColor`, linear components); DX12 presents with `Present1`. Other surfaces refuse a colour. The owner kept the field ("Keep the config field") and the linear components (2026-11-17); the `#808080` probe is open ("Open, ledgered"). | a release has an equivalent |
+| 78 | `7c575aa22` | docs: FORK.md: carry the capabilities for a device and the background colour | This file | the branch is dropped |
+| 79 | `dacfca0bf` | fix(metal)!: leave a layer's contentsGravity alone under Auto | The owner's ruling on Metal's layer, "Touch it only for an explicit mode" (2026-11-17): Metal sets the layer's `contentsGravity` only for an explicit scaling mode, as `raw-window-metal`'s "Semantics" ask of a library that is handed a layer; `Auto` leaves it as it is, also the gravity of an earlier explicit mode. `hal::SurfaceCapabilities::auto_keeps_placement` (breaking): wgpu-core configures `Auto` as it is on such a surface instead of resolving it to a listed mode. Type-checked for iOS and macOS; nothing ran on Apple hardware. | a release contains #10196's scaling mode with the layer left alone under `Auto` |
+| 80 | (this commit) | docs: FORK.md: carry Metal's layer and the owner's rulings on 73 and 77 | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 4, 5, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after
 it (their tests use it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25's #10675 half in
@@ -162,7 +164,8 @@ offer it what 73 keeps that the branch lacks; where the branch has a defect, 73 
   none where the caller's chain has one.
 - **A refusal keeps the caller's chain.** The branch takes the chain before it decides on the scaling, so the
   configuration that its own retry makes runs without it. 73 decides first and leaves the chain set on a refusal;
-  the retry consumes it (pinned on RADV).
+  the retry consumes it (pinned on RADV), and a null chain withdraws one that is set. The owner kept this contract,
+  "Keep ours" (2026-11-17): the branch's retry loses the caller's structures, a defect that 73 fixes.
 - **The Vulkan list holds for the present modes wgpu configures.** The branch intersects the support of every
   present mode the surface reports, also of those wgpu cannot configure, which can drop a mode for nothing.
 - **DX12 has one function for the list and the mapping.** The branch keeps the list in `adapter.rs` and the mapping
@@ -172,10 +175,25 @@ offer it what 73 keeps that the branch lacks; where the branch has a defect, 73 
   supports both listed scalings by DXGI's documentation, and a failure there is not a scaling's.
 - **The gravity is defined.** `OneToOne` asks for `MIN` on both axes, the top-left corner as `DXGI_SCALING_NONE`
   places it, and `AspectRatio` for `CENTERED`; a mode is listed only with its gravity. The branch leaves
-  `OneToOne` to the platform's gravity and centres `AspectRatio` where it can.
+  `OneToOne` to the platform's gravity and centres `AspectRatio` where it can. The owner kept the defined
+  placement, "Keep a defined placement" (2026-11-17): offer it upstream.
 - **The device rule stays beside the retry.** wgpu-core validates against the device's own list
   (`hal::Device::supports_present_scaling`), so on a device without what the modes need `Auto` asks for nothing
   and an explicit mode is a validation error before the HAL is asked.
+
+79 departs from the branch's Metal mapping by the owner's ruling "Touch it only for an explicit mode"
+(2026-11-17). The branch sets the layer's `contentsGravity` on every configuration, `Auto` included (`Auto` and
+`Stretch` both `kCAGravityResize`), so the first configuration overwrites a gravity that an application set on its
+own `CAMetalLayer` (`raw-window-metal` uses a view's own layer, and `Surface::from_layer` takes one), against
+`raw-window-metal`'s "Semantics": a library that is handed a layer "should refrain from doing things like ...
+changing its `contentsGravity`". 79 sets it only for an explicit mode. As wgpu-core resolves `Auto` to the first
+listed mode, the HAL says where `Auto` keeps the surface's own placement
+(`hal::SurfaceCapabilities::auto_keeps_placement`, true for Metal's surfaces), and wgpu-core configures `Auto` there
+as it is. For upstream: the branch's Metal mapping should not set a gravity for `Auto`; 79 goes into 73's PR. Not
+done: restoring the layer's own gravity where `Auto` follows an explicit mode (79's `Auto` changes nothing, so the
+explicit mode's gravity stays). Under wgpu's Vulkan backend on Apple platforms, MoltenVK sets `contentsGravity` itself
+on every swapchain, `kCAGravityResize` without a scaling structure (`MVKSwapchain.mm`, `initCAMetalLayer`; MoltenVK's
+`main` at `5189f8de8`, read 2026-11-17).
 
 Not taken from the branch: its `serde(default)` on `scaling_mode` (no backward-compatibility workarounds, the
 owner's rule) and its filter of `Auto` out of a backend's list (73's backends never list it, as wgpu-hal
@@ -527,6 +545,23 @@ Decided since: **a wrapped adapter's admission** (71). The owner, 2026-11-16: "K
 `create_adapter_from_hal` takes the adapter it is given, and commit 74 documents that one enumeration would not
 offer is the caller's responsibility.
 
+Decided since too: **R1b's five** (the owner, 2026-11-17). The swapchain chain's contract and Vulkan's defined
+gravity are kept (73's upstream notes above), R2 stays a configuration field (77), Metal's layer is left alone under
+`Auto` (79), and 77's linear components stay. One check is open:
+
+- **77's colour on a display: the `#808080` probe frame**, in the owner's next away slot, through the resize lane,
+  which owns window runs. wgpu gives DXGI the background colour as linear components (`#808080` as 0.21586053 per
+  channel, which `GetBackgroundColor` reads back), by Microsoft's note on `SetBackgroundColor`; what DWM composes
+  from them was not seen on a display. The probe is one live-resize run of the resize lane's DX12 window probe on an
+  SDR desktop (HDR off; an HDR desktop is 77's separate review point), with a flip-model window swapchain configured
+  with `SurfaceScalingMode::OneToOne` and `background_color` `#808080` (`SurfaceBackgroundColor { r: 0x80, g: 0x80,
+  b: 0x80 }`), the window growing so that frames leave a strip uncovered, and the probe's gutter-colour column
+  reading that strip's composed pixels from the screen capture, not from the swapchain. The gutter reads `#808080`
+  if the linear encoding is right, and about `#373737` (0.21586053 shown as an encoded value) if DXGI takes encoded
+  components: 77 then gives DXGI the sRGB-encoded components (the bytes over 255) instead, and its DX12 unit test
+  (`a_background_color_is_given_to_dxgi_linear_and_opaque`) and the `scaling_modes` trial's expectation change with
+  it. The run records the adapter, the desktop's colour mode and the `GetBackgroundColor` value beside the reading.
+
 From the coordinator's list for this lane (2026-11-16), each recorded, none built:
 
 - **A hal device's enabled Vulkan features** (the owner: "Ledger it"). `vulkan::Device` gives no
@@ -699,10 +734,12 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   top-left), so an application that asks nothing now stretches, as on DX12. With it NVIDIA no longer answers
   `Outdated` when the window has another size (the `scaling_modes` trial on the RTX 5090: "Success, then Success"
   with any scaling, "Success, then Outdated" without), as the specification allows: an application that
-  reconfigures on `Outdated` alone reconfigures less often during a drag. On Metal every configuration sets the
-  layer's `contentsGravity`, also on a layer the caller made. A configuration made as a struct literal needs the
-  new field, `hal::Device` a new method, an exhaustive match on `hal::SurfaceError` a new variant, and a Vulkan
-  caller of `set_next_swapchain_create_chain` keeps its chain valid past a configuration refused for its scaling.
+  reconfigures on `Outdated` alone reconfigures less often during a drag. On Metal `Auto` leaves the layer's
+  `contentsGravity` as it is (79), also the gravity of an earlier configuration with an explicit mode. A
+  configuration made as a struct literal needs the new field, a `hal::SurfaceCapabilities` literal
+  `auto_keeps_placement` (79), `hal::Device` a new method, an exhaustive match on `hal::SurfaceError` a new variant,
+  and a Vulkan caller of `set_next_swapchain_create_chain` keeps its chain valid past a configuration refused for its
+  scaling.
 - **The capabilities for a device** (commit 76): a `wgpu::custom` backend implements
   `SurfaceInterface::get_capabilities_for_device`.
 - **A background colour** (commit 77): DX12 presents with `Present1` instead of `Present`, with parameters that
@@ -753,7 +790,8 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
 - Commit 7 (Vulkan discard) is tested only by commit 26's `discarded_images`.
 - Commit 24 (Metal) and commit 21's `copy_external_image_to_texture` (WebGL) were type-checked with Rust 1.99.0
   for `aarch64-apple-ios` and `wasm32-unknown-unknown`; nothing ran on those platforms. So were 73's Metal mapping
-  (`contentsGravity`, its refusal of `OneToOne`) and 76's and 77's web backend, and the Metal backend also for
+  (`contentsGravity`, its refusal of `OneToOne`), 79's `Auto` that leaves the gravity alone (its wgpu-core half
+  is pinned on the CPU), and 76's and 77's web backend, and the Metal backend also for
   `aarch64-apple-darwin` with the stable toolchain (1.100.0).
 - 77's background colour was read back from DXGI (`GetBackgroundColor`) on every DX12 adapter here, and frames
   were presented with it; what the compositor shows in the uncovered strip was not captured, on an SDR desktop or
