@@ -753,9 +753,10 @@ pub trait Surface: WasmNotSendSync {
     /// Configure `self` to use `device`.
     ///
     /// Returns [`SurfaceError::UnsupportedScalingMode`] for a
-    /// [`SurfaceConfiguration::scaling_mode`] that it cannot apply. A configuration that fails
-    /// may leave `self` unconfigured: some backends release the previous swapchain before they
-    /// can find out.
+    /// [`SurfaceConfiguration::scaling_mode`] that it cannot apply. A configuration refused for
+    /// what it asks (a scaling mode, a background colour) leaves `self` as it was. One that fails
+    /// otherwise may leave `self` unconfigured: a backend may have released the previous swapchain
+    /// before the failure.
     ///
     /// # Safety
     ///

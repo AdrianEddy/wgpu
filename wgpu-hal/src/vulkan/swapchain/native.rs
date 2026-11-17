@@ -141,6 +141,41 @@ impl NativeSurface {
         conv::surface_scaling_modes(&supported)
     }
 
+    /// Fails where `device` cannot have a swapchain of this surface: it was created without
+    /// `VK_KHR_swapchain`, or its queue family cannot present to the surface
+    /// (VUID-vkQueuePresentKHR-pSwapchains-01292).
+    fn check_device_and_surface(
+        &self,
+        device: &crate::vulkan::Device,
+    ) -> Result<(), crate::SurfaceError> {
+        if !device
+            .shared
+            .enabled_extensions
+            .contains(&khr::swapchain::NAME)
+        {
+            return Err(crate::SurfaceError::Other(
+                "the device was created without VK_KHR_swapchain",
+            ));
+        }
+        // SAFETY: The device's physical device and queue family, and this instance's surface.
+        match unsafe {
+            self.functor.get_physical_device_surface_support(
+                device.shared.physical_device,
+                device.shared.family_index,
+                self.raw,
+            )
+        } {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(crate::SurfaceError::Other(
+                "the device's queue family cannot present to the surface",
+            )),
+            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => Err(crate::SurfaceError::Lost),
+            Err(other) => Err(crate::SurfaceError::Device(
+                super::super::map_host_device_oom_err(other),
+            )),
+        }
+    }
+
     /// Refuses, with [`crate::SurfaceError::UnsupportedScalingMode`], a configuration whose
     /// scaling mode, other than `Auto`, `device` cannot create this surface's swapchain with
     /// ([`present_scaling_refusal`]).
@@ -388,15 +423,28 @@ impl Surface for NativeSurface {
         &self,
         device: &crate::vulkan::Device,
         config: &crate::SurfaceConfiguration,
-        provided_old_swapchain: Option<Box<dyn Swapchain>>,
-    ) -> Result<Box<dyn Swapchain>, crate::SurfaceError> {
+        swapchain: &mut Option<Box<dyn Swapchain>>,
+    ) -> Result<(), crate::SurfaceError> {
         profiling::scope!("Device::create_swapchain");
-        // The present scaling comes first. A configuration refused for its scaling mode leaves
-        // the caller's chain set, for the next configuration: wgpu-core configures `Auto` again
-        // at once without a scaling. Every other configuration consumes the chain
-        // (`Surface::set_next_swapchain_create_chain()`).
+        // Everything that can refuse the configuration comes before the configured swapchain is
+        // released, and the decisions on the caller's chain are taken under its lock:
+        // 1. The device and the surface: a swapchain needs `VK_KHR_swapchain` on the device, and
+        //    presentation to the surface from the device's queue family
+        //    (VUID-vkQueuePresentKHR-pSwapchains-01292), which a device created elsewhere may
+        //    lack (`surface_capabilities` asks of the adapter's family 0). The scaling query
+        //    needs that support too
+        //    (VUID-vkGetPhysicalDeviceSurfaceCapabilities2KHR-pSurfaceInfo-06522). A failure
+        //    consumes the chain.
+        // 2. The present scaling, then the background colour: a configuration refused for what it
+        //    asks leaves the caller's chain set, for the next configuration (wgpu-core configures
+        //    `Auto` again at once without a scaling).
+        // Every other outcome consumes the chain (`Surface::set_next_swapchain_create_chain()`).
         let (create_chain, scaling) = {
             let mut pending_chain = self.next_swapchain_create_chain.lock();
+            if let Err(error) = self.check_device_and_surface(device) {
+                *pending_chain = None;
+                return Err(error);
+            }
             // A caller's chain may give the swapchain its own present scaling. A structure type
             // appears once in a chain, so the configuration's mode then adds none.
             // SAFETY: The contract on `Surface::set_next_swapchain_create_chain()` keeps the
@@ -421,44 +469,23 @@ impl Surface for NativeSurface {
                 }
                 _ => None,
             };
+            if config.background_color.is_some() {
+                return Err(crate::SurfaceError::Other(
+                    "the surface does not support a background color",
+                ));
+            }
             (pending_chain.take(), scaling)
         };
 
-        // A swapchain needs `VK_KHR_swapchain` on the device, and presentation to the surface from
-        // the device's queue family (VUID-vkQueuePresentKHR-pSwapchains-01292), which a device
-        // created elsewhere may lack: `surface_capabilities` asks of the adapter's family 0.
-        if !device
-            .shared
-            .enabled_extensions
-            .contains(&khr::swapchain::NAME)
-        {
-            return Err(crate::SurfaceError::Other(
-                "the device was created without VK_KHR_swapchain",
-            ));
-        }
-        match unsafe {
-            self.functor.get_physical_device_surface_support(
-                device.shared.physical_device,
-                device.shared.family_index,
-                self.raw,
-            )
-        } {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(crate::SurfaceError::Other(
-                    "the device's queue family cannot present to the surface",
-                ))
-            }
-            Err(vk::Result::ERROR_SURFACE_LOST_KHR) => return Err(crate::SurfaceError::Lost),
-            Err(other) => {
-                return Err(crate::SurfaceError::Device(
-                    super::super::map_host_device_oom_err(other),
-                ))
-            }
+        // Accepted: the configured swapchain is released, and retired into the new one.
+        let mut old = swapchain.take();
+        if let Some(ref mut old) = old {
+            // SAFETY: The caller's requirements: nothing derived from it is in use.
+            unsafe { old.release_resources(device) };
         }
         let functor = khr::swapchain::Device::new(&self.instance.raw, &device.shared.raw);
 
-        let old_swapchain = provided_old_swapchain
+        let old_swapchain = old
             .as_ref()
             .map(|osc| osc.as_any().downcast_ref::<NativeSwapchain>().unwrap().raw)
             .unwrap_or(vk::SwapchainKHR::null());
@@ -578,7 +605,7 @@ impl Surface for NativeSurface {
             .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(i))))
             .collect::<Vec<_>>();
 
-        Ok(Box::new(NativeSwapchain {
+        *swapchain = Some(Box::new(NativeSwapchain {
             raw,
             functor,
             device: Arc::clone(&device.shared),
@@ -596,7 +623,8 @@ impl Surface for NativeSurface {
             acquired_suboptimal: false,
             next_present_time: None,
             next_present_chain: None,
-        }))
+        }));
+        Ok(())
     }
 
     #[cfg(windows)]

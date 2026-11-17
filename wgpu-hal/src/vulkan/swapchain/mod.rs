@@ -28,17 +28,22 @@ pub(super) trait Surface: Send + Sync + 'static {
     /// Returns `None` if the surface is not compatible with the adapter.
     fn surface_capabilities(&self, adapter: &super::Adapter) -> Option<crate::SurfaceCapabilities>;
 
-    /// Creates a swapchain for the surface with the given configuration.
+    /// Creates a swapchain for the surface with the given configuration, in place of the surface's
+    /// configured one, `swapchain`.
     ///
-    /// If this is not the first swapchain created for the surface, the old swapchain
-    /// must be provided. [`Swapchain::release_resources`] must be called on the old swapchain
-    /// before calling this method.
+    /// The checks that can refuse the configuration come first, and a refusal leaves `swapchain`
+    /// as it is. Past them, the old swapchain is released ([`Swapchain::release_resources`]) and
+    /// retired into the new one; a failure from there on leaves `swapchain` empty.
+    ///
+    /// # Safety
+    ///
+    /// As for [`crate::Surface::configure`].
     unsafe fn create_swapchain(
         &self,
         device: &super::Device,
         config: &crate::SurfaceConfiguration,
-        provided_old_swapchain: Option<Box<dyn Swapchain>>,
-    ) -> Result<Box<dyn Swapchain>, crate::SurfaceError>;
+        swapchain: &mut Option<Box<dyn Swapchain>>,
+    ) -> Result<(), crate::SurfaceError>;
 
     /// This surface's current display HDR info, if it can report it.
     ///

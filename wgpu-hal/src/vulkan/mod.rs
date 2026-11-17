@@ -350,15 +350,19 @@ impl Surface {
     /// The device extension itself must be enabled at device creation, for example
     /// with [`Adapter::open_with_callback()`](super::vulkan::Adapter::open_with_callback).
     ///
-    /// The next configuration consumes the chain, whether it succeeds or fails, except
-    /// one that fails with [`SurfaceError::UnsupportedScalingMode`](crate::SurfaceError::UnsupportedScalingMode):
-    /// that leaves the chain set for the configuration after it. (wgpu-core configures a
-    /// surface whose `Auto` scaling mode was refused again at once without a scaling, which
-    /// consumes it; through wgpu, a `configure` that fails with
-    /// `ConfigureSurfaceError::UnsupportedScalingMode` leaves it set, and so does one that
-    /// fails validation, which never reaches wgpu-hal.) A later call replaces
-    /// a chain that hasn't been consumed yet, and a null `chain` withdraws it. If the surface
-    /// is dropped first, the chain is discarded unread. Every configuration creates a new
+    /// The next configuration consumes the chain, whether it succeeds or fails, unless it is
+    /// refused for what it asks:
+    /// - a scaling mode that the surface cannot apply for it
+    ///   ([`SurfaceError::UnsupportedScalingMode`](crate::SurfaceError::UnsupportedScalingMode));
+    /// - a [`background_color`](crate::SurfaceConfiguration::background_color), which Vulkan
+    ///   surfaces do not support.
+    ///
+    /// Those leave the chain set, for the configuration after it. Through wgpu, any
+    /// configuration that wgpu refuses before it reaches wgpu-hal, for any reason, leaves the
+    /// chain set as well, and wgpu-core configures a surface whose `Auto` scaling mode was
+    /// refused again at once without a scaling, which consumes it. A later call replaces a
+    /// chain that hasn't been consumed yet, and a null `chain` withdraws it. If the surface is
+    /// dropped first, the chain is discarded unread. Every configuration creates a new
     /// swapchain, so you must set the chain again before each configuration, including on
     /// resize.
     ///
