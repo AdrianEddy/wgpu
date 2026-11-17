@@ -174,11 +174,14 @@ pub enum CompositeAlphaMode {
 ///   `VkSwapchainPresentScalingCreateInfoKHR`, where the device has
 ///   `swapchainMaintenance1` and the surface supports the mode, with the gravity
 ///   that each mode documents, for every present mode the surface lists.
-/// - Metal: the layer's `contentsGravity`, which every configuration sets:
+/// - Metal: the layer's `contentsGravity`, which only an explicit mode sets:
 ///   `kCAGravityResize` (the layer's default) for [`Stretch`](Self::Stretch),
 ///   `kCAGravityResizeAspect` for [`AspectRatio`](Self::AspectRatio).
 ///   [`OneToOne`](Self::OneToOne) is not listed: it would take a corner gravity,
 ///   whose vertical meaning depends on the layer's `contentsAreFlipped`.
+///   [`Auto`](Self::Auto) leaves the gravity as it is, so a layer that the
+///   application made keeps the gravity it set; that is also the gravity of an
+///   earlier configuration with an explicit mode.
 /// - OpenGL, WebGPU: no control.
 #[repr(C)]
 #[derive(Debug, ConstDefault!, Clone, Copy, PartialEq, Eq, Hash)]
@@ -188,7 +191,8 @@ pub enum SurfaceScalingMode {
     /// The first of [`Stretch`](Self::Stretch), [`AspectRatio`](Self::AspectRatio)
     /// and [`OneToOne`](Self::OneToOne) that the surface lists, in that order;
     /// the platform's own placement where it lists none, or where the platform
-    /// refuses the mode chosen when the surface is configured.
+    /// refuses the mode chosen when the surface is configured. On Metal, the
+    /// layer's `contentsGravity` as it is, which `Auto` does not change.
     #[custom(default)]
     Auto = 0,
     /// The texture is scaled to the surface's size, whatever its aspect ratio.
@@ -647,7 +651,8 @@ pub struct SurfaceCapabilities {
     /// [`SurfaceScalingMode::Auto`], which is always supported and never listed.
     /// Each can be combined with every mode in [`present_modes`](Self::present_modes).
     /// The order is not significant: `Auto` takes the first of `Stretch`,
-    /// `AspectRatio` and `OneToOne` that is listed. A listed mode can still be
+    /// `AspectRatio` and `OneToOne` that is listed (on Metal, it keeps the layer's
+    /// `contentsGravity` instead). A listed mode can still be
     /// refused when the surface is configured (see [`SurfaceScalingMode`]).
     ///
     /// Empty when the platform gives no control over the placement of a texture
@@ -979,7 +984,8 @@ pub struct SurfaceConfiguration<V> {
     ///
     /// [`SurfaceScalingMode::Auto`] (the default) is always supported: it is the first of
     /// `Stretch`, `AspectRatio` and `OneToOne` that the surface lists, and the platform's own
-    /// placement where it lists none or refuses the mode chosen. Any other mode must be listed
+    /// placement where it lists none or refuses the mode chosen. On Metal it leaves the layer's
+    /// `contentsGravity` as it is. Any other mode must be listed
     /// in [`SurfaceCapabilities::scaling_modes`], and configuring fails with a validation error
     /// where the platform refuses it.
     pub scaling_mode: SurfaceScalingMode,

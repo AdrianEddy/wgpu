@@ -17,19 +17,25 @@ use wgpu_sync::{Lazy, Mutex, RwLock};
 
 use super::OsFeatures;
 
-/// The layer's `contentsGravity` for a texture presented with `mode`, or `None` for a mode the
-/// backend does not offer. It places a drawable whose size differs from the layer's bounds:
-/// `kCAGravityResize`, the layer's default, stretches it (also for `Auto`), and
-/// `kCAGravityResizeAspect` keeps its aspect ratio, centered. `OneToOne` would take a corner
-/// gravity, whose vertical meaning depends on the layer's `contentsAreFlipped`: not offered.
+/// The layer's `contentsGravity` for a texture presented with an explicit `mode`, or `None` for
+/// a mode the backend does not offer. It places a drawable whose size differs from the layer's
+/// bounds: `kCAGravityResize`, the layer's default, stretches it, and `kCAGravityResizeAspect`
+/// keeps its aspect ratio, centered. `OneToOne` would take a corner gravity, whose vertical
+/// meaning depends on the layer's `contentsAreFlipped`: not offered.
+///
+/// `Auto` names no gravity: `configure` leaves the layer's as it is. The layer may be the
+/// application's (`raw-window-metal` uses a view's own `CAMetalLayer`, and
+/// `Surface::from_layer` takes one), and `contentsGravity` is outside what a renderer that is
+/// handed a layer should change (`raw-window-metal`'s "Semantics"), so only an explicit mode,
+/// which the application asks for, changes it.
 fn contents_gravity(mode: wgt::SurfaceScalingMode) -> Option<&'static CALayerContentsGravity> {
     use wgt::SurfaceScalingMode as Mode;
     match mode {
         // SAFETY: Immutable constants of Core Animation.
-        Mode::Auto | Mode::Stretch => Some(unsafe { kCAGravityResize }),
+        Mode::Stretch => Some(unsafe { kCAGravityResize }),
         // SAFETY: As above.
         Mode::AspectRatio => Some(unsafe { kCAGravityResizeAspect }),
-        Mode::OneToOne => None,
+        Mode::Auto | Mode::OneToOne => None,
     }
 }
 
@@ -284,9 +290,13 @@ impl crate::Surface for super::Surface {
     ) -> Result<(), crate::SurfaceError> {
         log::debug!("build swapchain {config:?}");
 
-        // Before anything else: a refusal leaves the surface as it is.
-        let gravity = contents_gravity(config.scaling_mode)
-            .ok_or(crate::SurfaceError::UnsupportedScalingMode)?;
+        // Before anything else: a refusal leaves the surface as it is. `Auto` sets no gravity.
+        let gravity = match config.scaling_mode {
+            wgt::SurfaceScalingMode::Auto => None,
+            mode => {
+                Some(contents_gravity(mode).ok_or(crate::SurfaceError::UnsupportedScalingMode)?)
+            }
+        };
         if config.background_color.is_some() {
             return Err(crate::SurfaceError::Other(
                 "the surface does not support a background color",
@@ -379,7 +389,9 @@ impl crate::Surface for super::Surface {
         };
         let colorspace = colorspace_name.and_then(|name| CGColorSpace::with_name(Some(name)));
         render_layer.setColorspace(colorspace.as_deref());
-        render_layer.setContentsGravity(gravity);
+        if let Some(gravity) = gravity {
+            render_layer.setContentsGravity(gravity);
+        }
 
         // this gets ignored on iOS for certain OS/device combinations (iphone5s iOS 10.3)
         render_layer.setMaximumDrawableCount(config.maximum_frame_latency as usize + 1);

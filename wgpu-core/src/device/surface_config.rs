@@ -173,9 +173,14 @@ pub(crate) fn validate_surface_configuration(
         config.composite_alpha_mode = new_alpha_mode;
     }
     match config.scaling_mode {
-        // `Auto` is the first of these that the surface offers, and the backend's own placement
-        // where it offers none. (`Surface::configure` configures it again as `Auto` where the
-        // backend refuses the mode chosen.)
+        // A surface that keeps its own placement for `Auto` (Metal: the layer's
+        // `contentsGravity`, which the application may have set) is configured with `Auto`.
+        wgt::SurfaceScalingMode::Auto if caps.auto_keeps_placement => {
+            api_log!("Scaling mode Auto keeps the surface's own placement");
+        }
+        // Elsewhere `Auto` is the first of these that the surface offers, and the backend's own
+        // placement where it offers none. (`Surface::configure` configures it again as `Auto`
+        // where the backend refuses the mode chosen.)
         wgt::SurfaceScalingMode::Auto => {
             if let Some(chosen) = [
                 wgt::SurfaceScalingMode::Stretch,
@@ -228,6 +233,7 @@ mod surface_configuration_tests {
             present_modes: vec![wgt::PresentMode::Fifo],
             composite_alpha_modes: vec![wgt::CompositeAlphaMode::Opaque],
             scaling_modes: Vec::new(),
+            auto_keeps_placement: false,
             supports_background_color: false,
         }
     }
@@ -451,6 +457,35 @@ mod surface_configuration_tests {
         let mut config = srgb_config(wgt::SurfaceScalingMode::Auto);
         validate_surface_configuration(&mut config, &caps, 4096).unwrap();
         assert_eq!(config.scaling_mode, wgt::SurfaceScalingMode::Auto);
+    }
+
+    /// On a surface that keeps its own placement for `Auto` (Metal's layer), `Auto` stays `Auto`
+    /// though the surface lists modes, a listed mode is configured as asked, and an unlisted one
+    /// fails validation.
+    #[test]
+    fn auto_scaling_stays_auto_where_the_surface_keeps_its_placement() {
+        use wgt::SurfaceScalingMode::{AspectRatio, Auto, OneToOne, Stretch};
+        let caps = hal::SurfaceCapabilities {
+            auto_keeps_placement: true,
+            ..srgb_caps(vec![Stretch, AspectRatio])
+        };
+        for mode in [Auto, Stretch, AspectRatio] {
+            let mut config = srgb_config(mode);
+            validate_surface_configuration(&mut config, &caps, 4096).unwrap();
+            assert_eq!(config.scaling_mode, mode);
+        }
+        let mut config = srgb_config(OneToOne);
+        let err = validate_surface_configuration(&mut config, &caps, 4096).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ConfigureSurfaceError::UnsupportedScalingMode {
+                    requested: OneToOne,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
     }
 
     /// A listed scaling mode is configured as asked.

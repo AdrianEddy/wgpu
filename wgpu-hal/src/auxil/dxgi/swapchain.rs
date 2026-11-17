@@ -303,6 +303,7 @@ pub(crate) fn surface_capabilities(
         composite_alpha_modes,
         scaling_modes: target.scaling_modes(),
         supports_background_color: target.supports_background_color(),
+        auto_keeps_placement: false,
     }
 }
 

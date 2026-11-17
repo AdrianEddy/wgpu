@@ -379,6 +379,7 @@ impl Surface for NativeSurface {
                 .collect(),
             composite_alpha_modes: conv::map_vk_composite_alpha(caps.supported_composite_alpha),
             scaling_modes,
+            auto_keeps_placement: false,
             supports_background_color: false,
         })
     }
