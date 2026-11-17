@@ -189,7 +189,9 @@ fn a_device_without_the_features_wgpu_hal_would_use_takes_the_paths_without_them
 
 /// On each adapter with a headless surface, a device created without `VK_KHR_swapchain` cannot
 /// configure the surface: an error, before wgpu-hal calls a swapchain function the device lacks.
-/// Before, it loaded and called them, and panicked.
+/// Before, it loaded and called them, and panicked. With a scaling mode, the device's failure
+/// comes before the scaling decision, which would query the surface for the device, and it
+/// consumes the caller's swapchain creation chain.
 #[test]
 fn a_device_without_the_swapchain_extension_cannot_configure_a_surface() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
@@ -244,23 +246,53 @@ fn a_device_without_the_swapchain_extension_cannot_configure_a_surface() {
             )
         }
         .unwrap();
-        let config = super::config(&caps);
-        let configured = std::panic::catch_unwind(AssertUnwindSafe(|| {
-            // SAFETY: Nothing uses the surface.
-            unsafe { surface.configure(&open.device, &config) }
-        }));
-        match configured {
-            Err(_) => wrong.push(alloc::format!("{:?}: panicked", exposed.info.name)),
-            Ok(Ok(())) => {
-                // SAFETY: Configured just now.
-                unsafe { surface.unconfigure(&open.device) };
-                wrong.push(alloc::format!("{:?}: configured", exposed.info.name));
+        let pending = || {
+            surface
+                .inner
+                .as_any()
+                .downcast_ref::<super::super::swapchain::NativeSurface>()
+                .unwrap()
+                .has_pending_swapchain_create_chain()
+        };
+        // A caller's chain, which no swapchain is created with here.
+        let mut format_list = vk::ImageFormatListCreateInfo::default();
+        for scaling_mode in [
+            wgt::SurfaceScalingMode::Auto,
+            wgt::SurfaceScalingMode::Stretch,
+        ] {
+            let config = crate::SurfaceConfiguration {
+                scaling_mode,
+                ..super::config(&caps)
+            };
+            // SAFETY: A valid chain, which stays valid until the surface is dropped.
+            unsafe { surface.set_next_swapchain_create_chain(<*mut _>::cast(&mut format_list)) };
+            let configured = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                // SAFETY: Nothing uses the surface.
+                unsafe { surface.configure(&open.device, &config) }
+            }));
+            let name = &exposed.info.name;
+            match configured {
+                Err(_) => wrong.push(alloc::format!("{name:?}, {scaling_mode:?}: panicked")),
+                Ok(Ok(())) => {
+                    // SAFETY: Configured just now.
+                    unsafe { surface.unconfigure(&open.device) };
+                    wrong.push(alloc::format!("{name:?}, {scaling_mode:?}: configured"));
+                }
+                Ok(Err(crate::SurfaceError::Other(reason))) => {
+                    std::println!("{name:?}, {scaling_mode:?}: refused: {reason}")
+                }
+                Ok(Err(other)) => {
+                    wrong.push(alloc::format!("{name:?}, {scaling_mode:?}: {other:?}"))
+                }
             }
-            Ok(Err(crate::SurfaceError::Other(reason))) => {
-                std::println!("{:?}: refused: {reason}", exposed.info.name)
+            if pending() {
+                wrong.push(alloc::format!(
+                    "{name:?}, {scaling_mode:?}: the chain was kept"
+                ));
             }
-            Ok(Err(other)) => wrong.push(alloc::format!("{:?}: {other:?}", exposed.info.name)),
         }
+        // SAFETY: Null.
+        unsafe { surface.set_next_swapchain_create_chain(core::ptr::null_mut()) };
         drop(open);
     }
     assert!(wrong.is_empty(), "{wrong:#?}");
@@ -387,8 +419,10 @@ fn a_device_with_the_extension_but_not_swapchain_maintenance1_waits_for_the_queu
 /// `SurfaceError::UnsupportedScalingMode`, before it creates a swapchain, which the feature would
 /// need (VUID-VkSwapchainPresentScalingCreateInfoKHR-swapchainMaintenance1-10154), and takes one
 /// with `Auto`, which asks for nothing, and presents. The surface needn't list the modes: the
-/// device's refusal comes first. A refusal leaves the caller's swapchain creation chain set, a
-/// null chain withdraws it, and the configuration with `Auto` consumes it.
+/// device's refusal comes first. A configuration with a background colour, which a native Vulkan
+/// surface does not support, is refused too. A refusal keeps the configured swapchain, which still
+/// presents, and leaves the caller's swapchain creation chain set; a null chain withdraws it, and
+/// the configuration with `Auto` consumes it.
 #[test]
 fn a_device_without_swapchain_maintenance1_refuses_scaling_modes() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
@@ -468,29 +502,57 @@ fn a_device_without_swapchain_maintenance1_refuses_scaling_modes() {
                 .unwrap()
                 .has_pending_swapchain_create_chain()
         };
+        // SAFETY: The device's own fence.
+        let fence = unsafe { device.create_fence() }.unwrap();
+        let mut value = 0;
+        // A configured swapchain, which every refusal below keeps.
+        // SAFETY: Nothing uses the surface, which is not configured; the submission completes
+        // before the next configuration.
+        unsafe {
+            surface.configure(&device, &config).unwrap();
+            value += 1;
+            super::present_frame(&device, &queue, &surface, &fence, value);
+        }
         // SAFETY: A valid chain, which stays valid until the surface is dropped.
         unsafe { surface.set_next_swapchain_create_chain(<*mut _>::cast(&mut format_list)) };
-        for scaling_mode in [
+        let refused = [
             wgt::SurfaceScalingMode::Stretch,
             wgt::SurfaceScalingMode::AspectRatio,
             wgt::SurfaceScalingMode::OneToOne,
-        ] {
-            let config = crate::SurfaceConfiguration {
-                scaling_mode,
-                ..config.clone()
-            };
-            // SAFETY: Nothing uses the surface, which is not configured.
-            match unsafe { surface.configure(&device, &config) } {
-                Err(crate::SurfaceError::UnsupportedScalingMode) => {}
-                Ok(()) => {
+        ]
+        .map(|scaling_mode| crate::SurfaceConfiguration {
+            scaling_mode,
+            ..config.clone()
+        })
+        .into_iter()
+        .chain([crate::SurfaceConfiguration {
+            background_color: Some(wgt::SurfaceBackgroundColor {
+                r: 0x2b,
+                g: 0x33,
+                b: 0x3d,
+            }),
+            ..config.clone()
+        }]);
+        for refused in refused {
+            let asked = (refused.scaling_mode, refused.background_color);
+            // SAFETY: Nothing uses the surface's swapchain: each frame's submission completed.
+            match (asked.1, unsafe { surface.configure(&device, &refused) }) {
+                (None, Err(crate::SurfaceError::UnsupportedScalingMode))
+                | (Some(_), Err(crate::SurfaceError::Other(_))) => {}
+                (_, Ok(())) => {
                     // SAFETY: Configured just now, and nothing uses it.
                     unsafe { surface.unconfigure(&device) };
-                    panic!("{:?}: configured with {scaling_mode:?}", exposed.info.name);
+                    panic!("{:?}: configured with {asked:?}", exposed.info.name);
                 }
-                Err(other) => panic!("{:?}: {scaling_mode:?}: {other:?}", exposed.info.name),
+                (_, Err(other)) => panic!("{:?}: {asked:?}: {other:?}", exposed.info.name),
             }
-            // The refusal leaves the caller's chain for the next configuration.
-            assert!(pending(), "{:?}: {scaling_mode:?}", exposed.info.name);
+            // The refusal leaves the caller's chain for the next configuration, and keeps the
+            // configured swapchain, which presents a frame.
+            assert!(pending(), "{:?}: {asked:?}", exposed.info.name);
+            value += 1;
+            // SAFETY: Still configured, as asserted by the present; the submission completes
+            // before the next configuration.
+            unsafe { super::present_frame(&device, &queue, &surface, &fence, value) };
         }
         // A null chain withdraws it.
         // SAFETY: Null.
@@ -498,15 +560,14 @@ fn a_device_without_swapchain_maintenance1_refuses_scaling_modes() {
         assert!(!pending());
         // SAFETY: As above.
         unsafe { surface.set_next_swapchain_create_chain(<*mut _>::cast(&mut format_list)) };
-        // SAFETY: The device's own fence.
-        let fence = unsafe { device.create_fence() }.unwrap();
         // SAFETY: Each call meets wgpu-hal's requirements: the submission completes before the
-        // surface is unconfigured.
+        // surface is configured again and unconfigured.
         unsafe {
             surface.configure(&device, &config).unwrap();
             // `Auto` consumed the chain.
             assert!(!pending());
-            super::present_frame(&device, &queue, &surface, &fence, 1);
+            value += 1;
+            super::present_frame(&device, &queue, &surface, &fence, value);
             surface.unconfigure(&device);
             queue.wait_for_idle().unwrap();
             device.destroy_fence(fence);

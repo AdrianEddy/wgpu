@@ -644,10 +644,12 @@ impl Surface for DxgiSurface {
         &self,
         device: &crate::vulkan::Device,
         config: &crate::SurfaceConfiguration,
-        provided_old_swapchain: Option<Box<dyn Swapchain>>,
-    ) -> Result<Box<dyn Swapchain>, crate::SurfaceError> {
+        configured: &mut Option<Box<dyn Swapchain>>,
+    ) -> Result<(), crate::SurfaceError> {
         profiling::scope!("DxgiSurface::create_swapchain");
 
+        // Everything that can refuse the configuration comes before the configured swapchain is
+        // released: the scaling mode, then the background colour.
         let scaling = self
             .target
             .dxgi_scaling(config.scaling_mode)
@@ -664,9 +666,12 @@ impl Surface for DxgiSurface {
             .background_color
             .filter(|_| scaling == DXGI_SCALING_NONE);
 
-        // `Surface::configure` already released the resources of the old swapchain. DXGI allows
-        // only one swapchain per window, so the old one must be gone before the new one is created.
-        drop(provided_old_swapchain);
+        // Accepted: the configured swapchain is released and dropped. DXGI allows only one
+        // swapchain per window, so the old one must be gone before the new one is created.
+        if let Some(mut old) = configured.take() {
+            // SAFETY: The caller's requirements: nothing derived from it is in use.
+            unsafe { old.release_resources(device) };
+        }
 
         let dxgi_instance = self.dxgi_instance();
         let interop = device
@@ -854,7 +859,7 @@ impl Surface for DxgiSurface {
             config.present_mode,
         );
 
-        Ok(Box::new(DxgiSwapchain {
+        *configured = Some(Box::new(DxgiSwapchain {
             device: Arc::clone(&device.shared),
             swapchain,
             waitable,
@@ -869,7 +874,8 @@ impl Surface for DxgiSurface {
             queue: interop.queue.clone(),
             interop_progress,
             interop_progress_value: 0,
-        }))
+        }));
+        Ok(())
     }
 
     fn as_any(&self) -> &dyn Any {
