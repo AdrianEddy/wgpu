@@ -29,6 +29,10 @@ pub(crate) struct NativeSurface {
     /// Set only through
     /// [`Surface::set_next_swapchain_create_chain()`](crate::vulkan::Surface::set_next_swapchain_create_chain).
     next_swapchain_create_chain: Mutex<Option<PnextChain>>,
+    /// The functions with which the instance queries the present scaling that the surface
+    /// supports (`VK_KHR_get_surface_capabilities2`), loaded once, where the instance can query it
+    /// ([`Self::queries_present_scaling`]).
+    present_scaling_query: Option<khr::get_surface_capabilities2::Instance>,
 }
 
 impl NativeSurface {
@@ -40,6 +44,20 @@ impl NativeSurface {
         #[cfg(not(windows))]
         let _ = hwnd;
         let functor = khr::surface::Instance::new(&instance.shared.entry, &instance.shared.raw);
+        // The instance can query the present scaling that a surface supports where it has
+        // `VK_KHR_get_surface_capabilities2` and a surface maintenance extension, on which the
+        // swapchain maintenance extension of a device depends.
+        let extensions = &instance.shared.extensions;
+        let present_scaling_query = (extensions.contains(&khr::get_surface_capabilities2::NAME)
+            && super::super::adapter::SWAPCHAIN_MAINTENANCE1
+                .iter()
+                .any(|(_, surface_extension)| extensions.contains(surface_extension)))
+        .then(|| {
+            khr::get_surface_capabilities2::Instance::new(
+                &instance.shared.entry,
+                &instance.shared.raw,
+            )
+        });
         Self {
             raw,
             functor,
@@ -47,6 +65,7 @@ impl NativeSurface {
             #[cfg(windows)]
             hdr_source: hwnd.map(|wh| crate::auxil::dxgi::hdr::DxgiHdrSource::new(wh.0)),
             next_swapchain_create_chain: Mutex::new(None),
+            present_scaling_query,
         }
     }
 
@@ -70,31 +89,28 @@ impl NativeSurface {
     }
 
     /// Whether the instance can query the present scaling that the surface supports: it has
-    /// `VK_KHR_get_surface_capabilities2` and a surface maintenance extension. The swapchain
-    /// maintenance extension of a device depends on the latter.
+    /// `VK_KHR_get_surface_capabilities2` and a surface maintenance extension, and the surface
+    /// loaded the query's functions at its creation.
     fn queries_present_scaling(&self) -> bool {
-        let extensions = &self.instance.extensions;
-        extensions.contains(&khr::get_surface_capabilities2::NAME)
-            && super::super::adapter::SWAPCHAIN_MAINTENANCE1
-                .iter()
-                .any(|(_, surface_extension)| extensions.contains(surface_extension))
+        self.present_scaling_query.is_some()
     }
 
     /// What the surface supports of present scaling with `present_mode`
-    /// (`VkSurfacePresentScalingCapabilitiesKHR`).
+    /// (`VkSurfacePresentScalingCapabilitiesKHR`), or `VK_ERROR_EXTENSION_NOT_PRESENT` where the
+    /// instance cannot query it ([`Self::queries_present_scaling`]).
     ///
     /// # Safety
     ///
-    /// - [`Self::queries_present_scaling`] must be true.
-    /// - `present_mode` must be one that the surface lists for `physical_device`
-    ///   (VUID-VkSurfacePresentModeKHR-presentMode-07780).
+    /// `present_mode` must be one that the surface lists for `physical_device`
+    /// (VUID-VkSurfacePresentModeKHR-presentMode-07780).
     unsafe fn present_scaling_capabilities(
         &self,
         physical_device: vk::PhysicalDevice,
         present_mode: vk::PresentModeKHR,
     ) -> Result<vk::SurfacePresentScalingCapabilitiesEXT<'static>, vk::Result> {
-        let functor =
-            khr::get_surface_capabilities2::Instance::new(&self.instance.entry, &self.instance.raw);
+        let Some(functor) = &self.present_scaling_query else {
+            return Err(vk::Result::ERROR_EXTENSION_NOT_PRESENT);
+        };
         let mut scaling = vk::SurfacePresentScalingCapabilitiesEXT::default();
         let mut caps = vk::SurfaceCapabilities2KHR::default().push_next(&mut scaling);
         let mut mode = vk::SurfacePresentModeEXT::default().present_mode(present_mode);
@@ -128,8 +144,7 @@ impl NativeSurface {
             .iter()
             .filter(|&&mode| conv::map_vk_present_mode(mode).is_some())
         {
-            // SAFETY: The instance has the extensions, and `present_mode` is one the surface
-            // lists.
+            // SAFETY: `present_mode` is one the surface lists.
             match unsafe { self.present_scaling_capabilities(adapter.raw, present_mode) } {
                 Ok(caps) => supported.push(conv::PresentScalingSupport::of(&caps)),
                 Err(e) => {
@@ -188,8 +203,7 @@ impl NativeSurface {
             device.shared.swapchain_maintenance1,
             self.queries_present_scaling(),
             || {
-                // SAFETY: `present_scaling_refusal` asks only where the instance can query. The
-                // present mode of a valid configuration is one the surface lists.
+                // SAFETY: The present mode of a valid configuration is one the surface lists.
                 unsafe {
                     self.present_scaling_capabilities(
                         device.shared.physical_device,

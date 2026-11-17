@@ -10,6 +10,7 @@ mod enabled_features;
 mod injected;
 mod present_fences;
 mod queue_lock;
+mod surface_queries;
 mod teardown;
 
 use alloc::{vec, vec::Vec};
@@ -32,6 +33,14 @@ fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, supe
         std::println!("skipped: no Vulkan");
         return None;
     };
+    headless_instance_of(entry, flags)
+}
+
+/// As [`headless_instance`], with the instance functions that `entry` looks up.
+fn headless_instance_of(
+    entry: ash::Entry,
+    flags: wgt::InstanceFlags,
+) -> Option<(super::Instance, super::Surface)> {
     // SAFETY: No requirements.
     let version = unsafe { entry.try_enumerate_instance_version() }
         .unwrap()
