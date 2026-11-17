@@ -169,6 +169,9 @@ pub enum ConfigureSurfaceError {
         requested: wgt::CompositeAlphaMode,
         available: Vec<wgt::CompositeAlphaMode>,
     },
+    /// The scaling mode could not be applied. Where `available` does not contain `requested`,
+    /// the surface does not list it; where it does, the platform refused a listed mode for this
+    /// configuration (on Vulkan, an extent outside the surface's range for scaled presentation).
     #[error(
         "The requested scaling mode {requested:?} could not be applied; supported modes: {available:?}"
     )]

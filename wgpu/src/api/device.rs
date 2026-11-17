@@ -1085,11 +1085,18 @@ impl RequestDeviceError {
     ///
     /// Its variant is the reason, to match on: a limit better than the adapter allows
     /// ([`LimitsExceeded`], whose [`FailedLimit`] names the limit and both values), features the
-    /// adapter does not support, experimental features requested without the opt-in, or a device
-    /// that was lost or ran out of memory.
+    /// adapter does not support, experimental features requested without the opt-in, features
+    /// outside those a hal device was opened with ([`FeaturesNotOpened`], from
+    /// [`Adapter::create_device_from_hal`](crate::Adapter::create_device_from_hal)), an adapter
+    /// that already made a device under strict WebGPU compliance ([`AdapterConsumed`]), timestamp
+    /// normalization that could not be set up ([`TimestampNormalizerInitFailed`]), or a device that
+    /// was lost or ran out of memory. The enum is non-exhaustive: later versions may add reasons.
     ///
     /// [`LimitsExceeded`]: wgc::instance::RequestDeviceError::LimitsExceeded
     /// [`FailedLimit`]: wgc::limits::FailedLimit
+    /// [`FeaturesNotOpened`]: wgc::instance::RequestDeviceError::FeaturesNotOpened
+    /// [`AdapterConsumed`]: wgc::instance::RequestDeviceError::AdapterConsumed
+    /// [`TimestampNormalizerInitFailed`]: wgc::instance::RequestDeviceError::TimestampNormalizerInitFailed
     #[cfg(wgpu_core)]
     pub fn as_core(&self) -> Option<&wgc::instance::RequestDeviceError> {
         match &self.inner {

@@ -63,6 +63,13 @@ pub enum CurrentSurfaceTexture {
     /// The underlying surface has changed, and therefore the surface configuration is outdated.
     ///
     /// Call [`Surface::configure()`] and try again.
+    ///
+    /// A change of the window's size may not be reported, here or as [`Self::Suboptimal`]: DX12,
+    /// Metal and OpenGL never report one, and a Vulkan swapchain with a present scaling (which
+    /// [`SurfaceScalingMode::Auto`](crate::SurfaceScalingMode::Auto) chooses where the surface
+    /// lists one) may present the texture scaled instead, as NVIDIA's driver does. Configure the
+    /// surface again when the window's size changes, and take `Outdated` and `Suboptimal` as a
+    /// fallback.
     Outdated,
     /// The surface has been lost and needs to be recreated.
     ///
