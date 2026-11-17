@@ -153,7 +153,8 @@ impl super::Instance {
             // SAFETY: A physical device of this instance.
             let api_version =
                 unsafe { self.shared.raw.get_physical_device_properties(device) }.api_version;
-            let Some(properties2) = self.shared.properties2(api_version) else {
+            let effective_version = self.shared.effective_device_version(api_version);
+            let Some(properties2) = self.shared.properties2(effective_version) else {
                 continue;
             };
 

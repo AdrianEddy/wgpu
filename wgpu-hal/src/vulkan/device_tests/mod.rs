@@ -45,13 +45,14 @@ fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, supe
         std::println!("skipped: no VK_EXT_headless_surface");
         return None;
     }
-    let mut extensions = super::Instance::desired_extensions(&entry, version, flags).unwrap();
-    extensions.push(ext::headless_surface::NAME);
-    let app_info = vk::ApplicationInfo::default().api_version(if version < vk::API_VERSION_1_1 {
+    let api_version = if version < vk::API_VERSION_1_1 {
         vk::API_VERSION_1_0
     } else {
         vk::API_VERSION_1_3
-    });
+    };
+    let mut extensions = super::Instance::desired_extensions(&entry, api_version, flags).unwrap();
+    extensions.push(ext::headless_surface::NAME);
+    let app_info = vk::ApplicationInfo::default().api_version(api_version);
     let names = extensions
         .iter()
         .map(|name| name.as_ptr())
@@ -71,7 +72,7 @@ fn headless_instance(flags: wgt::InstanceFlags) -> Option<(super::Instance, supe
         super::Instance::from_raw(
             entry.clone(),
             raw,
-            version,
+            api_version,
             0,
             None,
             extensions,
@@ -104,12 +105,13 @@ fn plain_instance() -> Option<super::Instance> {
     let version = unsafe { entry.try_enumerate_instance_version() }
         .unwrap()
         .unwrap_or(vk::API_VERSION_1_0);
-    let extensions = super::Instance::desired_extensions(&entry, version, flags).unwrap();
-    let app_info = vk::ApplicationInfo::default().api_version(if version < vk::API_VERSION_1_1 {
+    let api_version = if version < vk::API_VERSION_1_1 {
         vk::API_VERSION_1_0
     } else {
         vk::API_VERSION_1_3
-    });
+    };
+    let extensions = super::Instance::desired_extensions(&entry, api_version, flags).unwrap();
+    let app_info = vk::ApplicationInfo::default().api_version(api_version);
     let names = extensions
         .iter()
         .map(|name| name.as_ptr())
@@ -124,7 +126,7 @@ fn plain_instance() -> Option<super::Instance> {
         super::Instance::from_raw(
             entry,
             raw,
-            version,
+            api_version,
             0,
             None,
             extensions,

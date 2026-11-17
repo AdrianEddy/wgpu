@@ -1,3 +1,4 @@
+mod api_version;
 mod downlevel;
 mod hal_adapter;
 mod injected;
@@ -81,6 +82,17 @@ pub const FLAGS: [wgpu::InstanceFlags; 2] =
 /// (`VK_EXT_layer_settings`).
 /// `None`, having printed why, without Vulkan.
 pub fn instance(flags: wgpu::InstanceFlags) -> Option<(wgpu::Instance, Option<Messenger>)> {
+    instance_created_for(flags, None, true)
+}
+
+/// As [`instance`], but created for Vulkan `api_version` (or, for `None`, as
+/// `wgpu_hal::vulkan::Instance::init` creates its own), and without
+/// `VK_KHR_get_physical_device_properties2` unless `with_properties2`.
+pub fn instance_created_for(
+    flags: wgpu::InstanceFlags,
+    api_version: Option<u32>,
+    with_properties2: bool,
+) -> Option<(wgpu::Instance, Option<Messenger>)> {
     // SAFETY: Loading the Vulkan library has no requirements.
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
         println!("skipped: no Vulkan");
@@ -96,8 +108,17 @@ pub fn instance(flags: wgpu::InstanceFlags) -> Option<(wgpu::Instance, Option<Me
         && layers
             .iter()
             .any(|layer| layer.layer_name_as_c_str() == Ok(VALIDATION_LAYER));
+    // As `wgpu_hal::vulkan::Instance::init` does, by default.
+    let api_version = api_version.unwrap_or(if version < vk::API_VERSION_1_1 {
+        vk::API_VERSION_1_0
+    } else {
+        vk::API_VERSION_1_3
+    });
     let mut extensions =
-        wgpu_hal::vulkan::Instance::desired_extensions(&entry, version, flags).unwrap();
+        wgpu_hal::vulkan::Instance::desired_extensions(&entry, api_version, flags).unwrap();
+    if !with_properties2 {
+        extensions.retain(|&name| name != ash::khr::get_physical_device_properties2::NAME);
+    }
     let validation = validation && extensions.contains(&ext::debug_utils::NAME);
     // SAFETY: No requirements.
     let layer_settings = validation
@@ -111,12 +132,7 @@ pub fn instance(flags: wgpu::InstanceFlags) -> Option<(wgpu::Instance, Option<Me
     println!(
         "{flags:?}, validation layer: {validation}, thread-safety checker set on: {layer_settings}"
     );
-    // As `wgpu_hal::vulkan::Instance::init` does.
-    let app_info = vk::ApplicationInfo::default().api_version(if version < vk::API_VERSION_1_1 {
-        vk::API_VERSION_1_0
-    } else {
-        vk::API_VERSION_1_3
-    });
+    let app_info = vk::ApplicationInfo::default().api_version(api_version);
     let names = extensions
         .iter()
         .map(|name| name.as_ptr())
@@ -170,7 +186,7 @@ pub fn instance(flags: wgpu::InstanceFlags) -> Option<(wgpu::Instance, Option<Me
         wgpu_hal::vulkan::Instance::from_raw(
             entry,
             raw,
-            version,
+            api_version,
             0,
             None,
             extensions,

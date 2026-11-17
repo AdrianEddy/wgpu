@@ -2,7 +2,8 @@
 //! caller's may be, inspects its physical devices with Vulkan 1.1's commands, which the extension's
 //! alias: its adapters are those of an instance with the extension. Before, wgpu-hal took the
 //! commands from the extension alone, and such an instance's adapters lacked every feature,
-//! property and limit that it queries through them.
+//! property and limit that it queries through them. An instance created for Vulkan 1.0 caps its
+//! physical devices at 1.0.
 
 use alloc::{format, string::String, vec::Vec};
 
@@ -10,10 +11,11 @@ use ash::{ext, khr, vk};
 
 use crate::{Device as _, Instance as _};
 
-/// An instance created for Vulkan 1.3 with wgpu-hal's desired extensions, but without
+/// An instance created for Vulkan `api_version` with wgpu-hal's desired extensions, but without
 /// `VK_KHR_get_physical_device_properties2` unless `with_extension`, with `thresholds`. `None`,
 /// having printed why, without Vulkan or with a Vulkan 1.0 loader, on which an instance is 1.0.
 fn instance(
+    api_version: u32,
     with_extension: bool,
     thresholds: wgt::MemoryBudgetThresholds,
 ) -> Option<super::super::Instance> {
@@ -32,11 +34,11 @@ fn instance(
     }
     let flags = wgt::InstanceFlags::empty();
     let mut extensions =
-        super::super::Instance::desired_extensions(&entry, version, flags).unwrap();
+        super::super::Instance::desired_extensions(&entry, api_version, flags).unwrap();
     if !with_extension {
         extensions.retain(|&extension| extension != khr::get_physical_device_properties2::NAME);
     }
-    let app_info = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+    let app_info = vk::ApplicationInfo::default().api_version(api_version);
     let names = extensions
         .iter()
         .map(|name| name.as_ptr())
@@ -46,10 +48,20 @@ fn instance(
         .enabled_extension_names(&names);
     // SAFETY: A valid create info.
     let raw = unsafe { entry.create_instance(&info, None) }.unwrap();
-    // SAFETY: Created from `entry` for Vulkan 1.3 with `extensions`; wgpu-hal destroys it.
+    // SAFETY: Created from `entry` for Vulkan `api_version` with `extensions`; wgpu-hal destroys
+    // it.
     let instance = unsafe {
         super::super::Instance::from_raw(
-            entry, raw, version, 0, None, extensions, flags, thresholds, false, None,
+            entry,
+            raw,
+            api_version,
+            0,
+            None,
+            extensions,
+            flags,
+            thresholds,
+            false,
+            None,
         )
     }
     .unwrap();
@@ -76,10 +88,18 @@ fn identity(adapter: &super::super::Adapter) -> (u32, u32, u32, [u8; vk::UUID_SI
 #[test]
 fn an_instance_without_the_extension_has_the_adapters_of_one_with_it() {
     let _one = super::ONE_AT_A_TIME.lock().unwrap();
-    let Some(with) = instance(true, wgt::MemoryBudgetThresholds::default()) else {
+    let Some(with) = instance(
+        vk::API_VERSION_1_3,
+        true,
+        wgt::MemoryBudgetThresholds::default(),
+    ) else {
         return;
     };
-    let Some(without) = instance(false, wgt::MemoryBudgetThresholds::default()) else {
+    let Some(without) = instance(
+        vk::API_VERSION_1_3,
+        false,
+        wgt::MemoryBudgetThresholds::default(),
+    ) else {
         return;
     };
     // SAFETY: No requirements.
@@ -187,7 +207,7 @@ fn a_device_of_an_instance_without_the_extension_reads_its_memory_budget() {
         for_resource_creation: Some(100),
         for_device_loss: None,
     };
-    let Some(instance) = instance(false, thresholds) else {
+    let Some(instance) = instance(vk::API_VERSION_1_3, false, thresholds) else {
         return;
     };
     let mut budgets = 0;
@@ -243,4 +263,71 @@ fn a_device_of_an_instance_without_the_extension_reads_its_memory_budget() {
         std::println!("{name:?}: the budget was read");
     }
     std::println!("{budgets} devices read their budget");
+}
+
+/// On an instance created for Vulkan 1.0, with and without the extension, each adapter's effective
+/// version, which every use of a core version's functionality follows, is 1.0, whatever its
+/// driver's; and each extension that it keeps of those wgpu-hal enables has its `vk.xml`
+/// dependencies met by the instance, that version and the device's other extensions. Before, the
+/// adapter took its driver's version, and kept every extension it listed but the swapchain
+/// maintenance ones and `VK_EXT_memory_budget`.
+#[test]
+fn an_instance_created_for_vulkan_1_0_caps_its_adapters() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let mut wrong = Vec::new();
+    for with_extension in [true, false] {
+        let Some(instance) = instance(
+            vk::API_VERSION_1_0,
+            with_extension,
+            wgt::MemoryBudgetThresholds::default(),
+        ) else {
+            return;
+        };
+        // SAFETY: No requirements.
+        let adapters = unsafe { instance.enumerate_adapters(None) };
+        for exposed in &adapters {
+            let name = &exposed.info.name;
+            let caps = &exposed.adapter.phd_capabilities;
+            let own = caps.properties().api_version;
+            std::println!(
+                "{name:?}, extension {with_extension}: its own version {}.{}, effective {}.{}",
+                vk::api_version_major(own),
+                vk::api_version_minor(own),
+                vk::api_version_major(caps.device_api_version),
+                vk::api_version_minor(caps.device_api_version),
+            );
+            if caps.device_api_version >= vk::API_VERSION_1_1 {
+                wrong.push(format!("{name:?}, extension {with_extension}: not capped"));
+            }
+            let lists = |extension: &core::ffi::CStr| caps.supports_extension(extension);
+            let context = super::super::dependencies::Context {
+                version: caps.device_api_version,
+                instance_extensions: &instance.shared.extensions,
+                lists: &lists,
+            };
+            // SAFETY: A physical device of the instance.
+            let listed = unsafe {
+                instance
+                    .shared
+                    .raw
+                    .enumerate_device_extension_properties(exposed.adapter.raw)
+            }
+            .unwrap();
+            for extension in &listed {
+                let Ok(extension) = extension.extension_name_as_c_str() else {
+                    continue;
+                };
+                if caps.supports_extension(extension)
+                    && extension != khr::portability_subset::NAME
+                    && super::super::dependencies::dependencies(extension).is_some()
+                    && !context.can_enable(extension)
+                {
+                    wrong.push(format!(
+                        "{name:?}, extension {with_extension}: keeps {extension:?}"
+                    ));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
