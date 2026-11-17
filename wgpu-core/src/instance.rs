@@ -747,8 +747,12 @@ impl Instance {
     /// where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is set, one without
     /// [`wgt::Features::CORE_FEATURES_AND_LIMITS`].
     ///
-    /// If [limit bucketing][lt] is desired, [`crate::limits::apply_limit_buckets`]
-    /// should be called with the HAL adapter before calling this function.
+    /// If [limit bucketing][lt] is desired, call [`crate::limits::apply_limit_buckets`] with the
+    /// HAL adapter before calling this function. Enumeration with limit bucketing also buckets an
+    /// adapter as its backend exposed it, and then adjusts it as above, so the adapter offers what
+    /// it would offer, under strict WebGPU compliance too: the same bucket, features, limits and
+    /// information, the backend's capabilities that the bucket records
+    /// ([`wgt::AdapterInfo::limit_bucket`]) included.
     ///
     /// # Safety
     ///
