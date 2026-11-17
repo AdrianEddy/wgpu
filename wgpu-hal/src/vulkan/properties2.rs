@@ -16,13 +16,14 @@ pub(super) enum Source {
     Extension,
 }
 
-/// Where a physical device of Vulkan `device_api_version`, of an instance created for Vulkan
-/// `instance_api_version` with `VK_KHR_get_physical_device_properties2` enabled or not, takes the
-/// commands from, or `None` where it can use neither.
+/// Where a physical device of effective Vulkan version `effective_version`
+/// ([`super::InstanceShared::effective_device_version`]), of an instance with
+/// `VK_KHR_get_physical_device_properties2` enabled or not, takes the commands from, or `None`
+/// where it can use neither.
 ///
-/// - Vulkan 1.1 where the instance and the physical device are both 1.1 or later. The
-///   specification (Initialization, "Extending Physical Device Core Functionality"): "New core
-///   physical-device-level functionality can be used when both
+/// - Vulkan 1.1 where its effective version is 1.1 or later: where the instance and the physical
+///   device are both 1.1 or later. The specification (Initialization, "Extending Physical Device
+///   Core Functionality"): "New core physical-device-level functionality can be used when both
 ///   `VkPhysicalDeviceProperties::apiVersion` and `VkApplicationInfo::apiVersion` are greater than
 ///   or equal to the version of Vulkan that added the new functionality" (and Fundamentals, "Valid
 ///   Usage for Newer Core Versions").
@@ -32,12 +33,8 @@ pub(super) enum Source {
 ///   extension is enabled in `VkInstanceCreateInfo`" (Fundamentals, "Valid Usage for Extensions").
 ///
 /// Vulkan 1.1 is taken where both serve, as the specification places the commands.
-pub(super) fn source(
-    instance_api_version: u32,
-    device_api_version: u32,
-    extension_enabled: bool,
-) -> Option<Source> {
-    if instance_api_version >= vk::API_VERSION_1_1 && device_api_version >= vk::API_VERSION_1_1 {
+pub(super) fn source(effective_version: u32, extension_enabled: bool) -> Option<Source> {
+    if effective_version >= vk::API_VERSION_1_1 {
         Some(Source::Core)
     } else if extension_enabled {
         Some(Source::Extension)
@@ -59,7 +56,9 @@ impl Properties2<'_> {
     /// # Safety
     ///
     /// `phd` is a physical device of the instance, for which [`source`] gave this source, and
-    /// `properties`' chain holds only structures that the physical device supports.
+    /// `properties`' chain holds only structures of extensions that the physical device lists, or
+    /// of core versions up to its effective version
+    /// ([`super::InstanceShared::effective_device_version`]).
     pub(super) unsafe fn properties(
         self,
         phd: vk::PhysicalDevice,
@@ -150,40 +149,30 @@ mod tests {
     use super::{source, Source};
     use ash::vk;
 
-    const V1_0: u32 = vk::API_VERSION_1_0;
-    const V1_1: u32 = vk::API_VERSION_1_1;
-    const V1_3: u32 = vk::API_VERSION_1_3;
-
-    /// Vulkan 1.1's commands where the instance and the physical device are both 1.1 or later,
-    /// with or without the extension.
+    /// Vulkan 1.1's commands wherever the effective version is 1.1 or later, with or without the
+    /// extension.
     #[test]
-    fn both_at_1_1_or_later_take_the_core_commands() {
-        for (instance, device) in [(V1_1, V1_1), (V1_1, V1_3), (V1_3, V1_1), (V1_3, V1_3)] {
+    fn an_effective_1_1_or_later_takes_the_core_commands() {
+        for version in [
+            vk::API_VERSION_1_1,
+            vk::API_VERSION_1_2,
+            vk::API_VERSION_1_3,
+        ] {
             for extension in [false, true] {
                 assert_eq!(
-                    source(instance, device, extension),
+                    source(version, extension),
                     Some(Source::Core),
-                    "instance {instance:#x}, device {device:#x}, extension {extension}"
+                    "version {version:#x}, extension {extension}"
                 );
             }
         }
     }
 
-    /// Where either is 1.0, the extension's commands where it is enabled, and none where it is not:
-    /// a 1.0 instance, and a 1.0 physical device of a 1.1 or later instance.
+    /// An effective 1.0 (a 1.0 instance, or a 1.0 physical device) takes the extension's commands
+    /// where it is enabled, and none where it is not.
     #[test]
-    fn either_at_1_0_takes_the_extension_or_nothing() {
-        for (instance, device) in [(V1_0, V1_0), (V1_0, V1_3), (V1_3, V1_0), (V1_1, V1_0)] {
-            assert_eq!(
-                source(instance, device, true),
-                Some(Source::Extension),
-                "instance {instance:#x}, device {device:#x}"
-            );
-            assert_eq!(
-                source(instance, device, false),
-                None,
-                "instance {instance:#x}, device {device:#x}"
-            );
-        }
+    fn an_effective_1_0_takes_the_extension_or_nothing() {
+        assert_eq!(source(vk::API_VERSION_1_0, true), Some(Source::Extension));
+        assert_eq!(source(vk::API_VERSION_1_0, false), None);
     }
 }

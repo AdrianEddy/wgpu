@@ -26,8 +26,8 @@ const LISTS_BOTH: [&CStr; 3] = [
     EXT_SWAPCHAIN_MAINTENANCE1,
 ];
 
-/// A physical device that lists `extensions`, as `InstanceShared::inspect` keeps them for an
-/// instance with `instance_extensions` and, with `gpdp2`, the functions of
+/// A Vulkan 1.0 physical device that lists `extensions`, as `InstanceShared::inspect` keeps
+/// them for an instance with `VK_KHR_surface`, `instance_extensions` and, with `gpdp2`,
 /// `VK_KHR_get_physical_device_properties2`.
 fn device(
     extensions: &[&CStr],
@@ -43,9 +43,15 @@ fn device(
                     .unwrap()
             })
             .collect(),
+        device_api_version: vk::API_VERSION_1_0,
         ..Default::default()
     };
-    properties.drop_extensions_unusable_with(instance_extensions, gpdp2);
+    let mut instance = alloc::vec![khr::surface::NAME];
+    instance.extend_from_slice(instance_extensions);
+    if gpdp2 {
+        instance.push(khr::get_physical_device_properties2::NAME);
+    }
+    properties.drop_extensions_unusable_with(&instance);
     properties
 }
 
@@ -1529,6 +1535,7 @@ fn members(
         shader_draw_parameters: 1,
         swapchain_maintenance1: 1,
         shader_subgroup_extended_types: 1,
+        ray_tracing_invocation_reorder: 1,
     );
     all
 }
@@ -1580,6 +1587,12 @@ const EVERY_EXTENSION: &[&CStr] = &[
     khr::shader_float_controls::NAME,
     khr::bind_memory2::NAME,
     khr::get_memory_requirements2::NAME,
+    ext::sampler_filter_minmax::NAME,
+    khr::sampler_mirror_clamp_to_edge::NAME,
+    khr::incremental_present::NAME,
+    khr::external_memory_win32::NAME,
+    khr::external_semaphore_win32::NAME,
+    super::ray_tracing_invocation_reorder::NAME,
 ];
 
 /// A physical device of Vulkan `version` that offers everything: every extension of
@@ -2334,4 +2347,379 @@ fn every_queried_structure_is_chained() {
         next = unsafe { (*next).p_next };
     }
     assert_eq!(chained, present);
+}
+
+/// `vk.xml`'s `depends` (Vulkan SDK 1.4.363.1), verbatim, of every device extension that wgpu-hal
+/// enables: "" for none. The oracle for what wgpu-hal enables, kept apart from
+/// `super::super::dependencies`, which carries the same expressions as Rust values.
+const VK_XML_DEPENDS: &[(&str, &str)] = &[
+    ("VK_QCOM_render_pass_store_ops", ""),
+    ("VK_EXT_conservative_rasterization", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_descriptor_indexing", "(VK_KHR_get_physical_device_properties2+VK_KHR_maintenance3),VK_VERSION_1_1"),
+    ("VK_EXT_external_memory_dma_buf", "VK_KHR_external_memory_fd"),
+    ("VK_EXT_image_drm_format_modifier", "(((VK_KHR_bind_memory2+VK_KHR_get_physical_device_properties2+VK_KHR_sampler_ycbcr_conversion),VK_VERSION_1_1)+VK_KHR_image_format_list),VK_VERSION_1_2"),
+    ("VK_EXT_image_robustness", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_load_store_op_none", ""),
+    ("VK_EXT_memory_budget", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_mesh_shader", "VK_KHR_spirv_1_4,VK_VERSION_1_2"),
+    ("VK_EXT_robustness2", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_sampler_filter_minmax", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_shader_atomic_float", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_shader_image_atomic_int64", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_subgroup_size_control", "VK_VERSION_1_1"),
+    ("VK_EXT_swapchain_maintenance1", "VK_KHR_swapchain+VK_EXT_surface_maintenance1+(VK_KHR_get_physical_device_properties2,VK_VERSION_1_1)"),
+    ("VK_EXT_texture_compression_astc_hdr", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_GOOGLE_display_timing", "VK_KHR_swapchain"),
+    ("VK_KHR_16bit_storage", "(VK_KHR_get_physical_device_properties2+VK_KHR_storage_buffer_storage_class),VK_VERSION_1_1"),
+    ("VK_KHR_acceleration_structure", "((VK_VERSION_1_1+VK_EXT_descriptor_indexing+VK_KHR_buffer_device_address),VK_VERSION_1_2)+VK_KHR_deferred_host_operations"),
+    ("VK_KHR_bind_memory2", ""),
+    ("VK_KHR_buffer_device_address", "(VK_KHR_get_physical_device_properties2+VK_KHR_device_group),VK_VERSION_1_1"),
+    ("VK_KHR_cooperative_matrix", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_deferred_host_operations", ""),
+    ("VK_KHR_draw_indirect_count", ""),
+    ("VK_KHR_driver_properties", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_dynamic_rendering", "((VK_KHR_get_physical_device_properties2,VK_VERSION_1_1)+VK_KHR_depth_stencil_resolve),VK_VERSION_1_2"),
+    ("VK_KHR_external_memory_fd", "VK_KHR_external_memory,VK_VERSION_1_1"),
+    ("VK_KHR_external_memory_win32", "VK_KHR_external_memory,VK_VERSION_1_1"),
+    ("VK_KHR_external_semaphore_win32", "VK_KHR_external_semaphore"),
+    ("VK_KHR_fragment_shader_barycentric", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_get_memory_requirements2", ""),
+    ("VK_KHR_image_format_list", ""),
+    ("VK_KHR_incremental_present", "VK_KHR_swapchain"),
+    ("VK_KHR_load_store_op_none", ""),
+    ("VK_KHR_maintenance1", ""),
+    ("VK_KHR_maintenance2", ""),
+    ("VK_KHR_maintenance3", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_maintenance4", "VK_VERSION_1_1"),
+    ("VK_KHR_multiview", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_portability_subset", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_ray_query", "(VK_KHR_spirv_1_4,VK_VERSION_1_2)+VK_KHR_acceleration_structure"),
+    ("VK_KHR_ray_tracing_pipeline", "(VK_KHR_spirv_1_4,VK_VERSION_1_2)+VK_KHR_acceleration_structure"),
+    ("VK_KHR_ray_tracing_position_fetch", "VK_KHR_acceleration_structure"),
+    ("VK_KHR_sampler_mirror_clamp_to_edge", ""),
+    ("VK_KHR_sampler_ycbcr_conversion", "(VK_KHR_maintenance1+VK_KHR_bind_memory2+VK_KHR_get_memory_requirements2+VK_KHR_get_physical_device_properties2),VK_VERSION_1_1"),
+    ("VK_KHR_shader_atomic_int64", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_shader_draw_parameters", ""),
+    ("VK_KHR_shader_float16_int8", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_shader_float_controls", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_shader_integer_dot_product", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_shader_non_semantic_info", ""),
+    ("VK_KHR_shader_subgroup_extended_types", "VK_VERSION_1_1"),
+    ("VK_KHR_spirv_1_4", "VK_VERSION_1_1+VK_KHR_shader_float_controls"),
+    ("VK_KHR_storage_buffer_storage_class", ""),
+    ("VK_KHR_swapchain", "VK_KHR_surface"),
+    ("VK_KHR_swapchain_mutable_format", "VK_KHR_swapchain+(VK_KHR_maintenance2,VK_VERSION_1_1)+(VK_KHR_image_format_list,VK_VERSION_1_2)"),
+    ("VK_KHR_swapchain_maintenance1", "VK_KHR_swapchain+VK_KHR_surface_maintenance1+(VK_KHR_get_physical_device_properties2,VK_VERSION_1_1)"),
+    ("VK_KHR_timeline_semaphore", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_vulkan_memory_model", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_KHR_zero_initialize_workgroup_memory", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
+    ("VK_EXT_ray_tracing_invocation_reorder", "VK_KHR_ray_tracing_pipeline"),
+];
+
+/// The extensions that a `depends` expression names without the core version that promoted them,
+/// with that version (`vk.xml`'s `promotedto`). Each was promoted with nothing made optional
+/// (`nofeatures`), so the version stands for it (the specification's "Extension Dependencies":
+/// "If a required extension has been promoted to another extension or to a core API version,
+/// then as a general rule, the dependency is also satisfied by the promoted extension or core
+/// version.").
+const PROMOTED: &[(&str, u32)] = &[("VK_KHR_external_semaphore", vk::API_VERSION_1_1)];
+
+/// Whether `depends`, a `vk.xml` expression, holds for a device of effective `version` where
+/// `enabled` tells which extensions are enabled. The registry's schema ("Attributes of extension
+/// tags"): "Supported operators include `,` for logical OR, `+` for logical AND, and `(` `)` for
+/// grouping. `,` and `+` are of equal precedence, and lower than `( )`. Expressions must be
+/// evaluated left-to-right for operators of the same precedence. Terms which are core version
+/// names are true if the corresponding API version is supported. Terms which are extension names
+/// are true if the corresponding extension is enabled." An extension of [`PROMOTED`] is also
+/// true from the version that promoted it.
+fn vk_xml_holds(depends: &str, version: u32, enabled: &dyn Fn(&str) -> bool) -> bool {
+    fn term(rest: &mut &str, version: u32, enabled: &dyn Fn(&str) -> bool) -> bool {
+        if let Some(inner) = rest.strip_prefix('(') {
+            *rest = inner;
+            let value = expression(rest, version, enabled);
+            *rest = rest.strip_prefix(')').expect("a closing parenthesis");
+            value
+        } else {
+            let end = rest.find([',', '+', '(', ')']).unwrap_or(rest.len());
+            let (name, tail) = rest.split_at(end);
+            *rest = tail;
+            match name.strip_prefix("VK_VERSION_") {
+                Some(number) => {
+                    let (major, minor) =
+                        number.split_once('_').expect("VK_VERSION_<major>_<minor>");
+                    version
+                        >= vk::make_api_version(
+                            0,
+                            major.parse().unwrap(),
+                            minor.parse().unwrap(),
+                            0,
+                        )
+                }
+                None => {
+                    enabled(name)
+                        || PROMOTED
+                            .iter()
+                            .any(|&(promoted, to)| promoted == name && version >= to)
+                }
+            }
+        }
+    }
+    fn expression(rest: &mut &str, version: u32, enabled: &dyn Fn(&str) -> bool) -> bool {
+        let mut value = term(rest, version, enabled);
+        loop {
+            if let Some(tail) = rest.strip_prefix(',') {
+                *rest = tail;
+                let right = term(rest, version, enabled);
+                value = value || right;
+            } else if let Some(tail) = rest.strip_prefix('+') {
+                *rest = tail;
+                let right = term(rest, version, enabled);
+                value = value && right;
+            } else {
+                return value;
+            }
+        }
+    }
+    if depends.is_empty() {
+        return true;
+    }
+    let mut rest = depends;
+    let value = expression(&mut rest, version, enabled);
+    assert!(rest.is_empty(), "{depends}: left {rest}");
+    value
+}
+
+/// The parser reads `vk.xml`'s expressions as the registry says: equal precedence, left to right.
+#[test]
+fn vk_xml_expressions_are_read_left_to_right() {
+    let names = |set: &'static [&'static str]| move |name: &str| set.contains(&name);
+    // `A,B+C` is `(A,B)+C`: false where only A holds.
+    assert!(!vk_xml_holds("A,B+C", vk::API_VERSION_1_0, &names(&["A"])));
+    assert!(vk_xml_holds(
+        "A,B+C",
+        vk::API_VERSION_1_0,
+        &names(&["A", "C"])
+    ));
+    assert!(vk_xml_holds("A,(B+C)", vk::API_VERSION_1_0, &names(&["A"])));
+    assert!(vk_xml_holds(
+        "A,VK_VERSION_1_1",
+        vk::API_VERSION_1_1,
+        &names(&[])
+    ));
+    assert!(!vk_xml_holds(
+        "A,VK_VERSION_1_2",
+        vk::API_VERSION_1_1,
+        &names(&[])
+    ));
+}
+
+/// Every extension that wgpu-hal enables has its dependencies (`vk.xml`'s `depends`, verbatim)
+/// met by the device's effective version, the instance's extensions and the extensions enabled
+/// with it (VUID-vkCreateDevice-ppEnabledExtensionNames-01387, and the specification's "Extension
+/// Dependencies"). For every effective version from 1.0 to 1.3, an instance with and without
+/// `VK_KHR_get_physical_device_properties2` (and with the surface extensions that wgpu-hal enables),
+/// a physical device that lists every extension that wgpu-hal enables (but
+/// `VK_KHR_portability_subset`), as `inspect` leaves it, and every request: none, each offered
+/// feature, all of them; and a physical device that lists all of them but one, unless wgpu-hal
+/// would hide it, with no feature requested and with all, so that a dependency on an extension that
+/// the device does not list cannot hold. Every extension enabled is one the device lists.
+#[test]
+fn every_enabled_extension_has_its_dependencies() {
+    use super::super::dependencies::DEVICE_EXTENSION_DEPENDENCIES;
+    let every = DEVICE_EXTENSION_DEPENDENCIES
+        .iter()
+        .map(|&(name, _)| name)
+        .filter(|&name| name != khr::portability_subset::NAME)
+        .collect::<alloc::vec::Vec<_>>();
+    let mut wrong = alloc::vec::Vec::new();
+    let mut checked = 0;
+    let mut left_out_checked = 0;
+    for left_out in core::iter::once(None).chain(every.iter().copied().map(Some)) {
+        let listing = every
+            .iter()
+            .copied()
+            .filter(|&name| Some(name) != left_out)
+            .collect::<alloc::vec::Vec<_>>();
+        for version in [
+            vk::API_VERSION_1_0,
+            vk::API_VERSION_1_1,
+            vk::API_VERSION_1_2,
+            vk::API_VERSION_1_3,
+        ] {
+            for gpdp2 in [false, true] {
+                let mut instance = alloc::vec![
+                    khr::surface::NAME,
+                    KHR_SURFACE_MAINTENANCE1,
+                    EXT_SURFACE_MAINTENANCE1
+                ];
+                if gpdp2 {
+                    instance.push(khr::get_physical_device_properties2::NAME);
+                }
+                // The properties2 commands, with which `inspect` queries the extensions' structures.
+                let commands = gpdp2 || version >= vk::API_VERSION_1_1;
+                let mut caps = PhysicalDeviceProperties {
+                    device_api_version: version,
+                    supported_extensions: listing
+                        .iter()
+                        .map(|&name| {
+                            vk::ExtensionProperties::default()
+                                .extension_name(name)
+                                .unwrap()
+                        })
+                        .collect(),
+                    ..if commands {
+                        subgroups_and_matrices()
+                    } else {
+                        PhysicalDeviceProperties::default()
+                    }
+                };
+                caps.drop_extensions_unusable_with(&instance);
+                if left_out.is_some() && caps.unusable().is_some() {
+                    // Hidden: no device of it is opened.
+                    continue;
+                }
+                let mut offered = if commands {
+                    PhysicalDeviceFeatures::queried(&caps)
+                } else {
+                    PhysicalDeviceFeatures::default()
+                };
+                for (_, members) in members(&mut offered) {
+                    members.fill(vk::TRUE);
+                }
+                let (_, _, formats, queue) = offers_everything(version);
+                let wgpu_offered = offered
+                    .to_wgpu(
+                        &caps,
+                        |extension| caps.supports_extension(extension),
+                        &formats,
+                        &queue,
+                    )
+                    .0;
+                let requests = match left_out {
+                    None => core::iter::once(wgt::Features::empty())
+                        .chain(wgpu_offered.iter())
+                        .chain(core::iter::once(wgpu_offered))
+                        .collect::<alloc::vec::Vec<_>>(),
+                    Some(_) => alloc::vec![wgt::Features::empty(), wgpu_offered],
+                };
+                for requested in requests {
+                    let (enabled, _) = opened(&caps, &offered, requested);
+                    if left_out.is_some() {
+                        left_out_checked += 1;
+                    }
+                    let names = enabled
+                        .iter()
+                        .chain(&instance)
+                        .map(|name| name.to_str().unwrap())
+                        .collect::<alloc::vec::Vec<_>>();
+                    for extension in &enabled {
+                        let name = extension.to_str().unwrap();
+                        checked += 1;
+                        if !listing.contains(extension) {
+                            wrong.push(alloc::format!("{name}: enabled, not listed"));
+                        }
+                        match VK_XML_DEPENDS.iter().find(|&&(listed, _)| listed == name) {
+                            None => wrong.push(alloc::format!("{name}: not in VK_XML_DEPENDS")),
+                            Some(&(_, depends)) => {
+                                if !vk_xml_holds(depends, version, &|term| names.contains(&term)) {
+                                    wrong.push(alloc::format!(
+                                    "Vulkan {}.{}, gpdp2 {gpdp2}, {requested:?}, without {left_out:?}: \
+                                     {name} needs {depends}",
+                                    vk::api_version_major(version),
+                                    vk::api_version_minor(version),
+                                ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 0);
+    assert!(left_out_checked > 0);
+    wrong.sort();
+    wrong.dedup();
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// The table of dependencies covers the oracle's names, and the oracle the table's.
+#[test]
+fn the_dependency_table_and_the_oracle_name_the_same_extensions() {
+    use super::super::dependencies::DEVICE_EXTENSION_DEPENDENCIES;
+    let mut table = DEVICE_EXTENSION_DEPENDENCIES
+        .iter()
+        .map(|&(name, _)| name.to_str().unwrap())
+        .collect::<alloc::vec::Vec<_>>();
+    let mut oracle = VK_XML_DEPENDS
+        .iter()
+        .map(|&(name, _)| name)
+        .collect::<alloc::vec::Vec<_>>();
+    table.sort();
+    oracle.sort();
+    assert_eq!(table, oracle);
+}
+
+/// A physical device that lists `VK_KHR_portability_subset` must enable it, which needs
+/// `VK_KHR_get_physical_device_properties2` or Vulkan 1.1: where neither holds, it is unusable
+/// (and hidden); elsewhere it keeps the extension. A device below 1.1 without
+/// `VK_KHR_storage_buffer_storage_class` or `VK_KHR_maintenance1` is unusable, also with a patch
+/// number (1.0.65).
+#[test]
+fn a_device_that_cannot_be_opened_is_unusable() {
+    let listing = [
+        khr::portability_subset::NAME,
+        khr::storage_buffer_storage_class::NAME,
+        khr::maintenance1::NAME,
+    ];
+    let portability = |version: u32, gpdp2: bool| {
+        let mut caps = device_of_version(version, &listing);
+        let mut instance = alloc::vec![khr::surface::NAME];
+        if gpdp2 {
+            instance.push(khr::get_physical_device_properties2::NAME);
+        }
+        caps.drop_extensions_unusable_with(&instance);
+        assert!(caps.supports_extension(khr::portability_subset::NAME));
+        caps.unusable()
+    };
+    assert_eq!(
+        portability(vk::API_VERSION_1_0, false),
+        Some("VK_KHR_portability_subset cannot be enabled")
+    );
+    assert_eq!(portability(vk::API_VERSION_1_0, true), None);
+    assert_eq!(portability(vk::API_VERSION_1_1, false), None);
+
+    let patched_1_0 = vk::make_api_version(0, 1, 0, 65);
+    for (extensions, reason) in [
+        (
+            &[khr::maintenance1::NAME][..],
+            "SPIR-V storage buffer class is not supported",
+        ),
+        (
+            &[khr::storage_buffer_storage_class::NAME][..],
+            "VK_KHR_maintenance1 is not supported",
+        ),
+    ] {
+        assert_eq!(
+            device_of_version(patched_1_0, extensions).unusable(),
+            Some(reason)
+        );
+        assert_eq!(
+            device_of_version(vk::API_VERSION_1_1, extensions).unusable(),
+            None
+        );
+    }
+}
+
+/// A physical device's effective version is the lower of its own and the instance's: a 1.4
+/// driver on wgpu's own 1.3 instance is 1.3, a 1.3 driver on a 1.0 instance is 1.0, and a patch
+/// number stays only where the device's version is the lower.
+#[test]
+fn a_device_is_capped_by_its_instance() {
+    use crate::vulkan::instance::effective_version;
+    let v = |major, minor, patch| vk::make_api_version(0, major, minor, patch);
+    assert_eq!(effective_version(v(1, 4, 330), v(1, 3, 0)), v(1, 3, 0));
+    assert_eq!(effective_version(v(1, 3, 290), v(1, 0, 0)), v(1, 0, 0));
+    assert_eq!(effective_version(v(1, 3, 290), v(1, 3, 0)), v(1, 3, 0));
+    assert_eq!(effective_version(v(1, 0, 65), v(1, 3, 0)), v(1, 0, 65));
 }

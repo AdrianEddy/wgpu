@@ -31,7 +31,7 @@ const RAY_TRACING_PIPELINE_FEATURES: wgt::Features =
 /// `ash` has no bindings for this, so we create bindings ad-hoc as needed. See also:
 ///
 /// - <https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_ray_tracing_invocation_reorder.html>
-mod ray_tracing_invocation_reorder {
+pub(super) mod ray_tracing_invocation_reorder {
     use ash::vk;
     use core::{
         ffi::{c_void, CStr},
@@ -289,7 +289,7 @@ const INTERNALLY_SYNCHRONIZED_QUEUES: &CStr = c"VK_KHR_internally_synchronized_q
 pub(super) const KHR_SURFACE_MAINTENANCE1: &CStr = c"VK_KHR_surface_maintenance1";
 
 /// `VK_KHR_swapchain_maintenance1`, which `ash` 0.38 does not define.
-const KHR_SWAPCHAIN_MAINTENANCE1: &CStr = c"VK_KHR_swapchain_maintenance1";
+pub(super) const KHR_SWAPCHAIN_MAINTENANCE1: &CStr = c"VK_KHR_swapchain_maintenance1";
 
 /// The device extensions with which presents can signal fences, `VK_KHR_swapchain_maintenance1`
 /// first, each with the instance extension it depends on. Their structures are the same: the KHR
@@ -2061,12 +2061,15 @@ pub struct PhysicalDeviceProperties {
     /// match the Vulkan physical device against a DXGI adapter for interop.
     id: Option<vk::PhysicalDeviceIDProperties<'static>>,
 
-    /// The device API version.
-    ///
-    /// Which is the version of Vulkan supported for device-level functionality.
-    ///
-    /// It is associated with a `VkPhysicalDevice` and its children.
+    /// The device's effective Vulkan version: the lower of its own
+    /// (`VkPhysicalDeviceProperties::apiVersion`, in [`Self::properties`]) and the version its
+    /// instance was created for ([`super::InstanceShared::effective_device_version`]). Every use of
+    /// a core version's functionality follows it.
     pub(super) device_api_version: u32,
+
+    /// Whether the device lists `VK_KHR_portability_subset` but cannot enable it
+    /// ([`Self::unusable`]).
+    portability_subset_unusable: bool,
 
     /// Supported cooperative matrix configurations.
     ///
@@ -2089,29 +2092,63 @@ impl PhysicalDeviceProperties {
         self.driver.is_some_and(|driver| driver.driver_id == id)
     }
 
-    /// Drops the extensions that the device lists but that a device of an instance with
-    /// `instance_extensions` cannot enable. A device extension that depends on an instance
-    /// extension that the instance has not enabled is unsupported, whatever the device lists (the
-    /// specification's "Extension Dependencies"). The swapchain maintenance extensions and
-    /// `VK_EXT_memory_budget` also depend on `VK_KHR_get_physical_device_properties2` or Vulkan 1.1,
-    /// through whose commands wgpu-hal queries and enables the former's feature and reads the
-    /// latter's budgets: `gpdp2` says whether this physical device has those commands
-    /// ([`super::InstanceShared::properties2`]).
-    fn drop_extensions_unusable_with(
-        &mut self,
-        instance_extensions: &[&'static CStr],
-        gpdp2: bool,
-    ) {
+    /// Drops the extensions that wgpu-hal enables but that a device of this physical device, of
+    /// an instance with `instance_extensions`, cannot: those whose `vk.xml` dependencies do not
+    /// hold for its effective version (`device_api_version`), that instance and the extensions it
+    /// lists ([`super::dependencies`]). A device extension whose dependencies are unmet is
+    /// unsupported, whatever the device lists (the specification's "Extension Dependencies"), and
+    /// enabling it is invalid (VUID-vkCreateDevice-ppEnabledExtensionNames-01387). Extensions that
+    /// wgpu-hal does not enable stay, for a caller that enables them itself.
+    ///
+    /// `VK_KHR_portability_subset` stays too: a device that lists it must enable it
+    /// (VUID-VkDeviceCreateInfo-pProperties-04451), so where it cannot, the adapter is hidden
+    /// ([`Self::unusable`]).
+    fn drop_extensions_unusable_with(&mut self, instance_extensions: &[&'static CStr]) {
+        let listed = self
+            .supported_extensions
+            .iter()
+            .filter_map(|extension| extension.extension_name_as_c_str().ok())
+            .map(alloc::ffi::CString::from)
+            .collect::<Vec<_>>();
+        let lists = |name: &CStr| listed.iter().any(|listed| listed.as_c_str() == name);
+        let context = super::dependencies::Context {
+            version: self.device_api_version,
+            instance_extensions,
+            lists: &lists,
+        };
         self.supported_extensions.retain(|extension| {
-            let name = extension.extension_name_as_c_str();
-            (gpdp2 || name != Ok(ext::memory_budget::NAME))
-                && SWAPCHAIN_MAINTENANCE1
-                    .iter()
-                    .all(|&(device_extension, instance_extension)| {
-                        name != Ok(device_extension)
-                            || (gpdp2 && instance_extensions.contains(&instance_extension))
-                    })
+            let Ok(name) = extension.extension_name_as_c_str() else {
+                return true;
+            };
+            name == khr::portability_subset::NAME
+                || super::dependencies::dependencies(name).is_none()
+                || context.can_enable(name)
         });
+        self.portability_subset_unusable = lists(khr::portability_subset::NAME)
+            && !context.can_enable(khr::portability_subset::NAME);
+    }
+
+    /// Why no device of this physical device can be opened, if none can:
+    /// - it lists `VK_KHR_portability_subset`, which a device must enable where listed
+    ///   (VUID-VkDeviceCreateInfo-pProperties-04451), but cannot enable it
+    ///   ([`Self::drop_extensions_unusable_with`]);
+    /// - its effective version is below 1.1 (a patch number does not count), and it does not list
+    ///   `VK_KHR_storage_buffer_storage_class`, which the SPIR-V that Naga writes needs, or
+    ///   `VK_KHR_maintenance1`, which wgpu-hal's negative viewport height needs.
+    pub(super) fn unusable(&self) -> Option<&'static str> {
+        if self.portability_subset_unusable {
+            Some("VK_KHR_portability_subset cannot be enabled")
+        } else if self.device_api_version < vk::API_VERSION_1_1
+            && !self.supports_extension(khr::storage_buffer_storage_class::NAME)
+        {
+            Some("SPIR-V storage buffer class is not supported")
+        } else if self.device_api_version < vk::API_VERSION_1_1
+            && !self.supports_extension(khr::maintenance1::NAME)
+        {
+            Some("VK_KHR_maintenance1 is not supported")
+        } else {
+            None
+        }
     }
 
     /// The extension with which presents can signal fences that the device supports:
@@ -2127,8 +2164,9 @@ impl PhysicalDeviceProperties {
     fn get_required_extensions(&self, requested_features: wgt::Features) -> Vec<&'static CStr> {
         let mut extensions = Vec::new();
 
-        // Note that quite a few extensions depend on the `VK_KHR_get_physical_device_properties2` instance extension.
-        // We enable `VK_KHR_get_physical_device_properties2` unconditionally (if available).
+        // Note that quite a few extensions depend on the `VK_KHR_get_physical_device_properties2`
+        // instance extension or Vulkan 1.1: `drop_extensions_unusable_with` has dropped every
+        // extension whose dependencies the instance and the effective version cannot meet.
 
         // Require `VK_KHR_swapchain`
         extensions.push(khr::swapchain::NAME);
@@ -2347,9 +2385,24 @@ impl PhysicalDeviceProperties {
             extensions.push(ext::external_memory_dma_buf::NAME);
         }
 
-        // Optional `VK_EXT_image_drm_format_modifier`
+        // Optional `VK_EXT_image_drm_format_modifier`. Below Vulkan 1.1 it depends on
+        // `VK_KHR_bind_memory2` and `VK_KHR_sampler_ycbcr_conversion` (which depends on
+        // `VK_KHR_get_memory_requirements2` and `VK_KHR_maintenance1`), enabled with it
+        // (VUID-vkCreateDevice-ppEnabledExtensionNames-01387); `drop_extensions_unusable_with`
+        // kept it only where the device lists them.
         if self.supports_extension(ext::image_drm_format_modifier::NAME) {
             extensions.push(ext::image_drm_format_modifier::NAME);
+            if self.device_api_version < vk::API_VERSION_1_1 {
+                for dependency in [
+                    khr::bind_memory2::NAME,
+                    khr::sampler_ycbcr_conversion::NAME,
+                    khr::get_memory_requirements2::NAME,
+                ] {
+                    if !extensions.contains(&dependency) {
+                        extensions.push(dependency);
+                    }
+                }
+            }
         }
 
         // Optional `VK_GOOGLE_display_timing`
@@ -2454,6 +2507,19 @@ impl PhysicalDeviceProperties {
         if requested_features.contains(wgt::Features::EXPERIMENTAL_COOPERATIVE_MATRIX) {
             extensions.push(khr::cooperative_matrix::NAME);
         }
+
+        // The dependency table decides which of them a device can enable
+        // (`PhysicalDeviceProperties::drop_extensions_unusable_with`), so it names each one.
+        debug_assert!(
+            extensions
+                .iter()
+                .all(|&extension| super::dependencies::dependencies(extension).is_some()),
+            "device extensions without dependencies in the table: {:?}",
+            extensions
+                .iter()
+                .filter(|&&extension| super::dependencies::dependencies(extension).is_none())
+                .collect::<Vec<_>>()
+        );
 
         extensions
     }
@@ -2870,9 +2936,10 @@ impl super::InstanceShared {
             capabilities.supported_extensions =
                 unsafe { self.raw.enumerate_device_extension_properties(phd).unwrap() };
             capabilities.properties = unsafe { self.raw.get_physical_device_properties(phd) };
-            capabilities.device_api_version = capabilities.properties.api_version;
+            capabilities.device_api_version =
+                self.effective_device_version(capabilities.properties.api_version);
             let properties2 = self.properties2(capabilities.device_api_version);
-            capabilities.drop_extensions_unusable_with(&self.extensions, properties2.is_some());
+            capabilities.drop_extensions_unusable_with(&self.extensions);
 
             let supports_multiview = capabilities.device_api_version >= vk::API_VERSION_1_1
                 || capabilities.supports_extension(khr::multiview::NAME);
@@ -3006,8 +3073,8 @@ impl super::InstanceShared {
                     properties = properties.push_next(next);
                 }
 
-                // SAFETY: `phd` is of this instance, and its structures are those of extensions
-                // and versions it supports.
+                // SAFETY: `phd` is of this instance, and its structures are those of extensions it
+                // lists, or of core versions up to its effective version.
                 unsafe { properties2.properties(phd, &mut properties) };
 
                 // Query cooperative matrix properties
@@ -3042,8 +3109,8 @@ impl super::InstanceShared {
         let core = if let Some(properties2) = self.properties2(capabilities.device_api_version) {
             features = PhysicalDeviceFeatures::queried(&capabilities);
             let mut features2 = features.add_to_features2(vk::PhysicalDeviceFeatures2::default());
-            // SAFETY: `phd` is of this instance, and its structures are those of extensions and
-            // versions it supports.
+            // SAFETY: `phd` is of this instance, and its structures are those of extensions it
+            // lists, or of core versions up to its effective version.
             unsafe { properties2.features(phd, &mut features2) };
             features2.features
         } else {
@@ -3177,22 +3244,8 @@ impl super::Instance {
                 }
             }
         }
-        if phd_capabilities.device_api_version == vk::API_VERSION_1_0
-            && !phd_capabilities.supports_extension(khr::storage_buffer_storage_class::NAME)
-        {
-            log::debug!(
-                "SPIR-V storage buffer class is not supported, hiding adapter: {}",
-                info.name
-            );
-            return None;
-        }
-        if !phd_capabilities.supports_extension(khr::maintenance1::NAME)
-            && phd_capabilities.device_api_version < vk::API_VERSION_1_1
-        {
-            log::debug!(
-                "VK_KHR_maintenance1 is not supported, hiding adapter: {}",
-                info.name
-            );
+        if let Some(reason) = phd_capabilities.unusable() {
+            log::debug!("{reason}, hiding adapter: {}", info.name);
             return None;
         }
 

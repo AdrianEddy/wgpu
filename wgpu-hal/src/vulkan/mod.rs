@@ -30,6 +30,7 @@ mod adapter;
 pub mod call_log;
 mod command;
 pub mod conv;
+mod dependencies;
 mod descriptor;
 mod device;
 #[cfg(test)]
@@ -195,12 +196,9 @@ pub struct InstanceShared {
     entry: ash::Entry,
     has_nv_optimus: bool,
     android_sdk_version: u32,
-    /// The instance API version.
-    ///
-    /// Which is the version of Vulkan supported for instance-level functionality.
-    ///
-    /// It is associated with a `VkInstance` and its children,
-    /// except for a `VkPhysicalDevice` and its children.
+    /// The Vulkan version the instance was created for: its `VkApplicationInfo::apiVersion`
+    /// (1.0 for none or 0). A physical device may use the functionality of a core version only up
+    /// to the lower of this and its own ([`Self::effective_device_version`]).
     instance_api_version: u32,
 
     /// The kind of swapchain used by surfaces created by this instance.
@@ -702,7 +700,7 @@ struct DeviceShared {
     queue_scope: QueueLockScope,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
-    /// The physical device's Vulkan version (`VkPhysicalDeviceProperties::apiVersion`).
+    /// The physical device's effective Vulkan version ([`InstanceShared::effective_device_version`]).
     device_api_version: u32,
     enabled_extensions: Vec<&'static CStr>,
     /// Whether the device has `swapchainMaintenance1`: presents signal fences, so that a

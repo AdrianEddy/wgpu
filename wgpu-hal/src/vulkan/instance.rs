@@ -263,31 +263,48 @@ impl super::InstanceShared {
         &self.raw
     }
 
+    /// The Vulkan version the instance was created for: its `VkApplicationInfo::apiVersion`, 1.0
+    /// for none or 0.
     pub fn instance_api_version(&self) -> u32 {
         self.instance_api_version
+    }
+
+    /// The effective Vulkan version of a physical device of Vulkan `device_api_version`: the lower
+    /// of it and the version the instance was created for. Functionality of a newer core version
+    /// "must not be used unless it is supported by the device as determined by
+    /// `VkPhysicalDeviceProperties::apiVersion` and the specified version of
+    /// `VkApplicationInfo::apiVersion`" (Fundamentals, "Valid Usage for Newer Core Versions"); the
+    /// validation layers "validate API usage against the minimum of that version and the
+    /// implementation version" (Initialization, `VkApplicationInfo`). The loader's version plays no
+    /// part.
+    pub fn effective_device_version(&self, device_api_version: u32) -> u32 {
+        effective_version(device_api_version, self.instance_api_version)
     }
 
     pub fn extensions(&self) -> &[&'static CStr] {
         &self.extensions[..]
     }
 
-    /// The commands of `VK_KHR_get_physical_device_properties2` for a physical device of Vulkan
-    /// `device_api_version`: Vulkan 1.1's where the instance and it are both 1.1 or later, else the
-    /// extension's where the instance has it enabled, else `None` ([`super::properties2::source`]).
+    /// The commands of `VK_KHR_get_physical_device_properties2` for a physical device of
+    /// effective Vulkan version `effective_version` ([`Self::effective_device_version`]): Vulkan
+    /// 1.1's where it is 1.1 or later, else the extension's where the instance has it enabled, else
+    /// `None` ([`super::properties2::source`]).
     pub(super) fn properties2(
         &self,
-        device_api_version: u32,
+        effective_version: u32,
     ) -> Option<super::properties2::Properties2<'_>> {
         use super::properties2::{source, Properties2, Source};
-        match source(
-            self.instance_api_version,
-            device_api_version,
-            self.properties2_extension.is_some(),
-        )? {
+        match source(effective_version, self.properties2_extension.is_some())? {
             Source::Core => Some(Properties2::Core(&self.raw)),
             Source::Extension => Some(Properties2::Extension(self.properties2_extension.as_ref()?)),
         }
     }
+}
+
+/// The effective Vulkan version of a physical device of `device_api_version` on an instance
+/// created for `instance_api_version` ([`super::InstanceShared::effective_device_version`]).
+pub(super) fn effective_version(device_api_version: u32, instance_api_version: u32) -> u32 {
+    device_api_version.min(instance_api_version)
 }
 
 impl super::Instance {
@@ -316,9 +333,9 @@ impl super::Instance {
     /// Return a vector of the names of instance extensions actually available
     /// on `entry` that wgpu would like to enable.
     ///
-    /// The `instance_api_version` argument should be the instance's Vulkan API
-    /// version, as obtained from `vkEnumerateInstanceVersion`. This is the same
-    /// space of values as the `VK_API_VERSION` constants.
+    /// The `instance_api_version` argument is the Vulkan version the instance will be created
+    /// for, its `VkApplicationInfo::apiVersion`. This is the same space of values as the
+    /// `VK_API_VERSION` constants. No extension depends on it today.
     ///
     /// Note that wgpu can function without many of these extensions (for
     /// example, `VK_KHR_wayland_surface` is certainly not going to be available
@@ -425,16 +442,15 @@ impl super::Instance {
     ///
     /// - `raw_instance` must be created from `entry`
     /// - `raw_instance` must be created respecting `instance_api_version`, `extensions` and `flags`
-    /// - `instance_api_version` must be below Vulkan 1.1 for an instance created with
-    ///   `VkApplicationInfo::apiVersion` 1.0 (or without application information), whatever version
-    ///   the loader supports: where it and a physical device's version are both 1.1 or later,
-    ///   wgpu-hal uses the physical device's Vulkan 1.1 commands, as the specification allows only
-    ///   then (Initialization, "Extending Physical Device Core Functionality").
+    /// - `instance_api_version` must be the `VkApplicationInfo::apiVersion` that `raw_instance` was
+    ///   created with (0, or no application information, counts as Vulkan 1.0), not the loader's
+    ///   version: a physical device uses the functionality of a core version only up to the lower
+    ///   of it and its own ([`super::InstanceShared::effective_device_version`]).
     /// - `extensions` must be the instance extensions `raw_instance` was created with, and hold
     ///   those of `desired_extensions()` for the same entry, `instance_api_version` and flags, except
-    ///   `VK_KHR_get_physical_device_properties2`: without it, a physical device takes its commands
-    ///   from Vulkan 1.1 where the instance and it are both 1.1 or later, and is inspected with
-    ///   Vulkan 1.0's commands alone otherwise.
+    ///   `VK_KHR_get_physical_device_properties2`. Without it, a physical device of effective version
+    ///   below 1.1 is inspected with Vulkan 1.0's commands alone, and offers none of the device
+    ///   extensions that depend on it.
     /// - `android_sdk_version` is ignored and can be `0` for all platforms besides Android
     /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of `raw_instance`. If
     ///   `drop_callback` is [`Some`], `raw_instance` must be valid until the callback is called.
@@ -456,6 +472,13 @@ impl super::Instance {
         #[cfg_attr(not(windows), allow(unused))] agility_sdk: Option<wgt::Dx12AgilitySDK>,
         drop_callback: Option<crate::DropCallback>,
     ) -> Result<Self, crate::InstanceError> {
+        // "Providing a NULL VkInstanceCreateInfo::pApplicationInfo or providing an apiVersion of 0
+        // is equivalent to providing an apiVersion of VK_MAKE_API_VERSION(0,1,0,0)."
+        // (Initialization, `VkApplicationInfo`)
+        let instance_api_version = match instance_api_version {
+            0 => vk::API_VERSION_1_0,
+            version => version,
+        };
         log::debug!("Instance version: 0x{instance_api_version:x}");
 
         let debug_utils = if let Some(debug_utils_create_info) = debug_utils_create_info {
@@ -873,7 +896,7 @@ impl super::Instance {
             profiling::scope!("vkEnumerateInstanceVersion");
             unsafe { entry.try_enumerate_instance_version() }
         };
-        let instance_api_version = match version {
+        let loader_version = match version {
             // Vulkan 1.1+
             Ok(Some(version)) => version,
             Ok(None) => vk::API_VERSION_1_0,
@@ -884,6 +907,21 @@ impl super::Instance {
                 ));
             }
         };
+        // The version the instance is created for.
+        let instance_api_version = if loader_version < vk::API_VERSION_1_1 {
+            // Vulkan 1.0 doesn't like anything but 1.0 passed in here...
+            vk::API_VERSION_1_0
+        } else {
+            // This is the max Vulkan API version supported by `wgpu-hal`.
+            //
+            // If we want to increment this, there are some things that must be done first:
+            //  - Audit the behavioral differences between the previous and new API versions.
+            //  - Audit all extensions used by this backend:
+            //    - If any were promoted in the new API version and the behavior has changed, we must handle the new behavior in addition to the old behavior.
+            //    - If any were obsoleted in the new API version, we must implement a fallback for the new API version
+            //    - If any are non-KHR-vendored, we must ensure the new behavior is still correct (since backwards-compatibility is not guaranteed).
+            vk::API_VERSION_1_3
+        };
 
         let app_name = CString::new(desc.name).unwrap();
         let app_info = vk::ApplicationInfo::default()
@@ -891,22 +929,7 @@ impl super::Instance {
             .application_version(1)
             .engine_name(c"wgpu-hal")
             .engine_version(2)
-            .api_version(
-                // Vulkan 1.0 doesn't like anything but 1.0 passed in here...
-                if instance_api_version < vk::API_VERSION_1_1 {
-                    vk::API_VERSION_1_0
-                } else {
-                    // This is the max Vulkan API version supported by `wgpu-hal`.
-                    //
-                    // If we want to increment this, there are some things that must be done first:
-                    //  - Audit the behavioral differences between the previous and new API versions.
-                    //  - Audit all extensions used by this backend:
-                    //    - If any were promoted in the new API version and the behavior has changed, we must handle the new behavior in addition to the old behavior.
-                    //    - If any were obsoleted in the new API version, we must implement a fallback for the new API version
-                    //    - If any are non-KHR-vendored, we must ensure the new behavior is still correct (since backwards-compatibility is not guaranteed).
-                    vk::API_VERSION_1_3
-                },
-            );
+            .api_version(instance_api_version);
 
         let mut extensions = Self::desired_extensions(&entry, instance_api_version, desc.flags)?;
         let mut create_info = vk::InstanceCreateInfo::default();
