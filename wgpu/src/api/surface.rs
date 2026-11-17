@@ -148,6 +148,8 @@ impl Surface<'_> {
     ///   [`SurfaceCapabilities::scaling_modes`] or is refused by the platform (see
     ///   [`SurfaceScalingMode`](crate::SurfaceScalingMode)). On the web backend, which lists no
     ///   scaling mode, the surface reports as lost instead, as there is no `catch_unwind` there.
+    ///   An unlisted mode leaves the surface configured as it was; a listed mode that the platform
+    ///   refuses leaves it unconfigured, its previous swapchain released by then.
     /// - A background color is requested where
     ///   [`SurfaceCapabilities::supports_background_color`] is false (on the web backend, the
     ///   surface reports as lost instead).

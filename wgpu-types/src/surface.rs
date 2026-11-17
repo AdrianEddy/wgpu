@@ -206,7 +206,10 @@ pub enum SurfaceScalingMode {
     ///
     /// With DXGI (DX12, and the DXGI swapchain of the Vulkan backend), a window
     /// with the `WS_EX_LAYOUTRTL` style aligns the top-right corners instead
-    /// (`DXGI_SCALING_NONE`).
+    /// (`DXGI_SCALING_NONE`). With a Vulkan swapchain, where the surface's
+    /// current transform is not the identity (a rotated display), the platform
+    /// decides whether the corner is taken before or after the rotation
+    /// (`VkPresentGravityFlagBitsKHR`), so it may be another corner of the screen.
     OneToOne = 3,
 }
 
@@ -987,7 +990,8 @@ pub struct SurfaceConfiguration<V> {
     /// placement where it lists none or refuses the mode chosen. On Metal it leaves the layer's
     /// `contentsGravity` as it is. Any other mode must be listed
     /// in [`SurfaceCapabilities::scaling_modes`], and configuring fails with a validation error
-    /// where the platform refuses it.
+    /// where the platform refuses it (on the WebGPU backend, which lists no mode, the surface
+    /// reports as lost instead).
     pub scaling_mode: SurfaceScalingMode,
     /// The colour with which the platform fills the part of the surface that a presented
     /// texture leaves uncovered, or `None` for the platform's own colour.
@@ -997,7 +1001,7 @@ pub struct SurfaceConfiguration<V> {
     /// faster than the application presents textures of its new size. The window's own colour
     /// there makes that strip blend with the window. A colour needs a surface whose
     /// [`SurfaceCapabilities::supports_background_color`] is true; it is a validation error
-    /// elsewhere.
+    /// elsewhere (on the WebGPU backend, the surface reports as lost instead).
     ///
     /// With DXGI (`IDXGISwapChain1::SetBackgroundColor`), the colour shows only with
     /// [`SurfaceScalingMode::OneToOne`] (`DXGI_SCALING_NONE`), and wgpu gives it to DXGI only
