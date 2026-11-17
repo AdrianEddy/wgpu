@@ -618,7 +618,8 @@ impl Instance {
     }
 
     /// `backend_adapters`, the adapters that `backend` exposed, less those that do not
-    /// suit `desc`, with their features and limits filtered as this instance requires.
+    /// suit `desc`, each taken by a limit bucket if `desc` asks for it, then adjusted as this
+    /// instance requires ([`Self::adjust_exposed_adapter`]).
     /// Records in `unsuitable` that `backend` exposed no adapter, or none for
     /// `force_fallback_adapter`, and that `desc.compatible_surface` rejected one of its
     /// adapters (even if others remain). Adapters that `adapter_allowed` or the limit
@@ -674,21 +675,26 @@ impl Instance {
             }
         }
 
-        let backend_adapters = backend_adapters
+        // A limit bucket takes the adapter as its backend exposed it, as it takes one that a
+        // hal user buckets before `create_adapter_from_hal`, and the bucket is then adjusted:
+        // under strict WebGPU compliance, the bucket that takes the adapter is the one that takes
+        // it without, offered as WebGPU's. `adapter_allowed` judges the adapter before its
+        // bucket, and reads nothing that the adjustment changes.
+        backend_adapters
             .into_iter()
+            .filter(|raw| self.adapter_allowed(raw))
+            .filter_map(|raw| {
+                if desc.apply_limit_buckets {
+                    limits::apply_limit_buckets(raw)
+                } else {
+                    Some(raw)
+                }
+            })
             .map(|mut raw| {
                 self.adjust_exposed_adapter(&mut raw);
                 raw
             })
-            .filter(|raw| self.adapter_allowed(raw));
-
-        if desc.apply_limit_buckets {
-            backend_adapters
-                .filter_map(limits::apply_limit_buckets)
-                .collect()
-        } else {
-            backend_adapters.collect()
-        }
+            .collect()
     }
 
     /// Makes `raw`, an adapter that a backend of this instance exposed, the adapter this
@@ -696,8 +702,8 @@ impl Instance {
     /// [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its features and limits are
     /// WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is. Every adapter of this
     /// instance takes it, whether enumerated or given by a hal user
-    /// ([`Self::create_adapter_from_hal`]): a device's validation relies on its adapter's
-    /// features and limits having taken it.
+    /// ([`Self::create_adapter_from_hal`]), after its limit bucket where it has one: a device's
+    /// validation relies on its adapter's features and limits having taken it.
     fn adjust_exposed_adapter(&self, raw: &mut hal::DynExposedAdapter) {
         self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
         filter_features_and_limits(self.flags, &mut raw.features, &mut raw.capabilities.limits);
@@ -2197,6 +2203,45 @@ mod tests {
                 let [enumerated] = enumerated.as_slice() else {
                     panic!("{flags:?}: {} adapters enumerated", enumerated.len());
                 };
+                assert_eq!(
+                    adapter.raw.capabilities.limits, enumerated.raw.capabilities.limits,
+                    "{flags:?}"
+                );
+                assert_eq!(adapter.raw.features, enumerated.raw.features, "{flags:?}");
+            }
+        }
+
+        /// A hal adapter bucketed by [`limits::apply_limit_buckets`] and given to
+        /// `create_adapter_from_hal` offers what enumeration with limit bucketing offers of it,
+        /// with each instance flag that changes an adapter's offer: the same bucket (`warp`, the
+        /// noop adapter being a CPU one), features, limits and info, the backend's capabilities
+        /// that the bucket records included. Enumeration buckets the adapter as its backend
+        /// exposed it, then adjusts it, as the hal path does. Before, enumeration adjusted first:
+        /// under strict compliance no bucket took the adapter, and with indirect validation the
+        /// bucket recorded the adjusted buffer limits as the backend's.
+        #[test]
+        fn a_bucketed_hal_adapter_offers_what_bucketed_enumeration_offers() {
+            for flags in [
+                InstanceFlags::empty(),
+                InstanceFlags::VALIDATION_INDIRECT_CALL,
+                InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+                InstanceFlags::VALIDATION_INDIRECT_CALL | InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+            ] {
+                let instance = noop_instance(flags);
+                let raw = limits::apply_limit_buckets(exposed(&instance)).unwrap();
+                // SAFETY: Exposed by this instance's backend.
+                let adapter = unsafe { instance.create_adapter_from_hal(raw) };
+                let enumerated = instance.enumerate_adapters(Backends::NOOP, true);
+                let [enumerated] = enumerated.as_slice() else {
+                    panic!("{flags:?}: {} adapters enumerated", enumerated.len());
+                };
+                let bucket = enumerated.raw.info.limit_bucket.as_ref().unwrap();
+                assert_eq!(bucket.name, "warp", "{flags:?}");
+                assert_eq!(
+                    bucket.raw_limits.max_buffer_size, DRIVER_BUFFER_SIZE,
+                    "{flags:?}"
+                );
+                assert_eq!(adapter.raw.info, enumerated.raw.info, "{flags:?}");
                 assert_eq!(
                     adapter.raw.capabilities.limits, enumerated.raw.capabilities.limits,
                     "{flags:?}"

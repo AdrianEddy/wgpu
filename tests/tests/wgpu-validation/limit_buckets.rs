@@ -26,11 +26,25 @@ const UPLEVEL_FEATURES: wgt::Features = {
         .union(Features::IMMEDIATES)
 };
 
+/// The features that limit bucketing leaves alone (`wgpu_core::limits::EXEMPT_FEATURES`).
+const EXEMPT_FEATURES: wgt::Features = wgt::Features::EXTERNAL_TEXTURE
+    .union(wgt::Features::TEXTURE_FORMAT_NV12)
+    .union(wgt::Features::TEXTURE_FORMAT_P010)
+    .union(wgt::Features::TEXTURE_FORMAT_16BIT_NORM);
+
 fn create_noop_instance(options: wgt::NoopBackendOptions) -> Arc<wgc::instance::Instance> {
+    create_noop_instance_with_flags(options, wgt::InstanceFlags::default())
+}
+
+fn create_noop_instance_with_flags(
+    options: wgt::NoopBackendOptions,
+    flags: wgt::InstanceFlags,
+) -> Arc<wgc::instance::Instance> {
     wgc::instance::Instance::new(
         "test",
         wgt::instance::InstanceDescriptor {
             backends: wgt::Backends::NOOP,
+            flags,
             backend_options: wgt::BackendOptions {
                 noop: options,
                 ..Default::default()
@@ -75,11 +89,6 @@ fn enabled() {
 
 #[test]
 fn exempt_features() {
-    const EXEMPT_FEATURES: wgt::Features = wgt::Features::EXTERNAL_TEXTURE
-        .union(wgt::Features::TEXTURE_FORMAT_NV12)
-        .union(wgt::Features::TEXTURE_FORMAT_P010)
-        .union(wgt::Features::TEXTURE_FORMAT_16BIT_NORM);
-
     let instance = create_noop_instance(wgt::NoopBackendOptions {
         enable: true,
         device_type: Some(wgt::DeviceType::DiscreteGpu),
@@ -337,6 +346,60 @@ fn enumerate_adapters_bucketing_enabled() {
 
     // With bucketing, should have bucketed limits
     assert_eq!(limits, wgt::Limits::defaults());
+}
+
+/// Under strict WebGPU compliance, the bucket that takes an adapter is the one that takes it
+/// without, and the instance offers it as WebGPU's: without its native-only features
+/// (`SUBGROUP`) and limits. `request_adapter` offers the adapter that enumeration offers. Before,
+/// the bucket was judged after the strict filter had removed `SUBGROUP` and zeroed the native-only
+/// limits, which every bucket asks for (`max_buffers_and_acceleration_structures_per_shader_stage`
+/// of 28 at least), and no adapter was offered.
+#[test]
+fn strict_compliance_offers_the_bucket_as_webgpus() {
+    let options = wgt::NoopBackendOptions {
+        enable: true,
+        device_type: Some(wgt::DeviceType::DiscreteGpu),
+        subgroup_min_size: Some(32),
+        subgroup_max_size: Some(32),
+        ..Default::default() // noop defaults to every feature and max limits
+    };
+    let request = wgt::RequestAdapterOptions {
+        apply_limit_buckets: true,
+        ..Default::default()
+    };
+    let offered = |flags: wgt::InstanceFlags| {
+        let instance = create_noop_instance_with_flags(options.clone(), flags);
+        let without = instance.enumerate_adapters(wgt::Backends::NOOP, false);
+        assert_eq!(without.len(), 1, "{flags:?}, without bucketing");
+        let enumerated = instance.enumerate_adapters(wgt::Backends::NOOP, true);
+        let [adapter] = enumerated.as_slice() else {
+            panic!("{flags:?}: {} adapters enumerated", enumerated.len());
+        };
+        let requested = instance
+            .request_adapter(&request, wgt::Backends::NOOP)
+            .unwrap();
+        assert_eq!(requested.get_info(), adapter.get_info(), "{flags:?}");
+        assert_eq!(requested.features(), adapter.features(), "{flags:?}");
+        assert_eq!(requested.limits(), adapter.limits(), "{flags:?}");
+        (adapter.get_info(), adapter.features(), adapter.limits())
+    };
+    let bucket = |info: &wgt::AdapterInfo| info.limit_bucket.as_ref().unwrap().name.clone();
+
+    let (info, features, limits) = offered(wgt::InstanceFlags::default());
+    let (strict_info, strict_features, strict_limits) =
+        offered(wgt::InstanceFlags::default() | wgt::InstanceFlags::STRICT_WEBGPU_COMPLIANCE);
+
+    assert_eq!(bucket(&info), "m1");
+    assert!(features.contains(wgt::Features::SUBGROUP));
+    assert_eq!(bucket(&strict_info), bucket(&info));
+    assert_eq!(
+        strict_features,
+        features & (wgt::Features::all_webgpu_mask() | EXEMPT_FEATURES)
+    );
+    assert!(!strict_features.contains(wgt::Features::SUBGROUP));
+    let mut webgpu_limits = limits;
+    webgpu_limits.zero_native_only();
+    assert_eq!(strict_limits, webgpu_limits);
 }
 
 #[test]
