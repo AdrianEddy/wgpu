@@ -528,3 +528,116 @@ fn dropping_the_queue_after_its_wait_gave_up_meets_the_idle_waits_requirement() 
     assert_eq!(noop.take_violations(), [] as [DeviceViolation; 0]);
     noop.resume_gpu();
 }
+
+/// A noop adapter that reports wgpu's default limits.
+fn noop_adapter_with_default_limits() -> wgpu::Adapter {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::NOOP,
+        backend_options: wgpu::BackendOptions {
+            noop: wgpu::NoopBackendOptions {
+                limits: Some(wgpu::Limits::default()),
+                ..wgpu::NoopBackendOptions::enabled()
+            },
+            ..Default::default()
+        },
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+        .expect("noop backend adapter absent when it should be")
+}
+
+/// A refused request's reason is reachable typed: a limit better than the adapter allows is
+/// `LimitsExceeded`, whose `FailedLimit` names the limit and gives the value requested and the
+/// value allowed, for a maximum and for an alignment.
+#[test]
+fn a_limit_the_adapter_does_not_allow_is_named_with_both_values() {
+    let adapter = noop_adapter_with_default_limits();
+    let allowed = adapter.limits();
+    let cases = [
+        (
+            "max_texture_dimension_2d",
+            wgpu::Limits {
+                max_texture_dimension_2d: allowed.max_texture_dimension_2d + 1,
+                ..allowed.clone()
+            },
+            u64::from(allowed.max_texture_dimension_2d) + 1,
+            u64::from(allowed.max_texture_dimension_2d),
+        ),
+        (
+            "min_uniform_buffer_offset_alignment",
+            wgpu::Limits {
+                min_uniform_buffer_offset_alignment: allowed.min_uniform_buffer_offset_alignment
+                    / 2,
+                ..allowed.clone()
+            },
+            u64::from(allowed.min_uniform_buffer_offset_alignment / 2),
+            u64::from(allowed.min_uniform_buffer_offset_alignment),
+        ),
+    ];
+    for (name, required_limits, requested, allowed) in cases {
+        let error = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_limits,
+            ..Default::default()
+        }))
+        .expect_err(name);
+        let Some(wgpu::wgc::instance::RequestDeviceError::LimitsExceeded(failed)) = error.as_core()
+        else {
+            panic!("{name}: not LimitsExceeded: {error:?}");
+        };
+        assert_eq!(failed.name(), name);
+        assert_eq!(failed.requested(), requested, "{name}");
+        assert_eq!(failed.allowed(), allowed, "{name}");
+    }
+}
+
+/// Experimental features requested without the opt-in are `ExperimentalFeaturesNotEnabled`, with
+/// the features, through `request_device` and through `create_device_from_hal`, a raw device's path;
+/// and a hal device's feature that it was not opened with is `FeaturesNotOpened`.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_refused_requests_reason_is_reachable_typed() {
+    use wgpu::wgc::instance::RequestDeviceError as Core;
+    use wgpu_hal::{api::Noop, Adapter as _};
+
+    let adapter = noop_adapter_with_default_limits();
+    let experimental = wgpu::Features::EXPERIMENTAL_MESH_SHADER;
+    let descriptor = wgpu::DeviceDescriptor {
+        required_features: experimental,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
+        ..Default::default()
+    };
+    let error = pollster::block_on(adapter.request_device(&descriptor)).expect_err("experimental");
+    assert!(
+        matches!(error.as_core(), Some(Core::ExperimentalFeaturesNotEnabled(features)) if *features == experimental),
+        "{error:?}"
+    );
+
+    let open = |features| {
+        // SAFETY: Used to open a device.
+        let hal = unsafe { adapter.as_hal::<Noop>() }.unwrap();
+        // SAFETY: No requirements on the noop backend.
+        unsafe { hal.open(features, &wgpu::Limits::default(), &Default::default()) }.unwrap()
+    };
+    // SAFETY: Opened from this adapter, with default limits.
+    let error = unsafe { adapter.create_device_from_hal(open(experimental), &descriptor) }
+        .expect_err("experimental, from hal");
+    assert!(
+        matches!(error.as_core(), Some(Core::ExperimentalFeaturesNotEnabled(features)) if *features == experimental),
+        "{error:?}"
+    );
+    // SAFETY: Opened from this adapter, with default limits.
+    let error = unsafe {
+        adapter.create_device_from_hal(
+            open(wgpu::Features::empty()),
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::SHADER_F16,
+                ..Default::default()
+            },
+        )
+    }
+    .expect_err("a feature the hal device was not opened with");
+    assert!(
+        matches!(error.as_core(), Some(Core::FeaturesNotOpened(features)) if *features == wgpu::Features::SHADER_F16),
+        "{error:?}"
+    );
+}

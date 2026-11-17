@@ -52,6 +52,24 @@ pub struct FailedLimit {
     allowed: u64,
 }
 
+impl FailedLimit {
+    /// The limit's name: the name of its field of [`Limits`] (`max_texture_dimension_2d`).
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The value that was requested.
+    pub fn requested(&self) -> u64 {
+        self.requested
+    }
+
+    /// The best value allowed, which [`Self::requested`] is better than: above it for a maximum,
+    /// below it for a minimum (an alignment).
+    pub fn allowed(&self) -> u64 {
+        self.allowed
+    }
+}
+
 impl WebGpuError for FailedLimit {
     fn webgpu_error_type(&self) -> ErrorType {
         ErrorType::Validation

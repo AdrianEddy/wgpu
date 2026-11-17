@@ -1100,6 +1100,27 @@ impl RequestDeviceError {
             inner: RequestDeviceErrorKind::Custom(message),
         }
     }
+
+    /// Returns the underlying wgpu-core error if the request failed on the wgpu-core backend,
+    /// otherwise `None` (a WebGPU or custom backend's error, which is a message).
+    ///
+    /// Its variant is the reason, to match on: a limit better than the adapter allows
+    /// ([`LimitsExceeded`], whose [`FailedLimit`] names the limit and both values), features the
+    /// adapter does not support, experimental features requested without the opt-in, or a device
+    /// that was lost or ran out of memory.
+    ///
+    /// [`LimitsExceeded`]: wgc::instance::RequestDeviceError::LimitsExceeded
+    /// [`FailedLimit`]: wgc::limits::FailedLimit
+    #[cfg(wgpu_core)]
+    pub fn as_core(&self) -> Option<&wgc::instance::RequestDeviceError> {
+        match &self.inner {
+            RequestDeviceErrorKind::Core(error) => Some(error),
+            #[cfg(webgpu)]
+            RequestDeviceErrorKind::WebGpu(_) => None,
+            #[cfg(custom)]
+            RequestDeviceErrorKind::Custom(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
