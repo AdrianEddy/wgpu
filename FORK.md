@@ -109,7 +109,10 @@ no release has, so it has no entry of its own.
 | 77 | `ee0778972` | feat!: a background colour for the uncovered part of a surface | The resize lane's R2, window half (`OXQ-resize-smoothness.md` §7.5.4), sent to this lane by the owner (2026-11-16): `SurfaceConfiguration::background_color` and `SurfaceCapabilities::supports_background_color`. A DXGI window swapchain, DX12's or the Vulkan backend's, takes it with `OneToOne` (`IDXGISwapChain1::SetBackgroundColor`, sRGB-encoded components); both present with `Present1`. Other surfaces refuse a colour. The owner kept the field ("Keep the config field", 2026-11-17). The `#808080` probe (the resize lane, `OXQ-resize-smoothness.md` §8.8.5, 2026-11-17) showed the composition taking the components as encoded values, so DXGI gets the sRGB-encoded components, by the owner's criterion, from both DXGI swapchains. | a release has an equivalent |
 | 78 | `e46af3961` | docs: FORK.md: describe device capabilities and the background colour | This file | the branch is dropped |
 | 79 | `c379bfe46` | fix(metal)!: leave a layer's contentsGravity alone under Auto | The owner's ruling on Metal's layer, "Touch it only for an explicit mode" (2026-11-17): Metal sets the layer's `contentsGravity` only for an explicit scaling mode, as `raw-window-metal`'s "Semantics" ask of a library that is handed a layer; `Auto` leaves it as it is, also the gravity of an earlier explicit mode. `hal::SurfaceCapabilities::auto_keeps_placement` (breaking): wgpu-core configures `Auto` as it is on such a surface instead of resolving it to a listed mode. Type-checked for iOS and macOS; nothing ran on Apple hardware. | a release contains #10196's scaling mode with the layer left alone under `Auto` |
-| 80 | (this commit) | docs: FORK.md: describe Metal's layer and present scaling's upstream | This file | the branch is dropped |
+| 80 | `483244ad7` | docs: FORK.md: describe Metal's layer and present scaling's upstream | This file | the branch is dropped |
+| 81 | `c45080338` | feat: let callers match on why a device request was refused | The wgpu-move lane's round 4, item 2, the owner's "Fork round now, before landing" (2026-11-17): `RequestDeviceError::as_core` (the wgpu-core error, on its backend) and `wgpu_core::limits::FailedLimit::{name, requested, allowed}`, shaped on upstream's `Device::as_core` (`ef4d18d4b`). Upstream trunk has neither (`110b5881f`). | upstream takes the accessors |
+| 82 | `d2763971e` | fix(vulkan)!: use Vulkan 1.1's properties2 commands where allowed | The wgpu-move lane's round 4, item 3, the owner's "Fork item: core on 1.1+" (2026-11-17): a physical device takes `vkGetPhysicalDeviceProperties2`, `...Features2`, `...MemoryProperties2` and `...FormatProperties2` from Vulkan 1.1 where the instance and it are both 1.1 or later, else from `VK_KHR_get_physical_device_properties2` where enabled (`vulkan::properties2`). An instance without the extension had crippled adapters, and devices that panicked reading their memory budget. `VK_EXT_memory_budget` is dropped where the commands are missing; `Instance::from_raw`'s contract changes. | a release contains an equivalent |
+| 83 | (this commit) | docs: FORK.md: describe device-request reasons and core properties2 | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after it (their tests use
 it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25 as two docs PRs (its row); 26 and 27 with the PRs
@@ -214,6 +217,22 @@ device's surfaces (`hal_capabilities_for_device`) is 73's device rule. 77 is a P
 upstream issue yet, and upstream may prefer it as a DX12 extension (the resize lane's first design) to a
 configuration field. It is a field here because a consumer sets the colour of a window as it sets its scaling mode,
 on every backend's surface, and `supports_background_color` tells where it applies, as `scaling_modes` does.
+
+81 is a PR of its own: no issue or PR upstream gives a refused device request's reason (trunk `110b5881f`,
+2026-11-17), and `Device::as_core` (`ef4d18d4b`) is the shape upstream chose for reaching wgpu-core from wgpu.
+
+82 is a PR of its own, and departs from `trunk`'s comment on the instance's extensions: "Even though the extension
+was promoted to Vulkan 1.1, we still require the extension so that we don't have to conditionally use the functions
+provided by the 1.1 instance". wgpu-hal enables the extension on its own instances, but a caller's instance
+(`Instance::from_raw`) need not have it, and its adapters then lost every property and feature queried through
+those commands. The specification puts the commands in Vulkan 1.1 ("Provided by VK_VERSION_1_1"; the extension's are
+aliases, `vk.xml`: `promotedto="VK_VERSION_1_1"`), and lets a physical device use them "when both
+`VkPhysicalDeviceProperties::apiVersion` and `VkApplicationInfo::apiVersion` are greater than or equal to the version
+of Vulkan that added the new functionality" (Initialization, "Extending Physical Device Core Functionality"; and
+Fundamentals, "Valid Usage for Newer Core Versions"). The extension serves only what that leaves: a physical device
+below 1.1, or a 1.0 instance, where it is enabled (Fundamentals, "Valid Usage for Extensions"). The decision is one
+pure function per physical device (`properties2::source`), so a 1.1 instance with a 1.0 physical device takes the
+extension, not core; requiring the extension in every caller would be a workaround for a core command.
 
 ## The future of lazy adapter selection
 
@@ -758,6 +777,14 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   field. The colour shows only with `OneToOne`, so an application that sets one and stretches sees no change. DXGI gets
   the colour's sRGB-encoded components, as the composed SDR desktop showed (`#808080` given as linear components showed
   `#373737`); what an HDR or wide-colour desktop composes was not checked.
+- **A refused device request's reason** (commit 81): `RequestDeviceError::as_core` is `cfg(wgpu_core)`, and
+  `FailedLimit`'s accessors give `name` as `&str` (the field is a `Cow<'static, str>`).
+- **The properties2 commands** (commit 82): wgpu's own instances now query through Vulkan 1.1's commands wherever
+  the instance and the physical device are 1.1 or later, instead of the extension's, which `vk.xml` makes their
+  aliases. `Instance::from_raw`'s safety contract: `instance_api_version` must be below 1.1 for an instance
+  created for Vulkan 1.0, whatever the loader supports (a caller that passes `vkEnumerateInstanceVersion` for such
+  an instance breaks it), and `extensions` need not hold `VK_KHR_get_physical_device_properties2`. A physical device
+  without the commands no longer keeps `VK_EXT_memory_budget`.
 - **A wrapped adapter's offer** (commit 71): `create_adapter_from_hal` now changes the limits, and under strict
   compliance the features, that a hal user's adapter reports, as enumeration changes an enumerated adapter's. A
   caller that relied on the driver's limits through a wrapped adapter sees enumeration's.
@@ -799,6 +826,9 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   Naga's SPIR-V snapshots were regenerated with the `spirv-cross` of Vulkan SDK 1.4.363, where CI pins 1.4.357: one
   GLSL snapshot that 1.4.363 writes differently, and that the series does not change, was left as it was.
 - Commit 7 (Vulkan discard) is tested only by commit 26's `discarded_images`.
+- 82's extension branch is pinned by `properties2::source`'s table only: every Vulkan instance and physical device
+  here is 1.3 or later, so none takes the extension. Its DRM surface site (Linux, a DRM display) is type-checked on
+  eddy2lnx only, and `VK_EXT_memory_budget`'s drop, which needs a physical device without the commands, has no pin.
 - Commit 24 (Metal) and commit 21's `copy_external_image_to_texture` (WebGL) were type-checked with Rust 1.99.0
   for `aarch64-apple-ios` and `wasm32-unknown-unknown`; nothing ran on those platforms. So were 73's Metal mapping
   (`contentsGravity`, its refusal of `OneToOne`), 79's `Auto` that leaves the gravity alone (its wgpu-core half
