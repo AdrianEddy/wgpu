@@ -906,20 +906,18 @@ impl super::Device {
             return None;
         }
 
-        let get_physical_device_properties = self
+        // The adapter drops `VK_EXT_memory_budget` where the physical device lacks these commands.
+        let properties2 = self
             .shared
             .instance
-            .get_physical_device_properties
-            .as_ref()
-            .unwrap();
+            .properties2(self.shared.device_api_version)
+            .expect("a device with VK_EXT_memory_budget has the properties2 commands");
 
         let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
         let mut props = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
 
-        unsafe {
-            get_physical_device_properties
-                .get_physical_device_memory_properties2(self.shared.physical_device, &mut props);
-        }
+        // SAFETY: The device's physical device, with `VK_EXT_memory_budget`'s structure.
+        unsafe { properties2.memory_properties(self.shared.physical_device, &mut props) };
 
         let vk::PhysicalDeviceMemoryProperties2 {
             memory_properties, ..

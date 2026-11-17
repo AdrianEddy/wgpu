@@ -38,6 +38,7 @@ mod drm;
 mod instance;
 mod memory;
 mod pnext_chain;
+mod properties2;
 mod queue_lock;
 mod sampler;
 mod semaphore_list;
@@ -188,7 +189,9 @@ pub struct InstanceShared {
     flags: wgt::InstanceFlags,
     memory_budget_thresholds: wgt::MemoryBudgetThresholds,
     debug_utils: Option<DebugUtils>,
-    get_physical_device_properties: Option<khr::get_physical_device_properties2::Instance>,
+    /// `VK_KHR_get_physical_device_properties2`'s commands, where the instance has it enabled. A
+    /// physical device takes them from here or from Vulkan 1.1 ([`Self::properties2`]).
+    properties2_extension: Option<khr::get_physical_device_properties2::Instance>,
     entry: ash::Entry,
     has_nv_optimus: bool,
     android_sdk_version: u32,
@@ -213,7 +216,7 @@ impl fmt::Debug for InstanceShared {
             flags,
             memory_budget_thresholds,
             debug_utils: _,
-            get_physical_device_properties: _,
+            properties2_extension: _,
             entry: _,
             has_nv_optimus,
             android_sdk_version,
@@ -651,6 +654,8 @@ struct DeviceShared {
     queue_scope: QueueLockScope,
     instance: Arc<InstanceShared>,
     physical_device: vk::PhysicalDevice,
+    /// The physical device's Vulkan version (`VkPhysicalDeviceProperties::apiVersion`).
+    device_api_version: u32,
     enabled_extensions: Vec<&'static CStr>,
     /// Whether the device has `swapchainMaintenance1`: presents signal fences, so that a
     /// swapchain's teardown waits on its presents' fences instead of for the queue to become

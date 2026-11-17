@@ -270,6 +270,24 @@ impl super::InstanceShared {
     pub fn extensions(&self) -> &[&'static CStr] {
         &self.extensions[..]
     }
+
+    /// The commands of `VK_KHR_get_physical_device_properties2` for a physical device of Vulkan
+    /// `device_api_version`: Vulkan 1.1's where the instance and it are both 1.1 or later, else the
+    /// extension's where the instance has it enabled, else `None` ([`super::properties2::source`]).
+    pub(super) fn properties2(
+        &self,
+        device_api_version: u32,
+    ) -> Option<super::properties2::Properties2<'_>> {
+        use super::properties2::{source, Properties2, Source};
+        match source(
+            self.instance_api_version,
+            device_api_version,
+            self.properties2_extension.is_some(),
+        )? {
+            Source::Core => Some(Properties2::Core(&self.raw)),
+            Source::Extension => Some(Properties2::Extension(self.properties2_extension.as_ref()?)),
+        }
+    }
 }
 
 impl super::Instance {
@@ -371,9 +389,10 @@ impl super::Instance {
         // Provides wide color gamut
         extensions.push(ext::swapchain_colorspace::NAME);
 
-        // VK_KHR_get_physical_device_properties2
-        // Even though the extension was promoted to Vulkan 1.1, we still require the extension
-        // so that we don't have to conditionally use the functions provided by the 1.1 instance
+        // VK_KHR_get_physical_device_properties2, where available. Its commands are Vulkan 1.1's,
+        // which a physical device uses where it and the instance are both 1.1 or later; the
+        // extension serves a physical device below 1.1, and every one of a 1.0 instance
+        // (`properties2::source`).
         extensions.push(khr::get_physical_device_properties2::NAME);
 
         // VK_KHR_surface_maintenance1 and VK_EXT_surface_maintenance1, which depend on
@@ -406,8 +425,16 @@ impl super::Instance {
     ///
     /// - `raw_instance` must be created from `entry`
     /// - `raw_instance` must be created respecting `instance_api_version`, `extensions` and `flags`
-    /// - `extensions` must be a superset of `desired_extensions()` and must be created from the
-    ///   same entry, `instance_api_version`` and flags.
+    /// - `instance_api_version` must be below Vulkan 1.1 for an instance created with
+    ///   `VkApplicationInfo::apiVersion` 1.0 (or without application information), whatever version
+    ///   the loader supports: where it and a physical device's version are both 1.1 or later,
+    ///   wgpu-hal uses the physical device's Vulkan 1.1 commands, as the specification allows only
+    ///   then (Initialization, "Extending Physical Device Core Functionality").
+    /// - `extensions` must be the instance extensions `raw_instance` was created with, and hold
+    ///   those of `desired_extensions()` for the same entry, `instance_api_version` and flags, except
+    ///   `VK_KHR_get_physical_device_properties2`: without it, a physical device takes its commands
+    ///   from Vulkan 1.1 where the instance and it are both 1.1 or later, and is inspected with
+    ///   Vulkan 1.0's commands alone otherwise.
     /// - `android_sdk_version` is ignored and can be `0` for all platforms besides Android
     /// - If `drop_callback` is [`None`], wgpu-hal will take ownership of `raw_instance`. If
     ///   `drop_callback` is [`Some`], `raw_instance` must be valid until the callback is called.
@@ -455,7 +482,7 @@ impl super::Instance {
             None
         };
 
-        let get_physical_device_properties =
+        let properties2_extension =
             if extensions.contains(&khr::get_physical_device_properties2::NAME) {
                 log::debug!("Enabling device properties2");
                 Some(khr::get_physical_device_properties2::Instance::new(
@@ -476,7 +503,7 @@ impl super::Instance {
                 flags,
                 memory_budget_thresholds,
                 debug_utils,
-                get_physical_device_properties,
+                properties2_extension,
                 entry,
                 has_nv_optimus,
                 instance_api_version,

@@ -5,6 +5,7 @@
 //! Run them only under the GPU lock: the CPU suites leave out every test whose name contains
 //! `device_tests::`. They watch the Vulkan calls themselves, through [`call_log`].
 
+mod core_properties2;
 mod enabled_features;
 mod injected;
 mod present_fences;

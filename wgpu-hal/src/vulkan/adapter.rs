@@ -1792,9 +1792,11 @@ pub(super) struct FormatSupport {
 
 impl FormatSupport {
     /// Queries the format support of `phd`, a physical device of `instance` that `caps`
-    /// describes, and that offers `offered`.
+    /// describes, and that offers `offered`; `properties2` are its commands of
+    /// `VK_KHR_get_physical_device_properties2`, if it has them.
     fn query(
         instance: &ash::Instance,
+        properties2: Option<super::properties2::Properties2<'_>>,
         phd: vk::PhysicalDevice,
         caps: &PhysicalDeviceProperties,
         offered: &PhysicalDeviceFeatures,
@@ -1832,7 +1834,11 @@ impl FormatSupport {
                 vk::FormatFeatureFlags::COLOR_ATTACHMENT
                     | vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND,
             ),
-            bgra8unorm_storage: supports_bgra8unorm_storage(instance, phd, caps.device_api_version),
+            bgra8unorm_storage: supports_bgra8unorm_storage(
+                properties2,
+                phd,
+                caps.device_api_version,
+            ),
             float32_filterable: is_float32_filterable_supported(instance, phd),
             float32_blendable: is_float32_blendable_supported(instance, phd),
             norm16: is_format_16bit_norm_supported(instance, phd),
@@ -1953,21 +1959,25 @@ impl PhysicalDeviceProperties {
     /// Drops the extensions that the device lists but that a device of an instance with
     /// `instance_extensions` cannot enable. A device extension that depends on an instance
     /// extension that the instance has not enabled is unsupported, whatever the device lists (the
-    /// specification's "Extension Dependencies"). The swapchain maintenance extensions also depend
-    /// on `VK_KHR_get_physical_device_properties2` (or Vulkan 1.1), through which wgpu-hal queries
-    /// and enables their feature: `gpdp2` says whether the instance has its functions.
+    /// specification's "Extension Dependencies"). The swapchain maintenance extensions and
+    /// `VK_EXT_memory_budget` also depend on `VK_KHR_get_physical_device_properties2` or Vulkan 1.1,
+    /// through whose commands wgpu-hal queries and enables the former's feature and reads the
+    /// latter's budgets: `gpdp2` says whether this physical device has those commands
+    /// ([`super::InstanceShared::properties2`]).
     fn drop_extensions_unusable_with(
         &mut self,
         instance_extensions: &[&'static CStr],
         gpdp2: bool,
     ) {
         self.supported_extensions.retain(|extension| {
-            SWAPCHAIN_MAINTENANCE1
-                .iter()
-                .all(|&(device_extension, instance_extension)| {
-                    extension.extension_name_as_c_str() != Ok(device_extension)
-                        || (gpdp2 && instance_extensions.contains(&instance_extension))
-                })
+            let name = extension.extension_name_as_c_str();
+            (gpdp2 || name != Ok(ext::memory_budget::NAME))
+                && SWAPCHAIN_MAINTENANCE1
+                    .iter()
+                    .all(|&(device_extension, instance_extension)| {
+                        name != Ok(device_extension)
+                            || (gpdp2 && instance_extensions.contains(&instance_extension))
+                    })
         });
     }
 
@@ -2712,15 +2722,13 @@ impl super::InstanceShared {
                 unsafe { self.raw.enumerate_device_extension_properties(phd).unwrap() };
             capabilities.properties = unsafe { self.raw.get_physical_device_properties(phd) };
             capabilities.device_api_version = capabilities.properties.api_version;
-            capabilities.drop_extensions_unusable_with(
-                &self.extensions,
-                self.get_physical_device_properties.is_some(),
-            );
+            let properties2 = self.properties2(capabilities.device_api_version);
+            capabilities.drop_extensions_unusable_with(&self.extensions, properties2.is_some());
 
             let supports_multiview = capabilities.device_api_version >= vk::API_VERSION_1_1
                 || capabilities.supports_extension(khr::multiview::NAME);
 
-            if let Some(ref get_device_properties) = self.get_physical_device_properties {
+            if let Some(properties2) = properties2 {
                 // Get these now to avoid borrowing conflicts later
                 let supports_maintenance3 = capabilities.device_api_version >= vk::API_VERSION_1_1
                     || capabilities.supports_extension(khr::maintenance3::NAME);
@@ -2747,94 +2755,94 @@ impl super::InstanceShared {
 
                 let supports_mesh_shader = capabilities.supports_extension(ext::mesh_shader::NAME);
 
-                let mut properties2 = vk::PhysicalDeviceProperties2KHR::default();
+                let mut properties = vk::PhysicalDeviceProperties2::default();
                 if supports_maintenance3 {
                     let next = capabilities
                         .maintenance_3
                         .insert(vk::PhysicalDeviceMaintenance3Properties::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_maintenance4 {
                     let next = capabilities
                         .maintenance_4
                         .insert(vk::PhysicalDeviceMaintenance4Properties::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_descriptor_indexing {
                     let next = capabilities
                         .descriptor_indexing
                         .insert(vk::PhysicalDeviceDescriptorIndexingPropertiesEXT::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_acceleration_structure {
                     let next = capabilities
                         .acceleration_structure
                         .insert(vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_ray_tracing_pipeline {
                     let next = capabilities
                         .ray_tracing_pipeline
                         .insert(vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_driver_properties {
                     let next = capabilities
                         .driver
                         .insert(vk::PhysicalDeviceDriverPropertiesKHR::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if capabilities.device_api_version >= vk::API_VERSION_1_1 {
                     let next = capabilities
                         .subgroup
                         .insert(vk::PhysicalDeviceSubgroupProperties::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_subgroup_size_control {
                     let next = capabilities
                         .subgroup_size_control
                         .insert(vk::PhysicalDeviceSubgroupSizeControlProperties::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_robustness2 {
                     let next = capabilities
                         .robustness2
                         .insert(vk::PhysicalDeviceRobustness2PropertiesEXT::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_pci_bus_info {
                     let next = capabilities
                         .pci_bus_info
                         .insert(vk::PhysicalDevicePCIBusInfoPropertiesEXT::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_mesh_shader {
                     let next = capabilities
                         .mesh_shader
                         .insert(vk::PhysicalDeviceMeshShaderPropertiesEXT::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
                 if supports_multiview {
                     let next = capabilities
                         .multiview
                         .insert(vk::PhysicalDeviceMultiviewProperties::default());
-                    properties2 = properties2.push_next(next);
+                    properties = properties.push_next(next);
                 }
 
-                unsafe {
-                    get_device_properties.get_physical_device_properties2(phd, &mut properties2)
-                };
+                // SAFETY: `phd` is of this instance, and its structures are those of extensions
+                // and versions it supports.
+                unsafe { properties2.properties(phd, &mut properties) };
 
                 // Query cooperative matrix properties
                 if capabilities.supports_extension(khr::cooperative_matrix::NAME) {
@@ -2865,11 +2873,12 @@ impl super::InstanceShared {
         };
 
         let mut features = PhysicalDeviceFeatures::default();
-        let core = if let Some(ref get_device_properties) = self.get_physical_device_properties {
+        let core = if let Some(properties2) = self.properties2(capabilities.device_api_version) {
             features = PhysicalDeviceFeatures::queried(&capabilities);
-            let mut features2 =
-                features.add_to_features2(vk::PhysicalDeviceFeatures2KHR::default());
-            unsafe { get_device_properties.get_physical_device_features2(phd, &mut features2) };
+            let mut features2 = features.add_to_features2(vk::PhysicalDeviceFeatures2::default());
+            // SAFETY: `phd` is of this instance, and its structures are those of extensions and
+            // versions it supports.
+            unsafe { properties2.features(phd, &mut features2) };
             features2.features
         } else {
             unsafe { self.raw.get_physical_device_features(phd) }
@@ -3022,8 +3031,13 @@ impl super::Instance {
             return None;
         }
 
-        let format_support =
-            FormatSupport::query(&self.shared.raw, phd, &phd_capabilities, &phd_features);
+        let format_support = FormatSupport::query(
+            &self.shared.raw,
+            self.shared.properties2(phd_capabilities.device_api_version),
+            phd,
+            &phd_capabilities,
+            &phd_features,
+        );
         let (available_features, mut downlevel_flags) = phd_features.to_wgpu(
             &phd_capabilities,
             |extension| phd_capabilities.supports_extension(extension),
@@ -3942,6 +3956,7 @@ impl super::Adapter {
             drop_guard,
             instance: Arc::clone(&self.instance),
             physical_device: self.raw,
+            device_api_version: self.phd_capabilities.device_api_version,
             enabled_extensions: enabled_extensions.into(),
             swapchain_maintenance1: enables_swapchain_maintenance1(
                 enabled_features,
@@ -4478,30 +4493,29 @@ fn supports_3d_images(
 }
 
 fn supports_bgra8unorm_storage(
-    instance: &ash::Instance,
+    properties2: Option<super::properties2::Properties2<'_>>,
     phd: vk::PhysicalDevice,
     device_api_version: u32,
 ) -> bool {
     // See https://github.com/KhronosGroup/Vulkan-Docs/issues/2027#issuecomment-1380608011
 
-    // This check gates the function call and structures used below.
-    // TODO: check for (`VK_KHR_get_physical_device_properties2` or VK1.1) and (`VK_KHR_format_feature_flags2` or VK1.3).
-    // Right now we only check for VK1.3.
+    // This check gates the command and structures used below: `vkGetPhysicalDeviceFormatProperties2`
+    // (`properties2`), and `VkFormatProperties3`.
+    // TODO: check for `VK_KHR_format_feature_flags2` too. Right now we only check for VK1.3.
+    let Some(properties2) = properties2 else {
+        return false;
+    };
     if device_api_version < vk::API_VERSION_1_3 {
         return false;
     }
 
     unsafe {
         let mut properties3 = vk::FormatProperties3::default();
-        let mut properties2 = vk::FormatProperties2::default().push_next(&mut properties3);
+        let mut format_properties2 = vk::FormatProperties2::default().push_next(&mut properties3);
 
-        instance.get_physical_device_format_properties2(
-            phd,
-            vk::Format::B8G8R8A8_UNORM,
-            &mut properties2,
-        );
+        properties2.format_properties(phd, vk::Format::B8G8R8A8_UNORM, &mut format_properties2);
 
-        let features2 = properties2.format_properties.optimal_tiling_features;
+        let features2 = format_properties2.format_properties.optimal_tiling_features;
         let features3 = properties3.optimal_tiling_features;
 
         features2.contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
