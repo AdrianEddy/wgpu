@@ -534,6 +534,8 @@ impl crate::Adapter for super::Adapter {
                 wgt::CompositeAlphaMode::PreMultiplied,
             ],
             scaling_modes: super::surface::scaling_modes(),
+            // `Auto` leaves the layer's `contentsGravity` as it is.
+            auto_keeps_placement: true,
             supports_background_color: false,
 
             current_extent: Some(surface.dimensions()),

@@ -1408,6 +1408,7 @@ impl crate::Adapter for super::Adapter {
                 // The present blit places the texture 1:1 at the default framebuffer's
                 // bottom-left corner, with no control over it yet.
                 scaling_modes: Vec::new(),
+                auto_keeps_placement: false,
                 supports_background_color: false,
                 maximum_frame_latency: 2..=2, //TODO, unused currently
                 current_extent: None,

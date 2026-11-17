@@ -2411,6 +2411,13 @@ pub struct SurfaceCapabilities {
     /// device for which [`Device::supports_present_scaling`] is false accepts none of them.
     pub scaling_modes: Vec<wgt::SurfaceScalingMode>,
 
+    /// Whether [`wgt::SurfaceScalingMode::Auto`] keeps a placement that the surface already has,
+    /// which the application may have chosen: on Metal, the layer's `contentsGravity`, which
+    /// only an explicit mode changes. `wgpu-core` then configures `Auto` as it is, where
+    /// otherwise it resolves `Auto` to the first of `Stretch`, `AspectRatio` and `OneToOne` that
+    /// [`Self::scaling_modes`] lists.
+    pub auto_keeps_placement: bool,
+
     /// Whether [`Surface::configure`] accepts a [`SurfaceConfiguration::background_color`].
     pub supports_background_color: bool,
 }
@@ -2965,11 +2972,13 @@ pub struct SurfaceConfiguration {
     /// Placement of a presented texture whose size differs from the surface's: a mode listed
     /// in [`SurfaceCapabilities::scaling_modes`], on a device for which
     /// [`Device::supports_present_scaling`] is true, or [`wgt::SurfaceScalingMode::Auto`],
-    /// which leaves the placement to the backend: DX12 and Metal stretch, Vulkan asks for no
-    /// present scaling, OpenGL has no control. `wgpu-core` resolves `Auto` to the first of
-    /// `Stretch`, `AspectRatio` and `OneToOne` that is listed, so through it the HAL sees `Auto`
-    /// where none is, and where the backend refused the mode chosen: `wgpu-core` then
-    /// configures the surface again with `Auto`.
+    /// which leaves the placement to the backend: DX12 stretches, Metal leaves the layer's
+    /// `contentsGravity` as it is, Vulkan asks for no present scaling, OpenGL has no control.
+    /// `wgpu-core` resolves `Auto` to the first of `Stretch`, `AspectRatio` and `OneToOne` that
+    /// is listed, except where [`SurfaceCapabilities::auto_keeps_placement`], so through it the
+    /// HAL sees `Auto` where none is listed, where the surface keeps its placement, and where the
+    /// backend refused the mode chosen: `wgpu-core` then configures the surface again with
+    /// `Auto`.
     pub scaling_mode: wgt::SurfaceScalingMode,
     /// The colour of the part of the surface that a presented texture leaves uncovered:
     /// `None` for the platform's own, or a colour where
