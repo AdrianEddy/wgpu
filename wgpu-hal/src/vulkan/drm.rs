@@ -148,16 +148,20 @@ impl super::Instance {
         let mut physical_device = None;
 
         for device in raw_devices {
-            let properties2 = vk::PhysicalDeviceProperties2KHR::default();
+            // A physical device without the commands of `VK_KHR_get_physical_device_properties2`
+            // cannot give its DRM numbers.
+            // SAFETY: A physical device of this instance.
+            let api_version =
+                unsafe { self.shared.raw.get_physical_device_properties(device) }.api_version;
+            let Some(properties2) = self.shared.properties2(api_version) else {
+                continue;
+            };
 
             let mut drm_props = vk::PhysicalDeviceDrmPropertiesEXT::default();
-            let mut properties2 = properties2.push_next(&mut drm_props);
+            let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut drm_props);
 
-            unsafe {
-                self.shared
-                    .raw
-                    .get_physical_device_properties2(device, &mut properties2)
-            };
+            // SAFETY: A physical device of this instance, with the commands' source for it.
+            unsafe { properties2.properties(device, &mut properties) };
 
             /*
                 The makedev call is just bit manipulation to combine major and minor device numbers into a Unix device ID.
