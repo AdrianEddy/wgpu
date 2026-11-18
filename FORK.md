@@ -101,14 +101,23 @@ has, so it has no entry of its own; 40 changes a test only.
 | 73 | `7d32fe839` | feat!: a present-scaling mode on SurfaceConfiguration | The resize lane's R1 (`OXQ-resize-smoothness.md` §6.2 and §7.5.1), landed by the owner's "Land the set" (2026-11-16) and matched to gfx-rs/wgpu#10196's branch (the owner's "Match their branch now", the same day): `SurfaceConfiguration::scaling_mode` and `SurfaceCapabilities::scaling_modes`, `Auto` being the first of `Stretch`, `AspectRatio` and `OneToOne` listed (it still prefers `Stretch`, the owner's earlier ruling) and configured again without a scaling where the backend refuses the mode chosen (`hal::SurfaceError::UnsupportedScalingMode`, breaking). A DX12 window's swapchain offers `Stretch` and `OneToOne` (`DXGI_SCALING_NONE`; another scaling replaces the swapchain), a composition swapchain none; Vulkan offers what `VkSurfacePresentScalingCapabilitiesKHR` reports for every present mode wgpu configures, through `swapchainMaintenance1`, and refuses an extent outside the scaled range; Metal offers `Stretch` and `AspectRatio` (`contentsGravity`, set only for an explicit mode since 79). `hal::Device::supports_present_scaling` (breaking): a device created elsewhere without what the modes need accepts `Auto` only. Measured on this machine by the resize lane (DX12 window swapchains: stretched frames 17 % to 0 %). | a release contains #10196's scaling mode |
 | 74 | `af5d457b3` | docs: create_adapter_from_hal: a caller-made adapter is the caller's responsibility | The owner's ruling on 71's open question, "Keep accepting them" (2026-11-16): the documentation says what enumeration would not have offered. | a release contains 71 |
 | 75 | `6ab2657d5` | docs: FORK.md: carry present scaling, the doc line and the open list | This file | the branch is dropped |
-| 76 | `7fc31127f` | feat: the capabilities of a surface for a device | The owner's "Add it now" (2026-11-16): `Surface::get_capabilities_for_device`, the capabilities against which `configure` validates for a device, so that a consumer on a device created elsewhere (wgpu-interop, FFmpeg; OxQuick is one) picks `OneToOne` only where it is valid. `wgpu::custom::SurfaceInterface` requires it (breaking for custom backends). | a release contains #10196's scaling mode and a per-device query |
-| 77 | `846d1d7fa` | feat: a background colour for the part of a surface that a texture leaves uncovered | The resize lane's R2, window half (`OXQ-resize-smoothness.md` §7.5.4), sent to this lane by the owner (2026-11-16): `SurfaceConfiguration::background_color` and `SurfaceCapabilities::supports_background_color`. A DX12 window's swapchain takes it with `OneToOne` (`IDXGISwapChain1::SetBackgroundColor`, linear components); DX12 presents with `Present1`. Other surfaces refuse a colour. The owner kept the field ("Keep the config field") and the linear components (2026-11-17); the `#808080` probe is open ("Open, ledgered"). | a release has an equivalent |
+| 76 | `7fc31127f` | feat: the capabilities of a surface for a device | The owner's "Add it now" (2026-11-16): `Surface::get_capabilities_for_device`, the capabilities against which `configure` validates for a device, so that a consumer on a device created elsewhere (wgpu-interop, FFmpeg; OxQuick is one) picks `OneToOne` only where it is valid. `wgpu::custom::SurfaceInterface` requires it (breaking for custom backends; `BREAKING:` in the CHANGELOG since 91, and the subject takes `!` at the next rebase). | a release contains #10196's scaling mode and a per-device query |
+| 77 | `846d1d7fa` | feat: a background colour for the part of a surface that a texture leaves uncovered | The resize lane's R2, window half (`OXQ-resize-smoothness.md` §7.5.4), sent to this lane by the owner (2026-11-16): `SurfaceConfiguration::background_color` and `SurfaceCapabilities::supports_background_color`. A DX12 window's swapchain takes it with `OneToOne` (`IDXGISwapChain1::SetBackgroundColor`); DX12 presents with `Present1`. Other surfaces refuse a colour. The owner kept the field ("Keep the config field") and the linear components (2026-11-17) until the `#808080` probe, which showed the composition taking the components as encoded values: 90 gives DXGI the sRGB-encoded components. The new fields are breaking (`BREAKING:` and a "Major changes" entry since 91); the subject takes `!` at the next rebase. | a release has an equivalent |
 | 78 | `7c575aa22` | docs: FORK.md: carry the capabilities for a device and the background colour | This file | the branch is dropped |
 | 79 | `dacfca0bf` | fix(metal)!: leave a layer's contentsGravity alone under Auto | The owner's ruling on Metal's layer, "Touch it only for an explicit mode" (2026-11-17): Metal sets the layer's `contentsGravity` only for an explicit scaling mode, as `raw-window-metal`'s "Semantics" ask of a library that is handed a layer; `Auto` leaves it as it is, also the gravity of an earlier explicit mode. `hal::SurfaceCapabilities::auto_keeps_placement` (breaking): wgpu-core configures `Auto` as it is on such a surface instead of resolving it to a listed mode. Type-checked for iOS and macOS; nothing ran on Apple hardware. | a release contains #10196's scaling mode with the layer left alone under `Auto` |
 | 80 | `024bdca1c` | docs: FORK.md: carry Metal's layer and the owner's rulings on 73 and 77 | This file | the branch is dropped |
 | 81 | `b79d5d6ae` | feat: let callers match on why a device request was refused | The wgpu-move lane's round 4, item 2, the owner's "Fork round now, before landing" (2026-11-17): `RequestDeviceError::as_core` (the wgpu-core error, on its backend) and `wgpu_core::limits::FailedLimit::{name, requested, allowed}`, shaped on upstream's `Device::as_core` (`ef4d18d4b`). Upstream trunk has neither (`110b5881f`). | upstream takes the accessors |
-| 82 | `a0a626649` | fix(vulkan): take the properties2 commands from Vulkan 1.1 where the specification allows | The wgpu-move lane's round 4, item 3, the owner's "Fork item: core on 1.1+" (2026-11-17): a physical device takes `vkGetPhysicalDeviceProperties2`, `...Features2`, `...MemoryProperties2` and `...FormatProperties2` from Vulkan 1.1 where the instance and it are both 1.1 or later, else from `VK_KHR_get_physical_device_properties2` where enabled (`vulkan::properties2`). An instance without the extension had crippled adapters, and devices that panicked reading their memory budget. `VK_EXT_memory_budget` is dropped where the commands are missing; `Instance::from_raw`'s contract changes. | a release contains an equivalent |
-| 83 | (this commit) | docs: FORK.md: carry device-request reasons and core properties2 | This file | the branch is dropped |
+| 82 | `a0a626649` | fix(vulkan): take the properties2 commands from Vulkan 1.1 where the specification allows | The wgpu-move lane's round 4, item 3, the owner's "Fork item: core on 1.1+" (2026-11-17): a physical device takes `vkGetPhysicalDeviceProperties2`, `...Features2`, `...MemoryProperties2` and `...FormatProperties2` from Vulkan 1.1 where the instance and it are both 1.1 or later, else from `VK_KHR_get_physical_device_properties2` where enabled (`vulkan::properties2`). An instance without the extension had crippled adapters, and devices that panicked reading their memory budget. `VK_EXT_memory_budget` is dropped where the commands are missing; `Instance::from_raw`'s contract changes (breaking: `BREAKING:` since 84, which gives `instance_api_version` its one meaning; the subject takes `!` at the next rebase). | a release contains an equivalent |
+| 83 | `a666ea727` | docs: FORK.md: carry device-request reasons and core properties2 | This file | the branch is dropped |
+| 84 | `bdebcb1c0` | fix(vulkan): cap each device at its instance's version and enable only extensions whose dependencies hold | Review 6, items 1 and 4, landed together as the owner asked: `instance_api_version` is the instance's `apiVersion`, one meaning, which wgpu-hal's own instance now passes (1.3, or 1.0 on a 1.0 loader) instead of the loader's version; each physical device is capped once, where the adapter inspects it and on the DRM surface's path, at the lower of its version and the instance's (`InstanceShared::effective_device_version`), the specification's "Valid Usage for Newer Core Versions", and every use of core functionality follows it. A device extension is enabled only where its `vk.xml` dependencies hold (`vulkan/dependencies.rs`, written as `vk.xml` writes them and checked against an oracle that parses `vk.xml`'s own strings); a device that lists `VK_KHR_portability_subset` but cannot enable it is hidden, and so is a 1.0 driver with a patch number that lacks what 1.0 needs (the old `== API_VERSION_1_0`). `from_raw`'s contract: breaking. Pinned on the CPU (the decision functions) and on every GPU here (instances created for Vulkan 1.0, one under the validation layer). | a release contains an equivalent |
+| 85 | `aade363cd` | fix(vulkan): refuse a configuration before releasing the configured swapchain | Review 6, item 2: Vulkan checks the device and the surface (VUID-vkGetPhysicalDeviceSurfaceCapabilities2KHR-pSurfaceInfo-06522), then the scaling mode and the colour, before it releases the configured swapchain, so a refusal keeps it, as DX12, Metal and noop do, and keeps the caller's chain (the owner's "Keep ours"). The chain setter's documentation names every refusal that leaves the chain set. Pinned on RADV's headless surface. | 73 lands upstream (it goes into #10196's PR) |
+| 86 | `1f2441763` | perf(vulkan): look up the present-scaling query once, when the surface is created | Review 6, item 6: `VK_KHR_get_surface_capabilities2`'s functions are loaded with the surface instead of for each query (two `vkGetInstanceProcAddr` lookups a query; review 6 counted ten in one configuration). Pinned on RADV through a counting `vkGetInstanceProcAddr`. | 73 lands upstream |
+| 87 | `e3c4e1a1d` | fix(core): bucket an adapter as its backend exposed it, then adjust it | Review 6's out-of-range finding: under strict WebGPU compliance, enumeration and `request_adapter` with limit bucketing offered no adapter, the strict filter having removed what every bucket asks for (upstream `trunk` has the same order). Enumeration now buckets first, as the hal path does, and the bucket records the backend's capabilities. The other order is recorded in the open list. Pinned on noop, the bug shown first by the same tests. | a release contains an equivalent |
+| 88 | `fb50ecba8` | docs: create_adapter_from_hal: a bucketed hal adapter offers what bucketed enumeration offers | Review 6, item 5, after 87, written from 87's pin. | a release contains 71 and 87 |
+| 89 | `43d27057d` | docs: a resize that goes unreported, refused scaling modes and a request's reasons | Review 6, items 7 and 8: `Outdated` may not come on a resize (reconfigure on the window's resize), `as_core`'s full list of reasons, `OneToOne`'s corner under a rotated display, the web backend's lost surface, what a refused mode leaves configured, and how to tell a refused listed mode from an unlisted one. | 73 and 81 land upstream |
+| 90 | `76604a4b8` | fix(dx12): give DXGI the background colour's sRGB-encoded components | The `#808080` probe (the resize lane, `OXQ-resize-smoothness.md` §8.8.5, 2026-11-17): the desktop showed `#373737` for the linear components 77 gave, so the composition takes them as encoded values, and DXGI now gets the encoded components, by the owner's criterion. | 77 lands upstream |
+| 91 | `72fdd36ba` | docs: CHANGELOG: mark the breaking changes of 73, 76 and 77 | Review 6, item 3: a "Major changes" entry with the migration diff for `scaling_mode` and `background_color`, `BREAKING:` lines for the hal fields and the custom backend's method, and the noop option's "Added" line. | the branch is dropped (each line goes with its commit's PR) |
+| 92 | (this commit) | docs: FORK.md: carry review 6's fixes | This file | the branch is dropped |
 
 Natural upstream PRs: 1, 2, 3, 4, 5, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after
 it (their tests use it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25's #10675 half in
@@ -151,7 +160,8 @@ the requests it offers.
 71 alone, a candidate PR: upstream has the same gap. On `trunk`, whose `request_adapters` applies the two steps
 itself (35 moved them into `suitable_adapters`), the shared step goes there. Its unit tests need nothing of the
 series; its Vulkan device test sits in the fork's `wgpu_vulkan` binary, so the PR carries the unit tests. 74 goes
-with it.
+with it, and so do 87, whose order upstream lacks too (strict compliance with bucketing offers nothing on
+`trunk`), and 88, which states 71's claim with bucketing.
 
 73 belongs to gfx-rs/wgpu#10196, whose author has the same design on a branch with no PR yet (Milk-COCO's
 `surface-scaling-mode`, `a2ff635885`, read on 2026-11-16). The owner ruled "Match their branch now"
@@ -209,6 +219,10 @@ upstream issue yet, and upstream may prefer it as a DX12 extension (the resize l
 configuration field. It is a field here because a consumer sets the colour of a window as it sets its scaling mode,
 on every backend's surface, and `supports_background_color` tells where it applies, as `scaling_modes` does.
 
+Review 6's fixes to them go with them: 85 (Vulkan refuses before it releases the swapchain), 86 (the query loaded
+once) and 89's scaling and `Outdated` notes into 73's PR, where an upstream reviewer reads the same
+`create_swapchain` (review 6); 90 with 77; 89's `as_core` line with 81.
+
 81 is a PR of its own: no issue or PR upstream gives a refused device request's reason (trunk `110b5881f`,
 2026-11-17), and `Device::as_core` (`ef4d18d4b`) is the shape upstream chose for reaching wgpu-core from wgpu.
 
@@ -223,7 +237,9 @@ of Vulkan that added the new functionality" (Initialization, "Extending Physical
 Fundamentals, "Valid Usage for Newer Core Versions"). The extension serves only what that leaves: a physical device
 below 1.1, or a 1.0 instance, where it is enabled (Fundamentals, "Valid Usage for Extensions"). The decision is one
 pure function per physical device (`properties2::source`), so a 1.1 instance with a 1.0 physical device takes the
-extension, not core; requiring the extension in every caller would be a workaround for a core command.
+extension, not core; requiring the extension in every caller would be a workaround for a core command. 82 goes upstream only with 84:
+without its cap and its dependency gate, 82 would hand upstream the same gap on an instance created for 1.0,
+under a commit that tightens an `unsafe` contract (review 6).
 
 ## The future of lazy adapter selection
 
@@ -566,20 +582,40 @@ offer is the caller's responsibility.
 
 Decided since too: **R1b's five** (the owner, 2026-11-17). The swapchain chain's contract and Vulkan's defined
 gravity are kept (73's upstream notes above), R2 stays a configuration field (77), Metal's layer is left alone under
-`Auto` (79), and 77's linear components stay. One check is open:
+`Auto` (79), and 77's linear components stay until one check. It ran (closed):
 
-- **77's colour on a display: the `#808080` probe frame**, in the owner's next away slot, through the resize lane,
-  which owns window runs. wgpu gives DXGI the background colour as linear components (`#808080` as 0.21586053 per
-  channel, which `GetBackgroundColor` reads back), by Microsoft's note on `SetBackgroundColor`; what DWM composes
-  from them was not seen on a display. The probe is one live-resize run of the resize lane's DX12 window probe on an
-  SDR desktop (HDR off; an HDR desktop is 77's separate review point), with a flip-model window swapchain configured
-  with `SurfaceScalingMode::OneToOne` and `background_color` `#808080` (`SurfaceBackgroundColor { r: 0x80, g: 0x80,
-  b: 0x80 }`), the window growing so that frames leave a strip uncovered, and the probe's gutter-colour column
-  reading that strip's composed pixels from the screen capture, not from the swapchain. The gutter reads `#808080`
-  if the linear encoding is right, and about `#373737` (0.21586053 shown as an encoded value) if DXGI takes encoded
-  components: 77 then gives DXGI the sRGB-encoded components (the bytes over 255) instead, and its DX12 unit test
-  (`a_background_color_is_given_to_dxgi_linear_and_opaque`) and the `scaling_modes` trial's expectation change with
-  it. The run records the adapter, the desktop's colour mode and the `GetBackgroundColor` value beside the reading.
+- **77's colour on a display: the `#808080` probe frame** (closed, 90). The resize lane ran it on 2026-11-17
+  (`OXQ-resize-smoothness.md` §8.8.5): wgpu's cube at `024bdca1c` on the RTX 5090 (DX12, driver 32.0.16.1692), an
+  SDR desktop (8 bits per colour, SDR white 80 nits), a window's flip-model swapchain (`DXGI_SWAP_EFFECT_FLIP_DISCARD`,
+  `DXGI_SCALING_NONE`, `B8G8R8A8_UNORM`, Fifo) with `background_color` `#808080`. `GetBackgroundColor` read back
+  `[0.21586053, 0.21586053, 0.21586053, 1.0]`, and a capture of the desktop (`BitBlt`, `CAPTUREBLT`) read the
+  uncovered strip `#373737` at three points, twice, and `#000000` without a colour, twice: the composition takes the
+  components as encoded values. By the owner's criterion, 90 gives DXGI the sRGB-encoded components, and the DX12
+  unit test (`a_background_color_is_given_to_dxgi_encoded_and_opaque`) and the `scaling_modes` trial's expectation
+  changed with it. A window capture (`Windows.Graphics.Capture`) shows no background colour at all.
+
+Review 6's open points (2026-11-17), recorded, none built:
+
+- **The subjects of 76, 77 and 82** take `!` at the fork's next rebase onto upstream (76 and 77 `feat!:`, 82
+  `fix(vulkan)!:`), never by rewriting pushed history (the owner); the table quotes them as pushed. Their CHANGELOG
+  lines say `BREAKING:` since 84 and 91.
+- **Metal's threading** (79): `setContentsGravity`, like the existing `setOpaque` and `setColorspace`, runs on the
+  thread that calls `configure`. Apple says implicit transactions "are committed automatically when the thread's
+  runloop next iterates" (`CATransaction`), and not what happens on a thread without one. A Metal run on a non-main
+  thread settles it.
+- **The bucket order** (87): the other way to fix strict compliance with bucketing judges each bucket in its strict
+  form against the adjusted adapter. It would give a device without `SUBGROUP` an uplevel bucket under strict
+  compliance only (one that it does not get without), change `limits::apply_limit_buckets`' signature (it would need
+  the instance's flags), and leave the two paths recording different raw capabilities. 87 buckets first, so the
+  bucket that takes an adapter is the same whatever the flags; the owner may prefer the other.
+- **A new Vulkan swapchain leaked on an error** (older, found by review 6's verifier E4): `create_swapchain` makes
+  the swapchain's images, fence and semaphores after `vkCreateSwapchainKHR`, and their three error returns drop the
+  new swapchain's handle without destroying it.
+- **A feature structure left chained** (older, verifier E9): an `open_with_callback` callback that drops an extension
+  leaves that extension's feature structure in the `vkCreateDevice` chain, which is built before the callback.
+- **84's cap on the DRM surface's path** has no pin here: it needs a DRM display (84's `drm_site` mutant passes every
+  test here). The adapter's cap is pinned by its stored version on every GPU.
+- **90 on an HDR or wide-colour desktop**: what the composition makes of the encoded components was not measured.
 
 From the coordinator's list for this lane (2026-11-16), each recorded, none built:
 
@@ -757,15 +793,15 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   `contentsGravity` as it is (79), also the gravity of an earlier configuration with an explicit mode. A
   configuration made as a struct literal needs the new field, a `hal::SurfaceCapabilities` literal
   `auto_keeps_placement` (79), `hal::Device` a new method, an exhaustive match on `hal::SurfaceError` a new variant,
-  and a Vulkan caller of `set_next_swapchain_create_chain` keeps its chain valid past a configuration refused for its
-  scaling.
+  and a Vulkan caller of `set_next_swapchain_create_chain` keeps its chain valid past a configuration refused for what it
+  asks, a scaling mode or a colour (85), which also keeps the configured swapchain (85).
 - **The capabilities for a device** (commit 76): a `wgpu::custom` backend implements
   `SurfaceInterface::get_capabilities_for_device`.
 - **A background colour** (commit 77): DX12 presents with `Present1` instead of `Present`, with parameters that
   update the whole frame and scroll nothing, as `Present` presents; a configuration made as a struct literal needs
   the new field. The colour shows only with `OneToOne`, so an application that sets one and stretches sees no
-  change. Whether DXGI composes the linear components to the same sRGB value on an HDR or wide-colour desktop, as
-  Microsoft's note describes for a fixed bit depth, was not checked on a display.
+  change. Since 90 DXGI gets the colour's sRGB-encoded components, as the composed SDR desktop showed (`#808080`
+  given as linear components showed `#373737`); what an HDR or wide-colour desktop composes was not checked.
 - **A refused device request's reason** (commit 81): `RequestDeviceError::as_core` is `cfg(wgpu_core)`, and
   `FailedLimit`'s accessors give `name` as `&str` (the field is a `Cow<'static, str>`).
 - **The properties2 commands** (commit 82): wgpu's own instances now query through Vulkan 1.1's commands wherever
@@ -774,6 +810,15 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   created for Vulkan 1.0, whatever the loader supports (a caller that passes `vkEnumerateInstanceVersion` for such
   an instance breaks it), and `extensions` need not hold `VK_KHR_get_physical_device_properties2`. A physical device
   without the commands no longer keeps `VK_EXT_memory_budget`.
+- **A device's effective version** (commit 84, `BREAKING:`): `instance_api_version` is the instance's
+  `apiVersion`, so `InstanceShared::instance_api_version` reads 1.3 on wgpu's own instance where it read the
+  loader's version (1.4.363 here), and a `from_raw` caller passes the `apiVersion` it created the instance with:
+  wgpu-interop, which passes the loader's version for a caller's instance, must pass the caller's. A physical
+  device newer than its instance uses only its instance's version, and a device extension whose `vk.xml`
+  dependencies fail is no longer enabled (82's two special cases are two of them now).
+- **Limit bucketing** (commit 87): an adapter is bucketed before the instance adjusts it. Under strict
+  compliance it gets the bucket it gets without, as WebGPU's; `AdapterLimitBucketInfo`'s raw limits are the
+  backend's, where enumeration recorded the buffer limits clamped for indirect validation.
 - **A wrapped adapter's offer** (commit 71): `create_adapter_from_hal` now changes the limits, and under strict
   compliance the features, that a hal user's adapter reports, as enumeration changes an enumerated adapter's. A
   caller that relied on the driver's limits through a wrapped adapter sees enumeration's.
@@ -815,17 +860,19 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
   Naga's SPIR-V snapshots were regenerated with the `spirv-cross` of Vulkan SDK 1.4.363, where CI pins 1.4.357: one
   GLSL snapshot that 1.4.363 writes differently, and that the series does not change, was left as it was.
 - Commit 7 (Vulkan discard) is tested only by commit 26's `discarded_images`.
-- 82's extension branch is pinned by `properties2::source`'s table only: every Vulkan instance and physical device
-  here is 1.3 or later, so none takes the extension. Its DRM surface site (Linux, a DRM display) is type-checked on
-  eddy2lnx only, and `VK_EXT_memory_budget`'s drop, which needs a physical device without the commands, has no pin.
+- 82's extension branch runs on every GPU here since 84, on instances created for Vulkan 1.0 with the extension
+  (84's device tests), besides `properties2::source`'s table. Its DRM surface site and 84's cap there (Linux, a DRM
+  display) are type-checked on eddy2lnx only. `VK_EXT_memory_budget`'s drop, which needs a physical device without
+  the commands, is pinned by 84's dependency oracle on the CPU.
+- 85's and 86's device pins run on RADV only (eddy2lnx), the one driver here with `VK_EXT_headless_surface`.
 - Commit 24 (Metal) and commit 21's `copy_external_image_to_texture` (WebGL) were type-checked with Rust 1.99.0
   for `aarch64-apple-ios` and `wasm32-unknown-unknown`; nothing ran on those platforms. So were 73's Metal mapping
   (`contentsGravity`, its refusal of `OneToOne`), 79's `Auto` that leaves the gravity alone (its wgpu-core half
   is pinned on the CPU), and 76's and 77's web backend, and the Metal backend also for
   `aarch64-apple-darwin` with the stable toolchain (1.100.0).
 - 77's background colour was read back from DXGI (`GetBackgroundColor`) on every DX12 adapter here, and frames
-  were presented with it; what the compositor shows in the uncovered strip was not captured, on an SDR desktop or
-  another.
+  were presented with it. What the compositor shows was captured by the resize lane on an SDR desktop (the open
+  list, closed by 90), not on an HDR one.
 - The Vulkan device tests (wgpu-hal's `vulkan::device_tests`, the `wgpu_vulkan` binary) open devices and skip at
   run time where there is no Vulkan; they run on CPU adapters too. The lane's CPU suites leave them out by name
   (`device_tests::`); the lane runs them under the GPU lock. wgpu-hal's need `VK_EXT_headless_surface` (Mesa has it,
