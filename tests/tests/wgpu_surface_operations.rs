@@ -733,8 +733,9 @@ mod native {
     /// composition swapchain lists none, and wgpu-hal refuses each. On OpenGL, which lists none,
     /// wgpu-hal refuses each.
     ///
-    /// The background colour: a window's DX12 swapchain supports it, and is given the linear
-    /// components of the colour configured (`GetBackgroundColor`) with each scaling mode it
+    /// The background colour: a window's DX12 swapchain supports it, and is given the
+    /// sRGB-encoded components of the colour configured (`GetBackgroundColor`) with each scaling
+    /// mode it
     /// lists; through wgpu-hal, a swapchain kept for a new configuration takes its new colour,
     /// and one that had a colour is replaced for none, which has DXGI's own colour (that of a new
     /// swapchain). Every other surface does not support it: a colour is a validation error, and
@@ -886,18 +887,11 @@ mod native {
     #[cfg(windows)]
     const DXGI_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-    /// The linear components of `color` (the sRGB transfer function), opaque.
+    /// The sRGB-encoded components of `color` over 255, opaque.
     #[cfg(windows)]
-    fn linear(color: wgpu::SurfaceBackgroundColor) -> [f32; 4] {
-        let decode = |c: u8| {
-            let c = f32::from(c) / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        };
-        [decode(color.r), decode(color.g), decode(color.b), 1.0]
+    fn encoded(color: wgpu::SurfaceBackgroundColor) -> [f32; 4] {
+        let encoded = |c: u8| f32::from(c) / 255.0;
+        [encoded(color.r), encoded(color.g), encoded(color.b), 1.0]
     }
 
     /// A wgpu-hal configuration of a window's surface at the windows' size with `scaling_mode`.
@@ -1282,7 +1276,7 @@ mod native {
                 (wgpu::SurfaceScalingMode::OneToOne, GUTTER, true),
                 (wgpu::SurfaceScalingMode::OneToOne, GREY, true),
             ] {
-                let expected = if given { linear(color) } else { DXGI_DEFAULT };
+                let expected = if given { encoded(color) } else { DXGI_DEFAULT };
                 let config = wgpu::SurfaceConfiguration {
                     scaling_mode,
                     background_color: Some(color),
@@ -1394,7 +1388,7 @@ mod native {
                     // SAFETY: As above.
                     let configured = unsafe { hal_surface.configure(&hal_device, &config) };
                     let got = swapchain_background(&hal_surface);
-                    let expected = Some(color.map(linear).unwrap_or(DXGI_DEFAULT));
+                    let expected = Some(color.map(encoded).unwrap_or(DXGI_DEFAULT));
                     let was_replaced = !marked(&hal_surface);
                     println!(
                         "{name}: wgpu-hal configured with {step}: {configured:?}, the \

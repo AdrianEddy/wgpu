@@ -1439,26 +1439,20 @@ fn map_surface_color_space(
     }
 }
 
-/// The `DXGI_RGBA` of an opaque `color`: its linear components, decoded from sRGB. Microsoft
-/// recommends linear components for presentation data, which the operating system converts to
-/// sRGB to compose in a fixed bit depth (`IDXGISwapChain1::SetBackgroundColor`'s note).
+/// The `DXGI_RGBA` of an opaque `color`: its sRGB-encoded components, over 255. The desktop
+/// composition takes the background colour's components as encoded values: on an SDR desktop,
+/// `#808080` given as its linear components (0.2159, read back by `GetBackgroundColor`) shows as
+/// `#373737`, which is 0.2159 taken as an encoded value (measured from a capture of the desktop,
+/// on a window's flip-model swapchain with `DXGI_SCALING_NONE`). The note on
+/// `IDXGISwapChain1::SetBackgroundColor` recommends linear components for presentation data, which
+/// the background colour does not follow.
 fn dxgi_background_color(color: wgt::SurfaceBackgroundColor) -> Dxgi::DXGI_RGBA {
+    let encoded = |component: u8| f32::from(component) / 255.0;
     Dxgi::DXGI_RGBA {
-        r: srgb_to_linear(color.r),
-        g: srgb_to_linear(color.g),
-        b: srgb_to_linear(color.b),
+        r: encoded(color.r),
+        g: encoded(color.g),
+        b: encoded(color.b),
         a: 1.0,
-    }
-}
-
-/// The linear value of an 8-bit sRGB-encoded component (the sRGB transfer function, IEC
-/// 61966-2-1).
-fn srgb_to_linear(component: u8) -> f32 {
-    let c = f32::from(component) / 255.0;
-    if c <= 0.04045 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -1961,26 +1955,24 @@ pub enum ShaderModel {
 
 #[cfg(test)]
 mod background_color_tests {
-    /// An sRGB component decodes to the linear value of the sRGB transfer function: the linear
-    /// segment at the bottom, the power curve above it, and the ends exact; the colour is opaque.
+    /// A colour is given to DXGI as its sRGB-encoded components over 255, opaque: `#00800a` is
+    /// 0, 128/255 and 10/255, where its linear components would be 0, 0.2158605 and 0.0030353.
     #[test]
-    fn a_background_color_is_given_to_dxgi_linear_and_opaque() {
-        use super::srgb_to_linear;
-        assert_eq!(srgb_to_linear(0), 0.0);
-        assert_eq!(srgb_to_linear(255), 1.0);
-        // 10 / 255 is below 0.04045: linear segment.
-        assert!((srgb_to_linear(10) - 10.0 / 255.0 / 12.92).abs() < 1e-7);
-        // Values of the curve: 0x80 is 0.2158605, 0xbc is 0.5028865.
-        assert!((srgb_to_linear(0x80) - 0.215_860_5).abs() < 1e-6);
-        assert!((srgb_to_linear(0xbc) - 0.502_886_5).abs() < 1e-6);
+    fn a_background_color_is_given_to_dxgi_encoded_and_opaque() {
         let rgba = super::dxgi_background_color(wgt::SurfaceBackgroundColor {
             r: 0,
             g: 0x80,
-            b: 255,
+            b: 10,
         });
         assert_eq!(
             (rgba.r, rgba.g, rgba.b, rgba.a),
-            (0.0, srgb_to_linear(0x80), 1.0, 1.0)
+            (0.0, 128.0 / 255.0, 10.0 / 255.0, 1.0)
         );
+        let white = super::dxgi_background_color(wgt::SurfaceBackgroundColor {
+            r: 255,
+            g: 255,
+            b: 255,
+        });
+        assert_eq!((white.r, white.g, white.b, white.a), (1.0, 1.0, 1.0, 1.0));
     }
 }

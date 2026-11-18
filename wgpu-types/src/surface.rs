@@ -969,9 +969,9 @@ pub struct SurfaceConfiguration<V> {
     ///
     /// On DX12 (`IDXGISwapChain1::SetBackgroundColor`), the colour shows only with
     /// [`SurfaceScalingMode::OneToOne`] (`DXGI_SCALING_NONE`), and wgpu gives it to DXGI only
-    /// then; with the other modes the texture covers the whole surface. wgpu gives it as linear
-    /// components, which Microsoft's documentation recommends and which the operating system
-    /// converts to sRGB to compose.
+    /// then; with the other modes the texture covers the whole surface. wgpu gives DXGI its
+    /// sRGB-encoded components, as the desktop composition takes them (on an SDR desktop,
+    /// `#808080` given as its linear components shows as `#373737`).
     pub background_color: Option<SurfaceBackgroundColor>,
     /// Specifies what view formats will be allowed when calling `Texture::create_view` on
     /// the texture returned by `Surface::get_current_texture`.
