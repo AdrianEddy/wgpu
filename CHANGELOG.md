@@ -154,6 +154,30 @@ Nsight and Radeon GPU Profiler should work normally, and all graphics debuggers 
 
 By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 
+#### `SurfaceConfiguration` has new fields `scaling_mode` and `background_color`
+
+`SurfaceConfiguration` has two new fields: `scaling_mode`, how the platform places a presented texture whose size differs from the surface's, and `background_color`, the colour of the part of the surface that the texture leaves uncovered. `SurfaceScalingMode::Auto` and `None` give the platform's own:
+
+```diff
+ wgpu::SurfaceConfiguration {
+     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+     format,
+     color_space: wgpu::SurfaceColorSpace::Auto,
+     width,
+     height,
+     present_mode: wgpu::PresentMode::Fifo,
+     desired_maximum_frame_latency: 2,
+     alpha_mode: wgpu::CompositeAlphaMode::Auto,
++    scaling_mode: wgpu::SurfaceScalingMode::Auto,
++    background_color: None,
+     view_formats: vec![],
+ }
+```
+
+For wgpu-hal users, `wgpu_hal::SurfaceConfiguration` has the same two fields, and `wgpu_hal::SurfaceCapabilities` has `scaling_modes`, `supports_background_color` and `auto_keeps_placement` (see the Hal changes below).
+
+See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
+
 ### Added/New Features
 
 #### General
@@ -204,6 +228,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Add `RequestDeviceError::as_core`, the wgpu-core error behind a refused device request, so that a caller can match on the reason (`LimitsExceeded`, `ExperimentalFeaturesNotEnabled`, a lost device, ...), and `wgpu_core::limits::FailedLimit::{name, requested, allowed}`, which say which limit was better than the adapter allows and by how much. By @AdrianEddy.
 - Add `Device::downlevel_capabilities`, against which wgpu validates the device's use. A device created from a raw device may have fewer than its adapter, never more. By @AdrianEddy.
 - Add `SurfaceConfiguration::background_color`: an opaque sRGB colour for the part of a surface that a presented texture leaves uncovered, as with `SurfaceScalingMode::OneToOne` while a window grows, instead of the platform's own; `SurfaceCapabilities::supports_background_color` says where it can be set. DXGI swapchains made from a window, DX12's and the Vulkan backend's, take it (`IDXGISwapChain1::SetBackgroundColor`, given its sRGB-encoded components, with `OneToOne`, the only scaling it affects); other surfaces do not. Both now present with `IDXGISwapChain1::Present1`, with which the colour takes effect. A configuration made as a struct literal needs the new field, `background_color: None` for the platform's own. By @AdrianEddy.
+- Add `NoopBackendOptions::present_scaling`: whether the noop backend's devices can configure a surface with an explicit `SurfaceScalingMode`, as a device created from a raw device may not; `None`, the default, for yes. By @AdrianEddy.
 - Add `Surface::get_capabilities_for_device`: the capabilities against which `Surface::configure` validates a configuration for a device. They are those of the device's adapter, but list no scaling mode for a device created from a raw device without what the modes need (on Vulkan, `swapchainMaintenance1`). By @AdrianEddy.
 - Add `SurfaceConfiguration::scaling_mode` and `SurfaceCapabilities::scaling_modes`: how the presentation engine places a presented texture whose size differs from the surface's, as during a live window resize. `SurfaceScalingMode::Auto`, the default, is the first of `Stretch`, `AspectRatio` (centered) and `OneToOne` (at the top-left corner) that the surface lists, and the platform's own placement where it lists none or refuses the mode chosen when the surface is configured; any other mode must be listed, and is a validation error where the platform refuses it. DXGI swapchains made from a window, DX12's and the Vulkan backend's, list `Stretch` (`DXGI_SCALING_STRETCH`, as before) and `OneToOne` (`DXGI_SCALING_NONE`), and composition swapchains none; a Vulkan swapchain lists the modes that `VkSurfacePresentScalingCapabilitiesKHR` reports for every present mode, on adapters whose devices have `swapchainMaintenance1`, and refuses one for an extent outside the surface's range for scaled presentation; Metal lists `Stretch` and `AspectRatio` (the layer's `contentsGravity`, which only an explicit mode sets: with `Auto` a layer keeps its gravity, also one that the application set); OpenGL and WebGPU list none. A configuration made as a struct literal needs the new field, `scaling_mode: SurfaceScalingMode::Auto` for the default. A change of the window's size may then go unreported: a Vulkan swapchain with a scaling may present the texture scaled instead of answering `Outdated`, as NVIDIA's driver does, and DXGI swapchains, Metal and OpenGL never reported one; configure the surface again when the window's size changes. See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 
@@ -291,6 +316,7 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - Texture copy extents are now correctly validated for subsampled chroma planes. Copying is now supported between a plane of a multi-planar texture and other textures or buffers, in either direction. By @andyleiserson in [#10776](https://github.com/gfx-rs/wgpu/pull/10776).
 - `Device::poll` now returns the new `PollError::DeviceLost` when it finds the device lost, instead of panicking. `PollError` is exhaustive, so code that matches it needs the new arm. `wgpu_core::device::WaitIdleError::to_poll_error` now returns a `PollError` for every error, not an `Option`. By @AdrianEddy.
 - BREAKING: `wgpu::custom::DeviceInterface` requires `downlevel_capabilities`. By @AdrianEddy.
+- BREAKING: `wgpu::custom::SurfaceInterface` requires `get_capabilities_for_device`, for `Surface::get_capabilities_for_device`. By @AdrianEddy.
 - `Adapter::create_device_from_hal` validates its descriptor as `request_device` does, against the features and limits the hal device was opened with: requesting others is an error. By @AdrianEddy.
 
 #### naga
@@ -322,6 +348,8 @@ By @cwfitzgerald in [#8388](https://github.com/gfx-rs/wgpu/pull/8388).
 - BREAKING: `wgpu_hal::Device` requires `features` and `limits`, the features and limits the device was opened with. wgpu-core refuses a descriptor feature outside them on the hal path, `RequestDeviceError::FeaturesNotOpened`, and a limit beyond them, `RequestDeviceError::LimitsExceeded`, and validates the rest of the descriptor as `request_device` does, but against the device instead of its adapter. By @AdrianEddy.
 - BREAKING: `wgpu_hal::Device` requires `supports_present_scaling`: whether the device can configure a surface with the scaling modes its adapter lists, which a device created elsewhere may not, as a Vulkan device without `swapchainMaintenance1` for a Vulkan swapchain (the DXGI swapchain of the Vulkan backend needs nothing of the device). wgpu-core accepts only `SurfaceScalingMode::Auto` for such a device's surfaces, which then asks for nothing. By @AdrianEddy.
 - BREAKING: `wgpu_hal::SurfaceError::UnsupportedScalingMode`, with which `Surface::configure` refuses a scaling mode it cannot apply. A configuration refused for what it asks (a scaling mode, a background colour) leaves the surface as it was, its swapchain included: Vulkan now checks the device and the surface (for a Vulkan swapchain), then the scaling mode and the colour, before it releases the configured swapchain. On Vulkan it also leaves the chain of `Surface::set_next_swapchain_create_chain` set for the next configuration, and a null chain withdraws one that is set. By @AdrianEddy.
+- BREAKING: `wgpu_hal::SurfaceConfiguration::scaling_mode` and `wgpu_hal::SurfaceCapabilities::scaling_modes`: the scaling mode a surface is configured with, which the backend applies or refuses with `SurfaceError::UnsupportedScalingMode`, and those it lists besides `Auto`. A configuration or capabilities made as a struct literal needs them. By @AdrianEddy.
+- BREAKING: `wgpu_hal::SurfaceConfiguration::background_color` and `wgpu_hal::SurfaceCapabilities::supports_background_color`: the colour of the part of a surface that a presented texture leaves uncovered, which a backend that does not support it refuses, and whether it does. A configuration or capabilities made as a struct literal needs them. By @AdrianEddy.
 - BREAKING: `wgpu_hal::SurfaceCapabilities::auto_keeps_placement`: whether `SurfaceScalingMode::Auto` keeps a placement that the surface already has, as Metal keeps the layer's `contentsGravity`. wgpu-core then configures `Auto` as it is instead of resolving it to a listed mode. By @AdrianEddy.
 - BREAKING: `wgpu_hal::vulkan::Instance::from_raw`'s `instance_api_version` is the `VkApplicationInfo::apiVersion` the instance was created with (0 counting as 1.0), not the loader's version (`vkEnumerateInstanceVersion`), and `InstanceShared::instance_api_version` returns it: 1.3 for wgpu's own instance wherever the loader is 1.1 or later. A caller that passes the loader's version for an instance created for an older version must pass that version instead. A physical device uses core functionality only up to the lower of it and its own version (`InstanceShared::effective_device_version`). By @AdrianEddy.
 
