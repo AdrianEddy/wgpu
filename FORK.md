@@ -117,7 +117,8 @@ has, so it has no entry of its own; 40 changes a test only.
 | 89 | `43d27057d` | docs: a resize that goes unreported, refused scaling modes and a request's reasons | Review 6, items 7 and 8: `Outdated` may not come on a resize (reconfigure on the window's resize), `as_core`'s full list of reasons, `OneToOne`'s corner under a rotated display, the web backend's lost surface, what a refused mode leaves configured, and how to tell a refused listed mode from an unlisted one. | 73 and 81 land upstream |
 | 90 | `76604a4b8` | fix(dx12): give DXGI the background colour's sRGB-encoded components | The `#808080` probe (the resize lane, `OXQ-resize-smoothness.md` §8.8.5, 2026-11-17): the desktop showed `#373737` for the linear components 77 gave, so the composition takes them as encoded values, and DXGI now gets the encoded components, by the owner's criterion. | 77 lands upstream |
 | 91 | `72fdd36ba` | docs: CHANGELOG: mark the breaking changes of 73, 76 and 77 | Review 6, item 3: a "Major changes" entry with the migration diff for `scaling_mode` and `background_color`, `BREAKING:` lines for the hal fields and the custom backend's method, and the noop option's "Added" line. | the branch is dropped (each line goes with its commit's PR) |
-| 92 | (this commit) | docs: FORK.md: carry review 6's fixes | This file | the branch is dropped |
+| 92 | `21770a9a1` | docs: FORK.md: carry review 6's fixes | This file | the branch is dropped |
+| 93 | (this commit) | fix(core): report WebGPU's subgroup sizes under strict compliance | The owner's answer on review 6's open point, "WebGPU's 4 and 128" (2026-11-18): under strict compliance, an adapter without `SUBGROUP` (every adapter, as wgpu keeps the feature native-only) reports `subgroup_min_size` 4 and `subgroup_max_size` 128, as WebGPU's "new adapter info" sets them where "subgroups" is not supported, in the step that every adapter of the instance takes (`adjust_exposed_adapter`): enumerated or given to `create_adapter_from_hal`, bucketed or not. It reported the backend's sizes, or its bucket's. Upstream `trunk` keeps the backend's on enumeration too (`110b5881f`). Pinned on noop. This commit also carries its own row. | a release contains an equivalent |
 
 Natural upstream PRs: 1, 2, 3, 4, 5, 6, 7, 8 and 24 each alone; the noop series 9 to 11; 12 and 13 after
 it (their tests use it); the callbacks 14, 15 and 16; the surface series 17 to 23; 25's #10675 half in
@@ -161,7 +162,9 @@ the requests it offers.
 itself (35 moved them into `suitable_adapters`), the shared step goes there. Its unit tests need nothing of the
 series; its Vulkan device test sits in the fork's `wgpu_vulkan` binary, so the PR carries the unit tests. 74 goes
 with it, and so do 87, whose order upstream lacks too (strict compliance with bucketing offers nothing on
-`trunk`), and 88, which states 71's claim with bucketing.
+`trunk`), and 88, which states 71's claim with bucketing. 93 is upstream's gap on enumeration alone (`trunk`'s
+strict filter removes `SUBGROUP` and keeps the backend's sizes), a PR of its own; its hal-path half needs 71, as
+`trunk`'s `create_adapter_from_hal` applies no strict filter at all.
 
 73 belongs to gfx-rs/wgpu#10196, whose author has the same design on a branch with no PR yet (Milk-COCO's
 `surface-scaling-mode`, `a2ff635885`, read on 2026-11-16). The owner ruled "Match their branch now"
@@ -603,11 +606,13 @@ Review 6's open points (2026-11-17), recorded, none built:
   thread that calls `configure`. Apple says implicit transactions "are committed automatically when the thread's
   runloop next iterates" (`CATransaction`), and not what happens on a thread without one. A Metal run on a non-main
   thread settles it.
-- **The bucket order** (87): the other way to fix strict compliance with bucketing judges each bucket in its strict
-  form against the adjusted adapter. It would give a device without `SUBGROUP` an uplevel bucket under strict
+- **The bucket order** (87, decided): the other way to fix strict compliance with bucketing judges each bucket in its
+  strict form against the adjusted adapter. It would give a device without `SUBGROUP` an uplevel bucket under strict
   compliance only (one that it does not get without), change `limits::apply_limit_buckets`' signature (it would need
-  the instance's flags), and leave the two paths recording different raw capabilities. 87 buckets first, so the
-  bucket that takes an adapter is the same whatever the flags; the owner may prefer the other.
+  the instance's flags), and leave the two paths recording different raw capabilities. The owner kept 87's order,
+  "Bucket, then strict" (2026-11-18).
+- **Subgroup sizes under strict compliance** (decided, 93): the strict filter removed `SUBGROUP` and left the
+  backend's sizes, or the bucket's (`m1`: 4 to 64). The owner: "WebGPU's 4 and 128" (2026-11-18).
 - **A new Vulkan swapchain leaked on an error** (older, found by review 6's verifier E4): `create_swapchain` makes
   the swapchain's images, fence and semaphores after `vkCreateSwapchainKHR`, and their three error returns drop the
   new swapchain's handle without destroying it.
@@ -819,6 +824,10 @@ DXVK's `LockSubmissionQueue`; for present fences, libplacebo and ANGLE.
 - **Limit bucketing** (commit 87): an adapter is bucketed before the instance adjusts it. Under strict
   compliance it gets the bucket it gets without, as WebGPU's; `AdapterLimitBucketInfo`'s raw limits are the
   backend's, where enumeration recorded the buffer limits clamped for indirect validation.
+- **Subgroup sizes under strict compliance** (commit 93): every adapter reports 4 and 128 there today, since
+  `SUBGROUP` is native-only in wgpu (its doc: "it has not yet been moved to `FeaturesWebGPU`"); once upstream moves
+  it, an adapter with the feature keeps its own sizes, as the rule is written for the feature, not for the flag.
+  `AdapterLimitBucketInfo`'s raw sizes stay the backend's.
 - **A wrapped adapter's offer** (commit 71): `create_adapter_from_hal` now changes the limits, and under strict
   compliance the features, that a hal user's adapter reports, as enumeration changes an enumerated adapter's. A
   caller that relied on the driver's limits through a wrapped adapter sees enumeration's.

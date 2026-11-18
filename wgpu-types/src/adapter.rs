@@ -197,6 +197,10 @@ pub struct AdapterInfo {
     /// - Qualcomm: 64
     /// - WARP: 4
     /// - lavapipe: 8
+    ///
+    /// Under [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`](crate::InstanceFlags::STRICT_WEBGPU_COMPLIANCE),
+    /// an adapter without [`Features::SUBGROUP`](crate::Features::SUBGROUP) reports 4, as WebGPU
+    /// does where "subgroups" is not supported.
     pub subgroup_min_size: u32,
     /// Maximum possible size of a subgroup on this adapter. Will
     /// never be higher than [`crate::MAXIMUM_SUBGROUP_MAX_SIZE`].
@@ -210,6 +214,10 @@ pub struct AdapterInfo {
     /// - Qualcomm: 128
     /// - WARP: 4 or 128
     /// - lavapipe: 8
+    ///
+    /// Under [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`](crate::InstanceFlags::STRICT_WEBGPU_COMPLIANCE),
+    /// an adapter without [`Features::SUBGROUP`](crate::Features::SUBGROUP) reports 128, as WebGPU
+    /// does where "subgroups" is not supported.
     pub subgroup_max_size: u32,
     /// Whether adding [`TextureUsages::TRANSIENT_ATTACHMENT`] to a texture will decrease memory usage.
     /// This is None on web, which means it is unknown from the adapter.

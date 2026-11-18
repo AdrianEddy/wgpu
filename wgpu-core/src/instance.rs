@@ -699,14 +699,17 @@ impl Instance {
 
     /// Makes `raw`, an adapter that a backend of this instance exposed, the adapter this
     /// instance offers: its limits fit indirect validation where
-    /// [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its features and limits are
-    /// WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is. Every adapter of this
-    /// instance takes it, whether enumerated or given by a hal user
-    /// ([`Self::create_adapter_from_hal`]), after its limit bucket where it has one: a device's
-    /// validation relies on its adapter's features and limits having taken it.
+    /// [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its features, limits and subgroup
+    /// sizes are WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is
+    /// ([`webgpu_subgroup_sizes`]). Every adapter of this instance takes it, whether enumerated or
+    /// given by a hal user ([`Self::create_adapter_from_hal`]), after its limit bucket where it has
+    /// one: a device's validation relies on its adapter's features and limits having taken it.
     fn adjust_exposed_adapter(&self, raw: &mut hal::DynExposedAdapter) {
         self.adjust_limits_for_indirect_validation(&mut raw.capabilities.limits);
         filter_features_and_limits(self.flags, &mut raw.features, &mut raw.capabilities.limits);
+        if self.flags.contains(InstanceFlags::STRICT_WEBGPU_COMPLIANCE) {
+            webgpu_subgroup_sizes(raw.features, &mut raw.info);
+        }
     }
 
     /// This is similar to wgpu-hal's `adjust_raw_limits` but tailored to
@@ -736,7 +739,7 @@ impl Instance {
     /// The HAL adapter may be obtained e.g. by calling `enumerate_adapters` on
     /// the HAL directly. The adapter offers what this instance's enumeration would offer of
     /// it: its limits fit indirect validation where [`InstanceFlags::VALIDATION_INDIRECT_CALL`]
-    /// is set, and its features and limits are WebGPU's where
+    /// is set, and its features, limits and subgroup sizes are WebGPU's where
     /// [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
     ///
     /// It takes the adapter it is given: an adapter made by the caller is the caller's
@@ -1882,6 +1885,21 @@ fn filter_features_and_limits(
     }
 }
 
+/// Gives `info`, of an adapter with `features`, the subgroup sizes that WebGPU reports: where the
+/// adapter lacks [`wgt::Features::SUBGROUP`], 4 ([`wgt::MINIMUM_SUBGROUP_MIN_SIZE`]) and 128
+/// ([`wgt::MAXIMUM_SUBGROUP_MAX_SIZE`]). WebGPU's "new adapter info": "If "subgroups" is
+/// supported, set subgroupMinSize to the smallest supported subgroup size. Otherwise, set this
+/// value to 4", and 128 for `subgroupMaxSize`
+/// (<https://gpuweb.github.io/gpuweb/#abstract-opdef-new-adapter-info>). Where the adapter has the
+/// feature, its own sizes stay: they are the "real values" that the feature exposes
+/// (<https://gpuweb.github.io/gpuweb/#subgroups>).
+fn webgpu_subgroup_sizes(features: wgt::Features, info: &mut wgt::AdapterInfo) {
+    if !features.contains(wgt::Features::SUBGROUP) {
+        info.subgroup_min_size = wgt::MINIMUM_SUBGROUP_MIN_SIZE;
+        info.subgroup_max_size = wgt::MAXIMUM_SUBGROUP_MAX_SIZE;
+    }
+}
+
 fn normalize_max_resource_per_shader_stage_limits(limits: &mut wgt::Limits) {
     // The next steps are from <https://www.w3.org/TR/webgpu/#a-new-device>.
 
@@ -2150,6 +2168,14 @@ mod tests {
         /// An instance of the noop backend alone, with `flags`, whose adapter reports buffer
         /// limits of [`DRIVER_BUFFER_SIZE`].
         fn noop_instance(flags: InstanceFlags) -> Arc<Instance> {
+            noop_instance_with(flags, wgt::NoopBackendOptions::enabled())
+        }
+
+        /// As [`noop_instance`], with the noop backend's other `options`.
+        fn noop_instance_with(
+            flags: InstanceFlags,
+            options: wgt::NoopBackendOptions,
+        ) -> Arc<Instance> {
             let desc = hal::InstanceDescriptor {
                 name: "hal adapters",
                 flags,
@@ -2162,7 +2188,7 @@ mod tests {
                             max_storage_buffer_binding_size: DRIVER_BUFFER_SIZE,
                             ..wgt::Limits::unlimited()
                         }),
-                        ..wgt::NoopBackendOptions::enabled()
+                        ..options
                     },
                     ..Default::default()
                 },
@@ -2251,6 +2277,89 @@ mod tests {
                     "{flags:?}"
                 );
                 assert_eq!(adapter.raw.features, enumerated.raw.features, "{flags:?}");
+            }
+        }
+
+        /// Under strict WebGPU compliance, an adapter without `SUBGROUP`, which wgpu keeps
+        /// native-only, reports WebGPU's subgroup sizes, 4 and 128, as WebGPU's "new adapter info"
+        /// sets them where "subgroups" is not supported: given to `create_adapter_from_hal` as
+        /// enumerated, bucketed or not. Without strict compliance it reports the backend's sizes,
+        /// or its bucket's. Here a discrete GPU of subgroups 32 to 32, which the `m1` bucket (4 to
+        /// 64) takes. Before, the strict filter removed `SUBGROUP` and left the sizes.
+        #[test]
+        fn under_strict_compliance_an_adapter_without_subgroups_reports_webgpus_sizes() {
+            let options = wgt::NoopBackendOptions {
+                device_type: Some(wgt::DeviceType::DiscreteGpu),
+                subgroup_min_size: Some(32),
+                subgroup_max_size: Some(32),
+                ..wgt::NoopBackendOptions::enabled()
+            };
+            for flags in [
+                InstanceFlags::empty(),
+                InstanceFlags::VALIDATION_INDIRECT_CALL,
+                InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+                InstanceFlags::VALIDATION_INDIRECT_CALL | InstanceFlags::STRICT_WEBGPU_COMPLIANCE,
+            ] {
+                let instance = noop_instance_with(flags, options.clone());
+                // SAFETY: Exposed by this instance's backend.
+                let hal = unsafe { instance.create_adapter_from_hal(exposed(&instance)) };
+                let bucketed_raw = limits::apply_limit_buckets(exposed(&instance)).unwrap();
+                // SAFETY: Exposed by this instance's backend.
+                let bucketed_hal = unsafe { instance.create_adapter_from_hal(bucketed_raw) };
+                let enumerated = instance.enumerate_adapters(Backends::NOOP, false);
+                let bucketed = instance.enumerate_adapters(Backends::NOOP, true);
+                let ([enumerated], [bucketed]) = (enumerated.as_slice(), bucketed.as_slice())
+                else {
+                    panic!("{flags:?}: not one adapter enumerated");
+                };
+                let bucket = &bucketed.raw.info.limit_bucket.as_ref().unwrap().name;
+                assert_eq!(bucket, "m1", "{flags:?}");
+                let strict = flags.contains(InstanceFlags::STRICT_WEBGPU_COMPLIANCE);
+                // WebGPU's where "subgroups" is not supported: 4 and 128.
+                let (own, in_bucket) = if strict {
+                    ((4, 128), (4, 128))
+                } else {
+                    ((32, 32), (4, 64))
+                };
+                for (path, adapter, expected) in [
+                    ("hal", &hal, own),
+                    ("enumerated", enumerated, own),
+                    ("bucketed hal", &bucketed_hal, in_bucket),
+                    ("bucketed", bucketed, in_bucket),
+                ] {
+                    let info = &adapter.raw.info;
+                    assert_eq!(
+                        adapter.raw.features.contains(wgt::Features::SUBGROUP),
+                        !strict,
+                        "{flags:?}, {path}"
+                    );
+                    assert_eq!(
+                        (info.subgroup_min_size, info.subgroup_max_size),
+                        expected,
+                        "{flags:?}, {path}"
+                    );
+                }
+            }
+            // The rule is strict compliance's: without it, an adapter that lacks `SUBGROUP` keeps
+            // the backend's sizes.
+            let instance = noop_instance_with(
+                InstanceFlags::empty(),
+                wgt::NoopBackendOptions {
+                    features: Some(wgt::Features::all() - wgt::Features::SUBGROUP),
+                    ..options
+                },
+            );
+            // SAFETY: Exposed by this instance's backend.
+            let hal = unsafe { instance.create_adapter_from_hal(exposed(&instance)) };
+            let enumerated = instance.enumerate_adapters(Backends::NOOP, false);
+            for (path, adapter) in [("hal", &hal), ("enumerated", &enumerated[0])] {
+                let info = &adapter.raw.info;
+                assert!(!adapter.raw.features.contains(wgt::Features::SUBGROUP));
+                assert_eq!(
+                    (info.subgroup_min_size, info.subgroup_max_size),
+                    (32, 32),
+                    "without strict compliance, {path}"
+                );
             }
         }
 
