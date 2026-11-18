@@ -238,6 +238,11 @@ bitflags::bitflags! {
 
         /// Restrict the available feature set to the one defined by the WebGPU specification.
         ///
+        /// An adapter then reports WebGPU's subgroup sizes where it lacks
+        /// [`Features::SUBGROUP`](crate::Features::SUBGROUP), which wgpu keeps native-only: 4 and
+        /// 128 ([`AdapterInfo::subgroup_min_size`](crate::AdapterInfo::subgroup_min_size) and
+        /// [`AdapterInfo::subgroup_max_size`](crate::AdapterInfo::subgroup_max_size)).
+        ///
         /// When `Self::from_env()` is used takes value from `WGPU_STRICT_WEBGPU_COMPLIANCE` environment variable.
         const STRICT_WEBGPU_COMPLIANCE = 1 << 7;
 

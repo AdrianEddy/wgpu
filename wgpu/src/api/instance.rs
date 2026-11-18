@@ -397,7 +397,8 @@ impl Instance {
     ///
     /// The adapter offers what this instance's enumeration would offer of it: its limits fit
     /// indirect validation where [`InstanceFlags::VALIDATION_INDIRECT_CALL`] is set, and its
-    /// features and limits are WebGPU's where [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
+    /// features, limits and subgroup sizes are WebGPU's where
+    /// [`InstanceFlags::STRICT_WEBGPU_COMPLIANCE`] is.
     /// A device that requests [`Adapter::limits`] gets limits that its validation supports.
     ///
     /// It takes the adapter it is given: an adapter made by the caller is the caller's

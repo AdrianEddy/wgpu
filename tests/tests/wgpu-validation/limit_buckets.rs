@@ -350,7 +350,9 @@ fn enumerate_adapters_bucketing_enabled() {
 
 /// Under strict WebGPU compliance, the bucket that takes an adapter is the one that takes it
 /// without, and the instance offers it as WebGPU's: without its native-only features
-/// (`SUBGROUP`) and limits. `request_adapter` offers the adapter that enumeration offers. Before,
+/// (`SUBGROUP`) and limits, and so with WebGPU's subgroup sizes, 4 and 128, where without strict
+/// compliance it has the bucket's. `request_adapter` offers the adapter that enumeration offers.
+/// Before,
 /// the bucket was judged after the strict filter had removed `SUBGROUP` and zeroed the native-only
 /// limits, which every bucket asks for (`max_buffers_and_acceleration_structures_per_shader_stage`
 /// of 28 at least), and no adapter was offered.
@@ -400,6 +402,12 @@ fn strict_compliance_offers_the_bucket_as_webgpus() {
     let mut webgpu_limits = limits;
     webgpu_limits.zero_native_only();
     assert_eq!(strict_limits, webgpu_limits);
+    // `m1`'s subgroup sizes, and WebGPU's where "subgroups" is not supported.
+    assert_eq!((info.subgroup_min_size, info.subgroup_max_size), (4, 64));
+    assert_eq!(
+        (strict_info.subgroup_min_size, strict_info.subgroup_max_size),
+        (4, 128)
+    );
 }
 
 #[test]
