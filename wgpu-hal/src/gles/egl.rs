@@ -404,6 +404,101 @@ fn instance_err<E: core::error::Error + Send + Sync + 'static>(
     move |e| crate::InstanceError::with_source(message.into(), e)
 }
 
+/// A client API version to ask `eglCreateContext` for, as `(major, minor)`.
+type ContextVersion = (u8, u8);
+
+/// The desktop OpenGL core versions [`Inner::create`] asks for, newest first.
+///
+/// `EGL_KHR_create_context` (folded into EGL 1.5) makes a requested version a minimum: the
+/// context may implement any later version backward compatible with it, but need not. Mesa
+/// grants its newest core version; NVIDIA grants exactly the version asked for, so a 3.3
+/// request leaves the context at GLSL 3.30 (where naga's GLSL backend writes no compute
+/// shaders or storage blocks) on a driver that supports 4.6. As ANGLE's GLX display and
+/// Mesa's `glxinfo` do, ask for each version from the newest down and keep the first the
+/// driver grants. The last is [`super::MIN_DESKTOP_GL_VERSION`], the oldest the adapter
+/// accepts.
+const DESKTOP_GL_VERSIONS: [ContextVersion; 8] = [
+    (4, 6),
+    (4, 5),
+    (4, 4),
+    (4, 3),
+    (4, 2),
+    (4, 1),
+    (4, 0),
+    super::MIN_DESKTOP_GL_VERSION,
+];
+
+/// The OpenGL ES version [`Inner::create`] asks for: 3.0, or 3.x with a forced minor version.
+///
+/// The extension gives ES the same latitude as desktop GL (the requested version or any
+/// later backward-compatible one), but ES is asked for once, not stepped down from 3.2:
+/// NVIDIA and Mesa grant ES 3.2 for a 3.0 request, and ANGLE grants the newest version it is
+/// conformant for, giving a newer, non-conformant one only when that is what is asked for, so
+/// asking for 3.2 first would trade conformance for a version.
+fn gles_version(forced_minor: wgt::Gles3MinorVersion) -> ContextVersion {
+    let minor = match forced_minor {
+        wgt::Gles3MinorVersion::Automatic | wgt::Gles3MinorVersion::Version0 => 0,
+        wgt::Gles3MinorVersion::Version1 => 1,
+        wgt::Gles3MinorVersion::Version2 => 2,
+    };
+    (3, minor)
+}
+
+/// The `eglCreateContext` attributes that ask for `version`.
+///
+/// A minor version of 0 is the attribute's default and is left out, so ES 3.0 is asked for
+/// with the one attribute EGL 1.4 defines: `EGL_CONTEXT_CLIENT_VERSION`, the same token as
+/// `EGL_CONTEXT_MAJOR_VERSION`.
+fn version_attributes((major, minor): ContextVersion) -> Vec<khronos_egl::Int> {
+    let mut attributes = vec![khronos_egl::CONTEXT_MAJOR_VERSION, major.into()];
+    if minor != 0 {
+        attributes.extend([khronos_egl::CONTEXT_MINOR_VERSION, minor.into()]);
+    }
+    attributes
+}
+
+/// Whether [`Inner::create`] asks for a desktop OpenGL context before an OpenGL ES one: the
+/// display lists "OpenGL" among its client APIs (`supports_opengl`), and it can take the
+/// versioned request [`version_attributes`] makes.
+///
+/// EGL 1.5 and `EGL_KHR_create_context` define the version attributes for desktop OpenGL.
+/// EGL 1.4 alone defines only `EGL_CONTEXT_CLIENT_VERSION` (the same token as
+/// `EGL_CONTEXT_MAJOR_VERSION`), and for OpenGL ES contexts only; it has no
+/// `EGL_CONTEXT_MINOR_VERSION`. There every desktop request is invalid, so OpenGL ES is asked
+/// for straight away.
+fn asks_for_desktop_gl(
+    egl_version: (i32, i32),
+    supports_opengl: bool,
+    supports_khr_context: bool,
+) -> bool {
+    supports_opengl && (egl_version >= (1, 5) || supports_khr_context)
+}
+
+/// Creates a desktop OpenGL context at the newest of [`DESKTOP_GL_VERSIONS`] that `create`
+/// succeeds for, and returns it with its version.
+///
+/// A version the driver can't provide fails `eglCreateContext` (`EGL_BAD_MATCH` by
+/// `EGL_KHR_create_context`, which is what NVIDIA and Mesa answer; drivers differ), so any
+/// failure moves on to the next version, as ANGLE does. If every version fails, the oldest
+/// one's error is returned.
+///
+/// `create` tries robust access for each version, so a newer version without robust access
+/// is kept over an older one with it. The GL backend doesn't rely on robust access: its
+/// shaders are compiled without buffer bounds checks either way, and the adapter never asks
+/// for `KHR_robust_buffer_access_behavior`.
+fn create_newest_desktop_context<C>(
+    mut create: impl FnMut(ContextVersion) -> Result<C, khronos_egl::Error>,
+) -> Result<(C, ContextVersion), khronos_egl::Error> {
+    let [newer @ .., oldest] = DESKTOP_GL_VERSIONS;
+    for (major, minor) in newer {
+        match create((major, minor)) {
+            Ok(context) => return Ok((context, (major, minor))),
+            Err(e) => log::debug!("\tEGL context: OpenGL {major}.{minor} refused: {e}"),
+        }
+    }
+    create(oldest).map(|context| (context, oldest))
+}
+
 impl Inner {
     fn create(
         flags: wgt::InstanceFlags,
@@ -474,26 +569,6 @@ impl Inner {
         let supports_khr_context = display_extensions.contains("EGL_KHR_create_context");
 
         let mut context_attributes = vec![];
-        let mut gl_context_attributes = vec![];
-        let mut gles_context_attributes = vec![];
-        gl_context_attributes.push(khronos_egl::CONTEXT_MAJOR_VERSION);
-        gl_context_attributes.push(3);
-        gl_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
-        gl_context_attributes.push(3);
-        if supports_opengl && force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
-            log::warn!("Ignoring specified GLES minor version as OpenGL is used");
-        }
-        gles_context_attributes.push(khronos_egl::CONTEXT_MAJOR_VERSION);
-        gles_context_attributes.push(3); // Request GLES 3.0 or higher
-        if force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
-            gles_context_attributes.push(khronos_egl::CONTEXT_MINOR_VERSION);
-            gles_context_attributes.push(match force_gles_minor_version {
-                wgt::Gles3MinorVersion::Automatic => unreachable!(),
-                wgt::Gles3MinorVersion::Version0 => 0,
-                wgt::Gles3MinorVersion::Version1 => 1,
-                wgt::Gles3MinorVersion::Version2 => 2,
-            });
-        }
         if flags.contains(wgt::InstanceFlags::DEBUG) {
             if version >= (1, 5) {
                 log::debug!("\tEGL context: +debug");
@@ -512,9 +587,6 @@ impl Inner {
             context_attributes.push(khr_context_flags);
         }
 
-        gl_context_attributes.extend(&context_attributes);
-        gles_context_attributes.extend(&context_attributes);
-
         let context = {
             #[derive(Copy, Clone)]
             enum Robustness {
@@ -530,8 +602,11 @@ impl Inner {
                 None
             };
 
-            let create_context = |api, base_attributes: &[khronos_egl::Int]| {
+            let create_context = |api, context_version: ContextVersion| {
                 egl.bind_api(api)?;
+
+                let mut base_attributes = version_attributes(context_version);
+                base_attributes.extend(&context_attributes);
 
                 let mut robustness = robustness;
                 loop {
@@ -596,15 +671,31 @@ impl Inner {
                 }
             };
 
-            let result = if supports_opengl {
-                create_context(khronos_egl::OPENGL_API, &gl_context_attributes).or_else(
-                    |gl_error| {
-                        log::debug!("Failed to create desktop OpenGL context: {gl_error}, falling back to OpenGL ES");
-                        create_context(khronos_egl::OPENGL_ES_API, &gles_context_attributes)
-                    },
+            let create_gles_context = || {
+                create_context(
+                    khronos_egl::OPENGL_ES_API,
+                    gles_version(force_gles_minor_version),
                 )
+            };
+
+            let result = if asks_for_desktop_gl(version, supports_opengl, supports_khr_context) {
+                create_newest_desktop_context(|v| create_context(khronos_egl::OPENGL_API, v))
+                    .map(|(context, (major, minor))| {
+                        log::debug!("\tEGL context: OpenGL {major}.{minor}");
+                        if force_gles_minor_version != wgt::Gles3MinorVersion::Automatic {
+                            log::warn!("Ignoring specified GLES minor version as OpenGL is used");
+                        }
+                        context
+                    })
+                    .or_else(|gl_error| {
+                        log::debug!("Failed to create desktop OpenGL context: {gl_error}, falling back to OpenGL ES");
+                        create_gles_context()
+                    })
             } else {
-                create_context(khronos_egl::OPENGL_ES_API, &gles_context_attributes)
+                if supports_opengl {
+                    log::debug!("\tEGL context: -OpenGL (EGL 1.4 without EGL_KHR_create_context can't ask for a version)");
+                }
+                create_gles_context()
             };
 
             result.map_err(|e| {
@@ -1503,4 +1594,137 @@ impl crate::Surface for Surface {
         })
     }
     unsafe fn discard_texture(&self, _texture: super::Texture) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::{vec, vec::Vec};
+
+    use super::super::MIN_DESKTOP_GL_VERSION;
+    use super::{
+        asks_for_desktop_gl, create_newest_desktop_context, gles_version, version_attributes,
+        ContextVersion, DESKTOP_GL_VERSIONS,
+    };
+
+    /// A driver that grants every version up to `newest` and refuses newer ones with
+    /// `EGL_BAD_MATCH`, as `EGL_KHR_create_context` specifies. It records each request and
+    /// answers with the version it granted.
+    fn driver(
+        newest: ContextVersion,
+        asked: &mut Vec<ContextVersion>,
+    ) -> impl FnMut(ContextVersion) -> Result<ContextVersion, khronos_egl::Error> + '_ {
+        move |version| {
+            asked.push(version);
+            if version <= newest {
+                Ok(version)
+            } else {
+                Err(khronos_egl::Error::BadMatch)
+            }
+        }
+    }
+
+    #[test]
+    fn desktop_gl_is_asked_for_from_4_6_down_to_the_oldest_the_adapter_accepts() {
+        assert_eq!(DESKTOP_GL_VERSIONS.first(), Some(&(4, 6)));
+        assert_eq!(DESKTOP_GL_VERSIONS.last(), Some(&MIN_DESKTOP_GL_VERSION));
+        assert!(DESKTOP_GL_VERSIONS.windows(2).all(|w| w[0] > w[1]));
+    }
+
+    #[test]
+    fn desktop_gl_is_asked_for_only_where_a_versioned_request_is_valid() {
+        // EGL 1.4 defines the version attribute for OpenGL ES contexts alone.
+        assert!(!asks_for_desktop_gl((1, 4), true, false));
+        assert!(asks_for_desktop_gl((1, 4), true, true));
+        assert!(asks_for_desktop_gl((1, 5), true, false));
+        assert!(asks_for_desktop_gl((1, 5), true, true));
+        // A display that lists no "OpenGL" client API.
+        for (version, khr_context) in [((1, 4), false), ((1, 4), true), ((1, 5), true)] {
+            assert!(!asks_for_desktop_gl(version, false, khr_context));
+        }
+    }
+
+    #[test]
+    fn a_driver_that_grants_the_version_asked_for_gets_the_newest() {
+        // NVIDIA grants exactly the version asked for, so the first request decides.
+        let mut asked = vec![];
+        let granted = create_newest_desktop_context(driver((4, 6), &mut asked));
+        assert_eq!(granted, Ok(((4, 6), (4, 6))));
+        assert_eq!(asked, [(4, 6)]);
+    }
+
+    #[test]
+    fn an_older_driver_is_stepped_down_to_its_newest_version() {
+        let mut asked = vec![];
+        let granted = create_newest_desktop_context(driver((4, 1), &mut asked));
+        assert_eq!(granted, Ok(((4, 1), (4, 1))));
+        assert_eq!(asked, [(4, 6), (4, 5), (4, 4), (4, 3), (4, 2), (4, 1)]);
+    }
+
+    #[test]
+    fn any_refusal_moves_on_to_the_next_version() {
+        // Not every driver answers a version it can't provide with `EGL_BAD_MATCH`.
+        let mut asked = vec![];
+        let granted = create_newest_desktop_context(|version| {
+            asked.push(version);
+            match version {
+                (4, 6) => Err(khronos_egl::Error::BadAttribute),
+                (4, 5) => Err(khronos_egl::Error::BadConfig),
+                _ => Ok(version),
+            }
+        });
+        assert_eq!(granted, Ok(((4, 4), (4, 4))));
+        assert_eq!(asked, [(4, 6), (4, 5), (4, 4)]);
+    }
+
+    #[test]
+    fn a_driver_that_refuses_every_version_reports_the_oldest_ones_error() {
+        let mut asked = vec![];
+        let granted = create_newest_desktop_context(|version| {
+            asked.push(version);
+            Err::<(), _>(if version == MIN_DESKTOP_GL_VERSION {
+                khronos_egl::Error::BadAlloc
+            } else {
+                khronos_egl::Error::BadMatch
+            })
+        });
+        assert_eq!(granted, Err(khronos_egl::Error::BadAlloc));
+        assert_eq!(asked, DESKTOP_GL_VERSIONS);
+    }
+
+    #[test]
+    fn gles_is_asked_for_as_3_0_unless_a_minor_version_is_forced() {
+        use wgt::Gles3MinorVersion as Minor;
+
+        assert_eq!(gles_version(Minor::Automatic), (3, 0));
+        assert_eq!(gles_version(Minor::Version0), (3, 0));
+        assert_eq!(gles_version(Minor::Version1), (3, 1));
+        assert_eq!(gles_version(Minor::Version2), (3, 2));
+
+        // ES 3.0 is asked for with the EGL 1.4 attribute alone, which every EGL accepts.
+        assert_eq!(
+            khronos_egl::CONTEXT_MAJOR_VERSION,
+            khronos_egl::CONTEXT_CLIENT_VERSION
+        );
+        assert_eq!(
+            version_attributes(gles_version(Minor::Automatic)),
+            [khronos_egl::CONTEXT_CLIENT_VERSION, 3]
+        );
+    }
+
+    #[test]
+    fn a_nonzero_minor_version_is_asked_for_explicitly() {
+        assert_eq!(
+            version_attributes((4, 6)),
+            [
+                khronos_egl::CONTEXT_MAJOR_VERSION,
+                4,
+                khronos_egl::CONTEXT_MINOR_VERSION,
+                6
+            ]
+        );
+        assert_eq!(
+            version_attributes((4, 0)),
+            [khronos_egl::CONTEXT_MAJOR_VERSION, 4]
+        );
+    }
 }

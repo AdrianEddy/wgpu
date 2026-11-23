@@ -12,6 +12,152 @@ use crate::gles::ShaderClearProgram;
 const GL_UNMASKED_VENDOR_WEBGL: u32 = 0x9245;
 const GL_UNMASKED_RENDERER_WEBGL: u32 = 0x9246;
 
+/// The shader-side capabilities naga's GLSL backend can write at a context's shading
+/// language version.
+///
+/// The adapter advertises a capability only where the context provides it (by its core
+/// version or an extension) *and* the backend can write the shaders that use it at the
+/// context's GLSL version. A driver can expose an extension below the version the backend
+/// lowers it at: NVIDIA lists `GL_ARB_compute_shader` and
+/// `GL_ARB_shader_storage_buffer_object` in a 3.3 core context, whose GLSL 3.30 the backend
+/// writes neither compute shaders nor storage blocks for. Claiming those would fail later, at
+/// pipeline creation, and for wgpu-core's indirect-call validation pipelines at device
+/// creation.
+///
+/// Each field is the backend's own gate ([`naga::back::glsl::Features::unsupported_at`] and
+/// the `supports_*` checks of [`naga::back::glsl::Version`]) for every GLSL feature the
+/// shaders behind that capability can need.
+///
+/// Some gates change no claim today: [`Self::clip_distances`] and
+/// [`Self::dual_source_blending`] are open at every version the adapter accepts,
+/// [`Self::cube_array_textures`] and [`Self::early_depth_test`] wherever their claims' own
+/// version checks hold, and the `std430` and early-depth checks are implied by the features
+/// beside them. They are kept so that the claims follow the backend if it moves a threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GlslCapabilities {
+    /// Resources are declared with `layout(binding = N)` in the shader. Without it the
+    /// adapter re-binds a linked program's uniform blocks, textures and images by name,
+    /// which it cannot do for storage blocks.
+    binding_layout: bool,
+    /// Compute shaders, including workgroup memory.
+    compute: bool,
+    /// Storage blocks with a runtime-sized last member, in the `std430` layout, bound by
+    /// [`Self::binding_layout`].
+    storage_buffers: bool,
+    /// Storage images, including their size and layer-count queries.
+    storage_textures: bool,
+    /// `samplerCubeArray` and its shadow and integer variants.
+    cube_array_textures: bool,
+    /// Sample-rate shading: the `sample` interpolation qualifier and `gl_SampleID`.
+    multisampled_shading: bool,
+    /// Multiview (`gl_ViewIndex`).
+    multiview: bool,
+    /// Dual-source blending (`layout(index = 1)` fragment outputs).
+    dual_source_blending: bool,
+    /// `gl_ClipDistance`.
+    clip_distances: bool,
+    /// `layout(early_fragment_tests)` and conservative depth.
+    early_depth_test: bool,
+}
+
+impl GlslCapabilities {
+    fn new(version: naga::back::glsl::Version) -> Self {
+        use naga::back::glsl::Features as F;
+
+        let writes = |features: F| features.unsupported_at(version).is_empty();
+        let binding_layout = version.supports_explicit_locations();
+        Self {
+            binding_layout,
+            compute: writes(F::COMPUTE_SHADER),
+            storage_buffers: binding_layout
+                && version.supports_std430_layout()
+                && writes(F::BUFFER_STORAGE | F::DYNAMIC_ARRAY_SIZE),
+            storage_textures: writes(F::IMAGE_LOAD_STORE | F::IMAGE_SIZE),
+            cube_array_textures: writes(F::CUBE_TEXTURES_ARRAY),
+            multisampled_shading: writes(F::SAMPLE_VARIABLES | F::SAMPLE_QUALIFIER),
+            multiview: writes(F::MULTI_VIEW),
+            dual_source_blending: writes(F::DUAL_SOURCE_BLENDING),
+            clip_distances: writes(F::CLIP_DISTANCE),
+            early_depth_test: version.supports_early_depth_test()
+                && writes(F::IMAGE_LOAD_STORE | F::CONSERVATIVE_DEPTH),
+        }
+    }
+}
+
+/// The storage resources a driver reports for the vertex and fragment stages. Every count is
+/// zero where the adapter claims no storage buffers.
+#[derive(Clone, Copy, Debug)]
+struct StageStorageCounts {
+    /// `MAX_SHADER_STORAGE_BLOCK_SIZE`.
+    max_block_size: u32,
+    /// `MAX_VERTEX_SHADER_STORAGE_BLOCKS`.
+    vertex_blocks: u32,
+    /// `MAX_FRAGMENT_SHADER_STORAGE_BLOCKS`.
+    fragment_blocks: u32,
+    /// `MAX_VERTEX_IMAGE_UNIFORMS`, also where the adapter claims no storage textures: it
+    /// decides whether the vertex stage may write at all.
+    vertex_image_units: u32,
+    /// `MAX_FRAGMENT_IMAGE_UNIFORMS`.
+    fragment_image_units: u32,
+}
+
+/// The storage limits and vertex-stage claims the adapter derives from [`StageStorageCounts`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StageStorageClaims {
+    max_storage_buffers_per_shader_stage: u32,
+    max_storage_textures_per_shader_stage: u32,
+    /// [`wgt::DownlevelFlags::VERTEX_STORAGE`].
+    vertex_storage: bool,
+    /// [`wgt::Features::VERTEX_WRITABLE_STORAGE`].
+    vertex_writable_storage: bool,
+}
+
+impl StageStorageCounts {
+    /// `storage_textures` is whether the adapter claims storage textures.
+    fn claims(self, storage_textures: bool) -> StageStorageClaims {
+        // WORKAROUND: In order to work around an issue with GL on RPI4 and similar, we ignore a
+        // zero vertex ssbo count if there are vertex sstos. (more info:
+        // https://github.com/gfx-rs/wgpu/pull/1607#issuecomment-874938961) The hardware does not
+        // want us to write to these SSBOs, but GLES cannot express that. We detect this case and
+        // disable writing to SSBOs.
+        let vertex_ssbo_false_zero = self.vertex_blocks == 0 && self.vertex_image_units != 0;
+        if vertex_ssbo_false_zero {
+            // We only care about fragment here as the 0 is a lie.
+            log::debug!("Max vertex shader SSBO == 0 and SSTO != 0. Interpreting as false zero.");
+        }
+
+        // A pipeline layout gives these bindings `u8` slots, so the per-stage limits are at most
+        // `MAX_BINDING_SLOTS_PER_STAGE` (see `device::number_bindings`).
+        let max_storage_buffers_per_shader_stage = if self.vertex_blocks == 0 {
+            self.fragment_blocks
+        } else {
+            self.vertex_blocks.min(self.fragment_blocks)
+        }
+        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
+        let max_storage_textures_per_shader_stage = if !storage_textures {
+            0
+        } else if self.vertex_image_units == 0 {
+            self.fragment_image_units
+        } else {
+            self.vertex_image_units.min(self.fragment_image_units)
+        }
+        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
+        let vertex_storage = self.max_block_size != 0
+            && max_storage_buffers_per_shader_stage != 0
+            && (self.vertex_blocks != 0 || vertex_ssbo_false_zero);
+        StageStorageClaims {
+            max_storage_buffers_per_shader_stage,
+            max_storage_textures_per_shader_stage,
+            vertex_storage,
+            // Without vertex image units the storage-texture limit is the fragment stage's,
+            // which the vertex stage can't take, so it claims no writes at all. Where the
+            // adapter claims no storage textures that limit is zero, so this admits writable
+            // storage buffers alone.
+            vertex_writable_storage: vertex_storage && self.vertex_image_units != 0,
+        }
+    }
+}
+
 impl super::Adapter {
     pub fn get_glsl_version(&self) -> naga::back::glsl::Version {
         self.shared.shading_language_version
@@ -262,9 +408,10 @@ impl super::Adapter {
         }
 
         if let Some(full_ver) = full_ver {
-            if full_ver < (3, 3) {
+            let (min_major, min_minor) = super::MIN_DESKTOP_GL_VERSION;
+            if full_ver < (min_major, min_minor) {
                 log::warn!(
-                    "Returned GL context is {}.{}, when 3.3+ is needed",
+                    "Returned GL context is {}.{}, when {min_major}.{min_minor}+ is needed",
                     full_ver.0,
                     full_ver.1
                 );
@@ -307,10 +454,16 @@ impl super::Adapter {
             es_supported || full_supported
         };
 
-        let supports_storage =
-            supported((3, 1), (4, 3)) || extensions.contains("GL_ARB_shader_storage_buffer_object");
-        let supports_compute =
-            supported((3, 1), (4, 3)) || extensions.contains("GL_ARB_compute_shader");
+        let glsl = GlslCapabilities::new(shading_language_version);
+        log::debug!("GLSL capabilities: {glsl:?}");
+
+        let supports_storage = (supported((3, 1), (4, 3))
+            || extensions.contains("GL_ARB_shader_storage_buffer_object"))
+            && glsl.storage_buffers;
+        let supports_storage_textures = supports_storage && glsl.storage_textures;
+        let supports_compute = (supported((3, 1), (4, 3))
+            || extensions.contains("GL_ARB_compute_shader"))
+            && glsl.compute;
         let supports_work_group_params = supports_compute;
 
         // ANGLE provides renderer strings like: "ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)"
@@ -338,12 +491,12 @@ impl super::Adapter {
         } else {
             0
         };
-        let vertex_shader_storage_textures = if supports_storage {
+        let vertex_shader_image_units = if supports_storage {
             (unsafe { gl.get_parameter_i32(glow::MAX_VERTEX_IMAGE_UNIFORMS) } as u32)
         } else {
             0
         };
-        let fragment_shader_storage_textures = if supports_storage {
+        let fragment_shader_image_units = if supports_storage {
             (unsafe { gl.get_parameter_i32(glow::MAX_FRAGMENT_IMAGE_UNIFORMS) } as u32)
         } else {
             0
@@ -355,38 +508,25 @@ impl super::Adapter {
         };
         let max_element_index = unsafe { gl.get_parameter_i32(glow::MAX_ELEMENT_INDEX) } as u32;
 
-        // WORKAROUND: In order to work around an issue with GL on RPI4 and similar, we ignore a
-        // zero vertex ssbo count if there are vertex sstos. (more info:
-        // https://github.com/gfx-rs/wgpu/pull/1607#issuecomment-874938961) The hardware does not
-        // want us to write to these SSBOs, but GLES cannot express that. We detect this case and
-        // disable writing to SSBOs.
-        let vertex_ssbo_false_zero =
-            vertex_shader_storage_blocks == 0 && vertex_shader_storage_textures != 0;
-        if vertex_ssbo_false_zero {
-            // We only care about fragment here as the 0 is a lie.
-            log::debug!("Max vertex shader SSBO == 0 and SSTO != 0. Interpreting as false zero.");
+        let StageStorageClaims {
+            max_storage_buffers_per_shader_stage,
+            max_storage_textures_per_shader_stage,
+            vertex_storage,
+            vertex_writable_storage,
+        } = StageStorageCounts {
+            max_block_size: max_storage_block_size,
+            vertex_blocks: vertex_shader_storage_blocks,
+            fragment_blocks: fragment_shader_storage_blocks,
+            vertex_image_units: vertex_shader_image_units,
+            fragment_image_units: fragment_shader_image_units,
         }
-
-        // A pipeline layout gives these bindings `u8` slots, so the per-stage limits are at most
-        // `MAX_BINDING_SLOTS_PER_STAGE` (see `device::number_bindings`). So is the uniform
-        // buffers' limit below.
-        let max_storage_buffers_per_shader_stage = if vertex_shader_storage_blocks == 0 {
-            fragment_shader_storage_blocks
-        } else {
-            vertex_shader_storage_blocks.min(fragment_shader_storage_blocks)
-        }
-        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
-        let max_storage_textures_per_shader_stage = if vertex_shader_storage_textures == 0 {
-            fragment_shader_storage_textures
-        } else {
-            vertex_shader_storage_textures.min(fragment_shader_storage_textures)
-        }
-        .min(super::MAX_BINDING_SLOTS_PER_STAGE);
+        .claims(supports_storage_textures);
         // NOTE: GL_ARB_compute_shader adds support for indirect dispatch
         let indirect_execution = supported((3, 1), (4, 3))
             || (extensions.contains("GL_ARB_draw_indirect") && supports_compute);
-        let supports_cube_array = supported((3, 2), (4, 0))
-            || (supported((3, 1), (4, 0)) && extensions.contains("GL_EXT_texture_cube_map_array"));
+        let supports_cube_array = (supported((3, 2), (4, 0))
+            || (supported((3, 1), (4, 0)) && extensions.contains("GL_EXT_texture_cube_map_array")))
+            && glsl.cube_array_textures;
 
         let mut downlevel_flags = wgt::DownlevelFlags::empty()
             | wgt::DownlevelFlags::COMPARISON_SAMPLERS
@@ -408,12 +548,7 @@ impl super::Adapter {
             wgt::DownlevelFlags::INDEPENDENT_BLEND,
             supported((3, 2), (4, 0)) || extensions.contains("GL_EXT_draw_buffers_indexed"),
         );
-        downlevel_flags.set(
-            wgt::DownlevelFlags::VERTEX_STORAGE,
-            max_storage_block_size != 0
-                && max_storage_buffers_per_shader_stage != 0
-                && (vertex_shader_storage_blocks != 0 || vertex_ssbo_false_zero),
-        );
+        downlevel_flags.set(wgt::DownlevelFlags::VERTEX_STORAGE, vertex_storage);
         downlevel_flags.set(wgt::DownlevelFlags::FRAGMENT_STORAGE, supports_storage);
         if extensions.contains("EXT_texture_filter_anisotropic")
             || extensions.contains("GL_EXT_texture_filter_anisotropic")
@@ -439,9 +574,12 @@ impl super::Adapter {
             wgt::DownlevelFlags::FULL_DRAW_INDEX_UINT32,
             max_element_index == u32::MAX,
         );
+        // On ES this starts at 3.2: the backend writes the `sample` qualifier only from GLSL
+        // ES 3.20. Below that, `OES_sample_variables` gives `gl_SampleID` but not the
+        // qualifier, which needs `OES_shader_multisample_interpolation`.
         downlevel_flags.set(
             wgt::DownlevelFlags::MULTISAMPLED_SHADING,
-            supported((3, 2), (4, 0)) || extensions.contains("OES_sample_variables"),
+            supported((3, 2), (4, 0)) && glsl.multisampled_shading,
         );
         // GLSL ES has no `noperspective` qualifier, so `@interpolate(linear)` is only
         // expressible on desktop GLSL (where we require at least 330, well past the 130
@@ -513,21 +651,23 @@ impl super::Adapter {
         );
         features.set(
             wgt::Features::VERTEX_WRITABLE_STORAGE,
-            downlevel_flags.contains(wgt::DownlevelFlags::VERTEX_STORAGE)
-                && vertex_shader_storage_textures != 0,
+            vertex_writable_storage,
         );
         features.set(
             wgt::Features::MULTIVIEW,
-            extensions.contains("OVR_multiview2") || extensions.contains("GL_OVR_multiview2"),
+            (extensions.contains("OVR_multiview2") || extensions.contains("GL_OVR_multiview2"))
+                && glsl.multiview,
         );
         features.set(
             wgt::Features::DUAL_SOURCE_BLENDING,
-            extensions.contains("GL_EXT_blend_func_extended")
-                || extensions.contains("GL_ARB_blend_func_extended"),
+            (extensions.contains("GL_EXT_blend_func_extended")
+                || extensions.contains("GL_ARB_blend_func_extended"))
+                && glsl.dual_source_blending,
         );
         features.set(
             wgt::Features::CLIP_DISTANCES,
-            full_ver.is_some() || extensions.contains("GL_EXT_clip_cull_distance"),
+            (full_ver.is_some() || extensions.contains("GL_EXT_clip_cull_distance"))
+                && glsl.clip_distances,
         );
         features.set(
             wgt::Features::PRIMITIVE_INDEX,
@@ -537,7 +677,8 @@ impl super::Adapter {
         );
         features.set(
             wgt::Features::SHADER_EARLY_DEPTH_TEST,
-            supported((3, 1), (4, 2)) || extensions.contains("GL_ARB_shader_image_load_store"),
+            (supported((3, 1), (4, 2)) || extensions.contains("GL_ARB_shader_image_load_store"))
+                && glsl.early_depth_test,
         );
         if extensions.contains("GL_ARB_timer_query") {
             features.set(wgt::Features::TIMESTAMP_QUERY, true);
@@ -655,7 +796,7 @@ impl super::Adapter {
         );
         private_caps.set(
             super::PrivateCapabilities::SHADER_BINDING_LAYOUT,
-            supports_compute,
+            glsl.binding_layout,
         );
         private_caps.set(
             super::PrivateCapabilities::SHADER_TEXTURE_SHADOW_LOD,
@@ -1475,6 +1616,180 @@ unsafe impl Send for super::Adapter {}
 #[cfg(test)]
 mod tests {
     use super::super::Adapter;
+    use super::{GlslCapabilities, StageStorageClaims, StageStorageCounts};
+    use naga::back::glsl::Version;
+
+    /// What a desktop driver reports wherever the adapter claims storage buffers.
+    const DESKTOP_STORAGE: StageStorageCounts = StageStorageCounts {
+        max_block_size: 1 << 27,
+        vertex_blocks: 16,
+        fragment_blocks: 16,
+        vertex_image_units: 8,
+        fragment_image_units: 16,
+    };
+
+    #[test]
+    fn a_glsl_4_20_context_writes_vertex_storage_buffers_without_storage_textures() {
+        // A GL 4.2 driver with `GL_ARB_shader_storage_buffer_object`: the backend writes
+        // storage blocks at GLSL 4.20, but no `imageSize` before 4.30.
+        let glsl = GlslCapabilities::new(Version::Desktop(420));
+        assert!(glsl.storage_buffers && !glsl.storage_textures);
+        assert_eq!(
+            DESKTOP_STORAGE.claims(glsl.storage_textures),
+            StageStorageClaims {
+                max_storage_buffers_per_shader_stage: 16,
+                // No storage texture can be bound, so the vertex write claim admits buffers alone.
+                max_storage_textures_per_shader_stage: 0,
+                vertex_storage: true,
+                vertex_writable_storage: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_glsl_4_50_context_claims_what_the_driver_reports() {
+        let glsl = GlslCapabilities::new(Version::Desktop(450));
+        assert_eq!(
+            DESKTOP_STORAGE.claims(glsl.storage_textures),
+            StageStorageClaims {
+                max_storage_buffers_per_shader_stage: 16,
+                max_storage_textures_per_shader_stage: 8,
+                vertex_storage: true,
+                vertex_writable_storage: true,
+            }
+        );
+    }
+
+    #[test]
+    fn a_vertex_stage_without_image_units_writes_nothing() {
+        let tiled = StageStorageCounts {
+            vertex_image_units: 0,
+            ..DESKTOP_STORAGE
+        };
+        for storage_textures in [false, true] {
+            let claims = tiled.claims(storage_textures);
+            assert!(claims.vertex_storage);
+            assert!(!claims.vertex_writable_storage);
+        }
+        // The storage-texture limit falls back to the fragment stage's.
+        assert_eq!(tiled.claims(true).max_storage_textures_per_shader_stage, 16);
+    }
+
+    #[test]
+    fn a_false_zero_vertex_storage_block_count_still_reads_storage() {
+        let false_zero = StageStorageCounts {
+            vertex_blocks: 0,
+            ..DESKTOP_STORAGE
+        };
+        let claims = false_zero.claims(true);
+        assert!(claims.vertex_storage);
+        assert_eq!(claims.max_storage_buffers_per_shader_stage, 16);
+    }
+
+    #[test]
+    fn a_context_without_storage_buffers_claims_no_storage() {
+        let none = StageStorageCounts {
+            max_block_size: 0,
+            vertex_blocks: 0,
+            fragment_blocks: 0,
+            vertex_image_units: 0,
+            fragment_image_units: 0,
+        };
+        assert_eq!(
+            none.claims(false),
+            StageStorageClaims {
+                max_storage_buffers_per_shader_stage: 0,
+                max_storage_textures_per_shader_stage: 0,
+                vertex_storage: false,
+                vertex_writable_storage: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_glsl_3_30_context_claims_no_compute_or_storage() {
+        // What NVIDIA grants for a 3.3 core request, while it lists `GL_ARB_compute_shader`
+        // and `GL_ARB_shader_storage_buffer_object`.
+        let glsl = GlslCapabilities::new(Version::Desktop(330));
+        assert!(!glsl.compute);
+        assert!(!glsl.storage_buffers);
+        assert!(!glsl.storage_textures);
+        assert!(!glsl.binding_layout);
+        assert!(!glsl.multisampled_shading);
+        assert!(glsl.cube_array_textures);
+        assert!(glsl.multiview);
+        assert!(glsl.dual_source_blending);
+        assert!(glsl.clip_distances);
+        assert!(glsl.early_depth_test);
+    }
+
+    #[test]
+    fn desktop_glsl_gates_follow_the_backend() {
+        // GLSL 4.00 writes storage blocks, but without `layout(binding)` the adapter could not
+        // bind them, so they wait for 4.20 like compute does.
+        let glsl_400 = GlslCapabilities::new(Version::Desktop(400));
+        assert!(!glsl_400.storage_buffers);
+        assert!(!glsl_400.compute);
+        assert!(glsl_400.multisampled_shading);
+
+        let glsl_420 = GlslCapabilities::new(Version::Desktop(420));
+        assert!(glsl_420.binding_layout);
+        assert!(glsl_420.compute);
+        assert!(glsl_420.storage_buffers);
+        // `imageSize` is written from GLSL 4.30.
+        assert!(!glsl_420.storage_textures);
+
+        let glsl_430 = GlslCapabilities::new(Version::Desktop(430));
+        assert!(glsl_430.storage_textures);
+
+        // The adapter caps desktop GLSL at 4.50, where everything here is written.
+        let glsl_450 = GlslCapabilities::new(Version::Desktop(450));
+        assert_eq!(
+            glsl_450,
+            GlslCapabilities {
+                binding_layout: true,
+                compute: true,
+                storage_buffers: true,
+                storage_textures: true,
+                cube_array_textures: true,
+                multisampled_shading: true,
+                multiview: true,
+                dual_source_blending: true,
+                clip_distances: true,
+                early_depth_test: true,
+            }
+        );
+    }
+
+    #[test]
+    fn es_glsl_gates_follow_the_backend() {
+        let es_300 = GlslCapabilities::new(Version::new_gles(300));
+        assert!(!es_300.compute);
+        assert!(!es_300.storage_buffers);
+        assert!(!es_300.storage_textures);
+        assert!(!es_300.binding_layout);
+        assert!(!es_300.cube_array_textures);
+        // Native ES writes multiview through `GL_EXT_multiview`, from ES 3.10.
+        assert!(!es_300.multiview);
+        assert!(!es_300.early_depth_test);
+
+        let webgl2 = GlslCapabilities::new(Version::Embedded {
+            version: 300,
+            is_webgl: true,
+        });
+        // WebGL 2 writes it through `GL_OVR_multiview2`.
+        assert!(webgl2.multiview);
+
+        let es_310 = GlslCapabilities::new(Version::new_gles(310));
+        assert!(es_310.compute);
+        assert!(es_310.storage_buffers);
+        assert!(es_310.storage_textures);
+        assert!(es_310.binding_layout);
+        // The `sample` qualifier is core from ES 3.20.
+        assert!(!es_310.multisampled_shading);
+
+        assert!(GlslCapabilities::new(Version::new_gles(320)).multisampled_shading);
+    }
 
     #[test]
     fn test_version_parse() {
