@@ -205,8 +205,14 @@ impl PendingCallbacks {
     /// closes, so this thread holds no lock.
     ///
     /// Nothing is delivered while the thread unwinds; the callbacks wait for the next delivery.
+    ///
+    /// Only a panic that unwinds runs code on its thread with the thread's panic count raised, so
+    /// the count is read only where panics unwind. Where a panic aborts, nothing runs after it,
+    /// except on `wasm32-unknown-unknown`: there a panic traps, the instance takes later calls (the
+    /// page's next task, the next test of a suite), and the count the trapped panic raised is never
+    /// lowered. Read there, it would stop every delivery for the rest of the instance's life.
     fn deliver(&self) {
-        #[cfg(feature = "std")]
+        #[cfg(all(feature = "std", panic = "unwind"))]
         if std::thread::panicking() {
             return;
         }
