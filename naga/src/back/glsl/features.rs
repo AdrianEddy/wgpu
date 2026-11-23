@@ -62,31 +62,14 @@ bitflags::bitflags! {
     }
 }
 
-/// Helper structure used to store the required [`Features`] needed to output a
-/// [`Module`](crate::Module)
-///
-/// Provides helper methods to check for availability and writing required extensions
-pub(crate) struct FeaturesManager(Features);
-
-impl FeaturesManager {
-    /// Creates a new [`FeaturesManager`] instance
-    pub const fn new() -> Self {
-        Self(Features::empty())
-    }
-
-    /// Adds to the list of required [`Features`]
-    pub fn request(&mut self, features: Features) {
-        self.0 |= features
-    }
-
-    /// Checks if the list of features [`Features`] contains the specified [`Features`]
-    pub const fn contains(&mut self, features: Features) -> bool {
-        self.0.contains(features)
-    }
-
-    /// Checks that all required [`Features`] are available for the specified
-    /// [`Version`] otherwise returns an [`Error::MissingFeatures`].
-    pub fn check_availability(&self, version: Version) -> BackendResult {
+impl Features {
+    /// Returns the features in `self` that the GLSL backend cannot write at `version`.
+    ///
+    /// A module that needs any of them fails to compile at `version` with
+    /// [`Error::MissingFeatures`]. An embedder that targets a version it does not choose (the
+    /// one a driver's context reports) can ask this before it advertises a capability whose
+    /// shaders need these features.
+    pub fn unsupported_at(self, version: Version) -> Self {
         // Will store all the features that are unavailable
         let mut missing = Features::empty();
 
@@ -94,7 +77,7 @@ impl FeaturesManager {
         macro_rules! check_feature {
             // Used when only core glsl supports the feature
             ($feature:ident, $core:literal) => {
-                if self.0.contains(Features::$feature)
+                if self.contains(Features::$feature)
                     && (version < Version::Desktop($core) || version.is_es())
                 {
                     missing |= Features::$feature;
@@ -102,7 +85,7 @@ impl FeaturesManager {
             };
             // Used when both core and es support the feature
             ($feature:ident, $core:literal, $es:literal) => {
-                if self.0.contains(Features::$feature)
+                if self.contains(Features::$feature)
                     && (version < Version::Desktop($core) || version < Version::new_gles($es))
                 {
                     missing |= Features::$feature;
@@ -140,7 +123,36 @@ impl FeaturesManager {
         check_feature!(IMAGE_SIZE, 430, 310);
         check_feature!(TEXTURE_SHADOW_LOD, 200, 300);
 
-        // Return an error if there are missing features
+        missing
+    }
+}
+
+/// Helper structure used to store the required [`Features`] needed to output a
+/// [`Module`](crate::Module)
+///
+/// Provides helper methods to check for availability and writing required extensions
+pub(crate) struct FeaturesManager(Features);
+
+impl FeaturesManager {
+    /// Creates a new [`FeaturesManager`] instance
+    pub const fn new() -> Self {
+        Self(Features::empty())
+    }
+
+    /// Adds to the list of required [`Features`]
+    pub fn request(&mut self, features: Features) {
+        self.0 |= features
+    }
+
+    /// Checks if the list of features [`Features`] contains the specified [`Features`]
+    pub const fn contains(&mut self, features: Features) -> bool {
+        self.0.contains(features)
+    }
+
+    /// Checks that all required [`Features`] are available for the specified
+    /// [`Version`] otherwise returns an [`Error::MissingFeatures`].
+    pub fn check_availability(&self, version: Version) -> BackendResult {
+        let missing = self.0.unsupported_at(version);
         if missing.is_empty() {
             Ok(())
         } else {

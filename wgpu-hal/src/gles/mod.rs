@@ -139,6 +139,9 @@ const ZERO_BUFFER_SIZE: usize = 256 << 10;
 const MAX_IMMEDIATES: usize = 64;
 // We have to account for each immediate data may need to be set for every shader.
 const MAX_IMMEDIATES_COMMANDS: usize = MAX_IMMEDIATES * crate::MAX_CONCURRENT_SHADER_STAGES;
+/// The oldest desktop OpenGL version the adapter accepts, as `(major, minor)`, and the last
+/// one EGL asks for.
+const MIN_DESKTOP_GL_VERSION: (u8, u8) = (3, 3);
 
 impl crate::Api for Api {
     const VARIANT: wgt::Backend = wgt::Backend::Gl;

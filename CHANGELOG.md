@@ -42,6 +42,12 @@ Bottom level categories:
 
 ## Unreleased
 
+### New Features
+
+#### naga
+
+- Add `back::glsl::Features::unsupported_at`, which reports the features the GLSL backend cannot write at a given version. By @AdrianEddy.
+
 ### Bug Fixes
 
 #### General
@@ -49,6 +55,11 @@ Bottom level categories:
 - Fix a spurious assertion failure in `Device::maintain` when multiple threads race polling the same device. By @AdrianEddy in [#9958](https://github.com/gfx-rs/wgpu/pull/9958).
 - Fix `Buffer::unmap` failing with `NotMapped` when it races a `Buffer::map` running on another thread. By @AdrianEddy in [#9959](https://github.com/gfx-rs/wgpu/pull/9959).
 - Fix `PendingSubmission` releasing its lock guards out of stacking order, which tripped `--cfg wgpu_validate_locks` on any submission. By @AdrianEddy in [#9960](https://github.com/gfx-rs/wgpu/pull/9960).
+
+#### GLES / OpenGL
+
+- On EGL, ask for the newest desktop OpenGL core context first (4.6, then each older version down to 3.3) and keep the first the driver grants, as ANGLE's GLX display does. A requested version is only a minimum: NVIDIA grants exactly the version asked for, so its contexts were GL 3.3 with GLSL 3.30, and device creation failed with `Lost` in indirect-call validation. Mesa grants its newest version and was unaffected, and so is the OpenGL ES request, which NVIDIA and Mesa answer with ES 3.2. By @AdrianEddy; see [#8799](https://github.com/gfx-rs/wgpu/issues/8799) (the same step-down is proposed in [#11062](https://github.com/gfx-rs/wgpu/pull/11062)).
+- Advertise shader-side capabilities on GL only where naga's GLSL backend can write them at the context's GLSL version, and rely on bindings declared in the shader exactly where the backend declares them. A context that lists `GL_ARB_compute_shader` or `GL_ARB_shader_storage_buffer_object` below the GLSL version the backend needs for them no longer claims compute or storage buffers, so wgpu-core no longer builds an indirect-validation pipeline the backend refuses, and below GLSL 4.20 a program's uniform blocks and textures are bound by name, as the backend declares no bindings there. The same check takes storage textures away from GLSL 4.20 contexts (the backend writes `imageSize` from 4.30), sample-rate shading from WebGL 2 contexts that expose `OES_sample_variables` (the `sample` qualifier needs GLSL ES 3.20), and multiview from native OpenGL ES 3.0 contexts (the backend writes `GL_EXT_multiview` from GLSL ES 3.10). Cube-map array textures, dual-source blending, clip distances and early depth tests go through it too. By @AdrianEddy.
 
 ## v30.0.0 (2026-07-01)
 
