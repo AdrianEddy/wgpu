@@ -421,6 +421,7 @@ See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 - Query memory budgets only where the physical device offers `VK_EXT_memory_budget` as well as the device having enabled it, so that the RADV workaround holds for devices created elsewhere. By @AdrianEddy.
 - Refuse to create a swapchain, with a `SurfaceError`, on a device created without `VK_KHR_swapchain` or whose queue family cannot present to the surface (VUID-vkQueuePresentKHR-pSwapchains-01292), instead of panicking or presenting from the wrong family. By @AdrianEddy.
 - Allow Naga the binding-array indexing capabilities of the features a device was created with. By @AdrianEddy.
+- Never record a texture barrier with an empty stage mask, which needs `synchronization2` (VUID-vkCmdPipelineBarrier-srcStageMask-03937, -dstStageMask-03937). A barrier whose usages name no stage, such as the first barrier of a texture that `Device::create_texture_from_hal` wraps with the initial state `TextureUses::empty()`, or a transition into or out of `TextureUses::empty()`, now waits at no stage as buffer barriers do, with `TOP_OF_PIPE` and `BOTTOM_OF_PIPE`. By @AdrianEddy.
 
 #### Metal
 
