@@ -351,8 +351,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
     where
         T: Iterator<Item = crate::TextureBarrier<'a, super::Texture>>,
     {
-        let mut src_stages = vk::PipelineStageFlags::empty();
-        let mut dst_stages = vk::PipelineStageFlags::empty();
+        // A usage such as `TextureUses::empty()` names no stage, and without synchronization2 a
+        // stage mask must not be empty (VUID-vkCmdPipelineBarrier-srcStageMask-03937 and
+        // -dstStageMask-03937). TOP_OF_PIPE as a source and BOTTOM_OF_PIPE as a destination name
+        // no stage.
+        let mut src_stages = vk::PipelineStageFlags::TOP_OF_PIPE;
+        let mut dst_stages = vk::PipelineStageFlags::BOTTOM_OF_PIPE;
         let vk_barriers = &mut self.temp.image_barriers;
         vk_barriers.clear();
 
