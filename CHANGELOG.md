@@ -474,6 +474,7 @@ See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 - Fix a use-after-free when several threads create pipelines from the same shader with FXC. The shader cache now holds copies of the bytecode, not FXC's blobs, whose reference count is not thread-safe. By @xorza in [#10805](https://github.com/gfx-rs/wgpu/pull/10805).
 - Fix a 1 second stall in `Surface::get_current_texture` after a surface texture was dropped without being presented. By @DouglasDwyer in [#10511](https://github.com/gfx-rs/wgpu/pull/10511).
 - Present with `DXGI_PRESENT_RESTART` the first time after a swapchain is created or resized, discarding queued frames of the old size that DWM would otherwise show stretched while the window is being resized. By @DouglasDwyer in [#10548](https://github.com/gfx-rs/wgpu/pull/10548).
+- A texture made with `dx12::Texture::with_plane_slice` names only its own plane's subresources in its resource barriers. Its barriers named every subresource of the resource for its whole range, the other planes included, whose states other textures track, and the first plane's subresources for a part of it. By @AdrianEddy.
 
 #### Vulkan
 
