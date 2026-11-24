@@ -383,6 +383,7 @@ See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 
 - Make sure padding bytes are 0 in the destination buffer after a `copy_texture_to_buffer` when `UnrestrictedBufferTextureCopyPitchSupported` is not available. By @teoxoy in [#10005](https://github.com/gfx-rs/wgpu/pull/10005).
 - Sanitize shader labels before passing them to DXC as the source name. Fixes compilation when label contains a `:`. By @lucasmerlin in [#10134](https://github.com/gfx-rs/wgpu/pull/10134).
+- A texture made with `dx12::Texture::with_plane_slice` names only its own plane's subresources in its resource barriers. Its barriers named every subresource of the resource for its whole range, the other planes included, whose states other textures track, and the first plane's subresources for a part of it. By @AdrianEddy.
 
 #### Vulkan
 

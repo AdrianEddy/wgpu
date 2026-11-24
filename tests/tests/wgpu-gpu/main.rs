@@ -37,6 +37,7 @@ mod draw_index;
 mod draw_indirect;
 mod dual_source_blending;
 mod dx12_device_from_raw;
+mod dx12_plane_textures;
 mod encoder;
 mod external_image_copy;
 mod external_texture;
@@ -120,6 +121,7 @@ fn all_tests() -> Vec<wgpu_test::GpuTestInitializer> {
     draw_indirect::all_tests(&mut tests);
     dual_source_blending::all_tests(&mut tests);
     dx12_device_from_raw::all_tests(&mut tests);
+    dx12_plane_textures::all_tests(&mut tests);
     encoder::all_tests(&mut tests);
     external_texture::all_tests(&mut tests);
     float32_filterable::all_tests(&mut tests);

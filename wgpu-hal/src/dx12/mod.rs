@@ -93,7 +93,10 @@ mod types;
 mod view;
 
 use alloc::{borrow::ToOwned as _, string::String, sync::Arc, vec::Vec};
-use core::{ffi, fmt, mem, ops::Deref};
+use core::{
+    ffi, fmt, mem,
+    ops::{Deref, Range},
+};
 
 use arrayvec::ArrayVec;
 use hashbrown::HashMap;
@@ -1048,10 +1051,12 @@ impl Texture {
         &self.resource
     }
 
-    /// Pin the D3D12 plane slice for every view and copy derived from
-    /// this texture. Pass `0` for the luma plane, `1` for chroma. The
-    /// declared `TextureFormat` must be single-plane (e.g. `R8Unorm`,
-    /// `Rg8Unorm`) and match the plane's texel layout.
+    /// Pin the D3D12 plane slice for every view, copy and resource
+    /// barrier derived from this texture. Pass `0` for the luma plane,
+    /// `1` for chroma. The declared `TextureFormat` must be single-plane
+    /// (e.g. `R8Unorm`, `Rg8Unorm`) and match the plane's texel layout,
+    /// and the declared mip level and array layer counts must be the
+    /// resource's, as the plane's subresource indices depend on them.
     ///
     /// # Safety / aliasing
     ///
@@ -1060,19 +1065,16 @@ impl Texture {
     /// by calling [`Device::texture_from_raw`](Device::texture_from_raw)
     /// twice with two clones of the same `ID3D12Resource` and a
     /// different `plane_slice` on each. wgpu's state tracker treats
-    /// these wrappers as independent textures: per-subresource state,
-    /// hazard tracking, and resource-state barriers all assume
-    /// non-aliased ownership and have no way to know the two wrappers
-    /// alias the same underlying resource.
+    /// these wrappers as independent textures. Each one tracks the
+    /// states of its own plane's subresources, the only ones its
+    /// resource-state barriers name, so wrappers of different planes
+    /// keep separate states, as D3D12 keeps a state per subresource.
+    /// Nothing knows that the wrappers alias one resource.
     ///
-    /// The caller is responsible for ensuring that the underlying
-    /// resource is not concurrently used by another wgpu texture
-    /// wrapping a different plane in a way that would race or
-    /// invalidate state tracking — in particular, do not submit work
-    /// touching both wrappers in the same submission unless every
-    /// access goes through `COPY_SRC` / `COPY_DST` on the wrapper that
-    /// owns that plane's subresource, and do not destroy the wrappers
-    /// concurrently with in-flight work that uses either of them.
+    /// The caller is responsible for ensuring that no other wgpu
+    /// texture covers the same plane of the resource while a wrapper
+    /// is in use, and for not destroying the wrappers concurrently with
+    /// in-flight work that uses either of them.
     pub fn with_plane_slice(mut self, plane_slice: u32) -> Self {
         debug_assert!(
             !self.format.is_multi_planar_format(),
@@ -1109,9 +1111,17 @@ impl Texture {
         }
     }
 
-    /// see <https://learn.microsoft.com/en-us/windows/win32/direct3d12/subresources#plane-slice>
+    fn subresources(&self) -> Subresources {
+        Subresources {
+            format: self.format,
+            mip_level_count: self.mip_level_count,
+            array_layer_count: self.array_layer_count(),
+            plane_slice_override: self.plane_slice_override,
+        }
+    }
+
     fn calc_subresource(&self, mip_level: u32, array_layer: u32, plane: u32) -> u32 {
-        mip_level + (array_layer + plane * self.array_layer_count()) * self.mip_level_count
+        self.subresources().index(mip_level, array_layer, plane)
     }
 
     fn calc_subresource_for_copy(&self, base: &crate::TextureCopyBase) -> u32 {
@@ -1128,6 +1138,84 @@ impl Texture {
                 _ => unreachable!(),
             });
         self.calc_subresource(base.mip_level, base.array_layer, plane)
+    }
+}
+
+/// The subresources of a texture's resource.
+#[derive(Clone, Copy, Debug)]
+struct Subresources {
+    format: wgt::TextureFormat,
+    mip_level_count: u32,
+    array_layer_count: u32,
+    /// The one plane of a planar resource that a [`Texture::with_plane_slice`] texture covers.
+    plane_slice_override: Option<u32>,
+}
+
+impl Subresources {
+    /// see <https://learn.microsoft.com/en-us/windows/win32/direct3d12/subresources#plane-slice>
+    fn index(&self, mip_level: u32, array_layer: u32, plane: u32) -> u32 {
+        mip_level + (array_layer + plane * self.array_layer_count) * self.mip_level_count
+    }
+
+    /// The subresources that a transition barrier over `range` names, or `None` where one barrier
+    /// over all of the resource's subresources names exactly them.
+    fn transitioned_by(
+        self,
+        range: &wgt::ImageSubresourceRange,
+    ) -> Option<impl Iterator<Item = u32>> {
+        let planes = match self.plane_slice_override {
+            // The resource's other planes are other textures', whose states are tracked apart.
+            Some(plane) => plane..plane + 1,
+            None if range.is_full_resource(
+                self.format,
+                self.mip_level_count,
+                self.array_layer_count,
+            ) =>
+            {
+                return None
+            }
+            None => self.planes(range.aspect),
+        };
+        let layers = range.layer_range(self.array_layer_count);
+        Some(
+            range
+                .mip_range(self.mip_level_count)
+                .flat_map(move |mip_level| {
+                    let planes = planes.clone();
+                    layers.clone().flat_map(move |array_layer| {
+                        planes
+                            .clone()
+                            .map(move |plane| self.index(mip_level, array_layer, plane))
+                    })
+                }),
+        )
+    }
+
+    /// The planes that `aspect` selects.
+    fn planes(&self, aspect: wgt::TextureAspect) -> Range<u32> {
+        // Selected texture aspect is relevant if the texture format has both depth _and_ stencil aspects.
+        if self.format.is_combined_depth_stencil_format() {
+            match aspect {
+                wgt::TextureAspect::All => 0..2,
+                wgt::TextureAspect::DepthOnly => 0..1,
+                wgt::TextureAspect::StencilOnly => 1..2,
+                _ => unreachable!(),
+            }
+        } else if let Some(planes) = self.format.planes() {
+            match aspect {
+                wgt::TextureAspect::All => 0..planes,
+                wgt::TextureAspect::Plane0 => 0..1,
+                wgt::TextureAspect::Plane1 => 1..2,
+                wgt::TextureAspect::Plane2 => 2..3,
+                _ => unreachable!(),
+            }
+        } else {
+            match self.format {
+                wgt::TextureFormat::Stencil8 => 1..2,
+                wgt::TextureFormat::Depth24Plus => 0..2, // TODO: investigate why tests fail if we set this to 0..1
+                _ => 0..1,
+            }
+        }
     }
 }
 
@@ -1253,7 +1341,7 @@ struct ImmediatesInfo {
 #[derive(Debug, Clone)]
 struct DynamicStorageBufferOffsets {
     root_index: RootIndex,
-    range: core::ops::Range<usize>,
+    range: Range<usize>,
 }
 
 #[derive(Debug, Clone)]
@@ -1974,5 +2062,101 @@ mod background_color_tests {
             b: 255,
         });
         assert_eq!((white.r, white.g, white.b, white.a), (1.0, 1.0, 1.0, 1.0));
+    }
+}
+
+#[cfg(test)]
+mod subresource_tests {
+    use alloc::{vec, vec::Vec};
+    use core::ops::Range;
+
+    use super::Subresources;
+
+    fn range(
+        aspect: wgt::TextureAspect,
+        mips: Range<u32>,
+        layers: Range<u32>,
+    ) -> wgt::ImageSubresourceRange {
+        wgt::ImageSubresourceRange {
+            aspect,
+            base_mip_level: mips.start,
+            mip_level_count: Some(mips.end - mips.start),
+            base_array_layer: layers.start,
+            array_layer_count: Some(layers.end - layers.start),
+        }
+    }
+
+    fn transitioned(
+        subresources: Subresources,
+        range: &wgt::ImageSubresourceRange,
+    ) -> Option<Vec<u32>> {
+        subresources.transitioned_by(range).map(Iterator::collect)
+    }
+
+    /// A texture that wraps one plane of a planar resource transitions that plane's subresources
+    /// and no other, whole or in part: the other planes are other textures', in states of their
+    /// own.
+    #[test]
+    fn a_plane_texture_transitions_only_its_own_plane() {
+        let plane = |plane, mip_level_count, array_layer_count| Subresources {
+            format: wgt::TextureFormat::Rg8Unorm,
+            mip_level_count,
+            array_layer_count,
+            plane_slice_override: Some(plane),
+        };
+        let whole = wgt::ImageSubresourceRange::default();
+        assert_eq!(transitioned(plane(0, 1, 1), &whole), Some(vec![0]));
+        assert_eq!(transitioned(plane(1, 1, 1), &whole), Some(vec![1]));
+        // 2 mips and 3 layers: plane 1 starts at subresource 6.
+        assert_eq!(
+            transitioned(plane(1, 2, 3), &whole),
+            Some(vec![6, 8, 10, 7, 9, 11])
+        );
+        assert_eq!(
+            transitioned(plane(1, 2, 3), &range(wgt::TextureAspect::All, 1..2, 2..3)),
+            Some(vec![11])
+        );
+        assert_eq!(
+            transitioned(plane(0, 2, 3), &range(wgt::TextureAspect::All, 0..1, 1..3)),
+            Some(vec![2, 4])
+        );
+    }
+
+    /// Other textures transition the planes of their aspect, and a single-plane texture's whole
+    /// range all subresources at once.
+    #[test]
+    fn other_textures_transition_the_planes_of_their_aspect() {
+        let texture = |format, mip_level_count, array_layer_count| Subresources {
+            format,
+            mip_level_count,
+            array_layer_count,
+            plane_slice_override: None,
+        };
+        let whole = wgt::ImageSubresourceRange::default();
+        let nv12 = texture(wgt::TextureFormat::NV12, 1, 2);
+        // A planar format's `All` aspect is never the whole resource for `is_full_resource`.
+        assert_eq!(transitioned(nv12, &whole), Some(vec![0, 2, 1, 3]));
+        assert_eq!(
+            transitioned(nv12, &range(wgt::TextureAspect::Plane1, 0..1, 0..2)),
+            Some(vec![2, 3])
+        );
+        assert_eq!(
+            transitioned(nv12, &range(wgt::TextureAspect::All, 0..1, 1..2)),
+            Some(vec![1, 3])
+        );
+        let depth_stencil = texture(wgt::TextureFormat::Depth24PlusStencil8, 2, 1);
+        assert_eq!(
+            transitioned(
+                depth_stencil,
+                &range(wgt::TextureAspect::StencilOnly, 1..2, 0..1)
+            ),
+            Some(vec![3])
+        );
+        let colour = texture(wgt::TextureFormat::Rgba8Unorm, 3, 2);
+        assert_eq!(transitioned(colour, &whole), None);
+        assert_eq!(
+            transitioned(colour, &range(wgt::TextureAspect::All, 1..3, 1..2)),
+            Some(vec![4, 5])
+        );
     }
 }

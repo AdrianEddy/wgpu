@@ -109,49 +109,17 @@ impl super::CommandEncoder {
                 },
             };
 
-            let tex_mip_level_count = barrier.texture.mip_level_count;
-            let tex_array_layer_count = barrier.texture.array_layer_count();
-
-            if barrier.range.is_full_resource(
-                barrier.texture.format,
-                tex_mip_level_count,
-                tex_array_layer_count,
-            ) {
+            match barrier
+                .texture
+                .subresources()
+                .transitioned_by(&barrier.range)
+            {
                 // Only one barrier if it affects the whole image.
-                self.temp.barriers.push(raw);
-            } else {
-                // Selected texture aspect is relevant if the texture format has both depth _and_ stencil aspects.
-                let planes = if barrier.texture.format.is_combined_depth_stencil_format() {
-                    match barrier.range.aspect {
-                        wgt::TextureAspect::All => 0..2,
-                        wgt::TextureAspect::DepthOnly => 0..1,
-                        wgt::TextureAspect::StencilOnly => 1..2,
-                        _ => unreachable!(),
-                    }
-                } else if let Some(planes) = barrier.texture.format.planes() {
-                    match barrier.range.aspect {
-                        wgt::TextureAspect::All => 0..planes,
-                        wgt::TextureAspect::Plane0 => 0..1,
-                        wgt::TextureAspect::Plane1 => 1..2,
-                        wgt::TextureAspect::Plane2 => 2..3,
-                        _ => unreachable!(),
-                    }
-                } else {
-                    match barrier.texture.format {
-                        wgt::TextureFormat::Stencil8 => 1..2,
-                        wgt::TextureFormat::Depth24Plus => 0..2, // TODO: investigate why tests fail if we set this to 0..1
-                        _ => 0..1,
-                    }
-                };
-
-                for mip_level in barrier.range.mip_range(tex_mip_level_count) {
-                    for array_layer in barrier.range.layer_range(tex_array_layer_count) {
-                        for plane in planes.clone() {
-                            unsafe { &mut *raw.Anonymous.Transition }.Subresource = barrier
-                                .texture
-                                .calc_subresource(mip_level, array_layer, plane);
-                            self.temp.barriers.push(raw.clone());
-                        }
+                None => self.temp.barriers.push(raw),
+                Some(subresources) => {
+                    for subresource in subresources {
+                        unsafe { &mut *raw.Anonymous.Transition }.Subresource = subresource;
+                        self.temp.barriers.push(raw.clone());
                     }
                 }
             }
