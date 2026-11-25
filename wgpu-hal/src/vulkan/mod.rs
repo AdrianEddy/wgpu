@@ -1757,34 +1757,26 @@ impl crate::Queue for Queue {
 
         // We need to signal our wgpu::Fence if we have one, this adds it to the signal list.
         signal_fence.maintain(&self.device.raw)?;
-        // `vkQueueSubmit` requires its fence to be externally synchronized, and other threads
-        // access the fences in `active` (for example with `vkGetFenceStatus`) while holding the
-        // pool's lock. Holding the lock across the submit keeps them off the new fence.
-        let mut pool_guard = None;
+        // A pool's fence goes into `active` only once `vkQueueSubmit` has returned: the submission
+        // needs it externally synchronized, so `get_latest` must not read its status before. Until
+        // then it is in neither list, which also keeps `maintain` from resetting it.
+        let mut fence_pool = None;
         match *signal_fence {
             Fence::TimelineSemaphore(raw) => {
                 signal_semaphores.push_signal(SemaphoreType::Timeline(raw, signal_value));
             }
             Fence::FencePool(ref pool) => {
-                let locked_pool = pool_guard.insert(pool.write());
-                let FencePool {
-                    ref mut active,
-                    ref mut free,
-                    ..
-                } = **locked_pool;
-                let shared_fence = match free.pop() {
-                    Some(raw) => Arc::new(raw),
+                let free = pool.write().free.pop();
+                fence_raw = match free {
+                    Some(raw) => raw,
                     None => unsafe {
-                        let fence = self
-                            .device
+                        self.device
                             .raw
                             .create_fence(&vk::FenceCreateInfo::default(), None)
-                            .map_err(map_host_device_oom_err)?;
-                        Arc::new(fence)
+                            .map_err(map_host_device_oom_err)?
                     },
                 };
-                fence_raw = *shared_fence;
-                active.push((signal_value, shared_fence));
+                fence_pool = Some(pool);
             }
         }
 
@@ -1810,13 +1802,24 @@ impl crate::Queue for Queue {
         }
 
         profiling::scope!("vkQueueSubmit");
-        self.device
+        let result = self
+            .device
             .with_queue_lock(|| unsafe {
                 self.device
                     .raw
                     .queue_submit(self.raw, &[vk_info], fence_raw)
             })
-            .map_err(map_host_device_oom_and_lost_err)
+            .map_err(map_host_device_oom_and_lost_err);
+        if let Some(pool) = fence_pool {
+            let mut pool = pool.write();
+            match result {
+                // Submissions are externally synchronized, so `active` stays ascending.
+                Ok(()) => pool.active.push((signal_value, Arc::new(fence_raw))),
+                // The submission failed, so the fence is not pending: it is free again.
+                Err(_) => pool.free.push(fence_raw),
+            }
+        }
+        result
     }
 
     unsafe fn present(
