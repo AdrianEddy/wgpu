@@ -114,29 +114,20 @@ impl DescriptorAllocator {
         }
     }
 
-    pub fn register_layout(
-        &mut self,
-        device: &ash::Device,
-        layout: &super::BindGroupLayout,
-    ) -> Result<(), crate::DeviceError> {
-        let key = layout.bucket_key();
-        let bucket = match self.buckets.entry(key) {
-            hashbrown::hash_map::Entry::Occupied(occupied_entry) => occupied_entry.into_mut(),
-            hashbrown::hash_map::Entry::Vacant(vacant_entry) => {
-                let mut bucket = Bucket::default();
-                // Create at least 1 pool upfront instead of doing this when
-                // creating the first bind group.
-                bucket.create_pool(device, vacant_entry.key(), POOL_MIN_SETS)?;
-                vacant_entry.insert(bucket)
-            }
-        };
-
+    /// Pools are made by the first `alloc` that needs one, none for a layout
+    /// without descriptors.
+    pub fn register_layout(&mut self, layout: &super::BindGroupLayout) {
+        if layout.desc_count.total() == 0 {
+            return;
+        }
+        let bucket = self.buckets.entry(layout.bucket_key()).or_default();
         assert!(bucket.layouts.insert(layout.raw));
-
-        Ok(())
     }
 
     pub fn unregister_layout(&mut self, device: &ash::Device, layout: &super::BindGroupLayout) {
+        if layout.desc_count.total() == 0 {
+            return;
+        }
         let key = layout.bucket_key();
         let bucket = self.buckets.get_mut(&key).unwrap();
 
@@ -162,6 +153,16 @@ impl DescriptorAllocator {
     ) -> Result<DescriptorSet, crate::DeviceError> {
         let update_after_bind = layout.contains_binding_arrays;
         let total_descriptors = layout.desc_count.total();
+
+        // No shader can use a layout without descriptors, so its groups get no
+        // set, and `set_bind_group` binds nothing for them.
+        if total_descriptors == 0 {
+            return Ok(DescriptorSet {
+                raw: vk::DescriptorSet::null(),
+                bucket_key: layout.bucket_key(),
+                pool_index: usize::MAX,
+            });
+        }
 
         if update_after_bind
             && self.max_update_after_bind_descriptors_in_all_pools
@@ -282,6 +283,9 @@ impl DescriptorAllocator {
     }
 
     pub unsafe fn free(&mut self, device: &ash::Device, set: DescriptorSet) {
+        if set.raw == vk::DescriptorSet::null() {
+            return;
+        }
         let bucket = self.buckets.get_mut(&set.bucket_key).unwrap();
         let pool = bucket.pools.get_mut(set.pool_index).unwrap();
 
@@ -426,4 +430,136 @@ fn create_descriptor_pool(
         available: capacity,
         fragmented: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::boxed::Box;
+    use core::{cell::Cell, ffi::c_void, ptr};
+
+    use ash::vk::Handle as _;
+
+    use super::*;
+
+    std::thread_local! {
+        /// Pools created and destroyed, and sets allocated and freed, on this thread.
+        static CALLS: Cell<[u32; 4]> = const { Cell::new([0; 4]) };
+    }
+
+    fn count(call: usize) -> u64 {
+        CALLS.with(|calls| {
+            let mut counts = calls.get();
+            counts[call] += 1;
+            calls.set(counts);
+            u64::from(counts[call])
+        })
+    }
+
+    unsafe extern "system" fn create_descriptor_pool(
+        _: vk::Device,
+        _: *const vk::DescriptorPoolCreateInfo<'_>,
+        _: *const vk::AllocationCallbacks<'_>,
+        pool: *mut vk::DescriptorPool,
+    ) -> vk::Result {
+        unsafe { *pool = vk::DescriptorPool::from_raw(count(0)) };
+        vk::Result::SUCCESS
+    }
+
+    unsafe extern "system" fn destroy_descriptor_pool(
+        _: vk::Device,
+        _: vk::DescriptorPool,
+        _: *const vk::AllocationCallbacks<'_>,
+    ) {
+        count(1);
+    }
+
+    unsafe extern "system" fn allocate_descriptor_sets(
+        _: vk::Device,
+        _: *const vk::DescriptorSetAllocateInfo<'_>,
+        sets: *mut vk::DescriptorSet,
+    ) -> vk::Result {
+        unsafe { *sets = vk::DescriptorSet::from_raw(count(2)) };
+        vk::Result::SUCCESS
+    }
+
+    unsafe extern "system" fn free_descriptor_sets(
+        _: vk::Device,
+        _: vk::DescriptorPool,
+        _: u32,
+        _: *const vk::DescriptorSet,
+    ) -> vk::Result {
+        count(3);
+        vk::Result::SUCCESS
+    }
+
+    /// A device with only the descriptor pool and set functions, which count their calls. Any
+    /// other call panics.
+    fn counting_device() -> ash::Device {
+        // SAFETY: The functions have the signatures of the commands they are loaded for.
+        unsafe {
+            ash::Device::load_with(
+                |name| match name.to_bytes() {
+                    b"vkCreateDescriptorPool" => create_descriptor_pool as *const c_void,
+                    b"vkDestroyDescriptorPool" => destroy_descriptor_pool as *const c_void,
+                    b"vkAllocateDescriptorSets" => allocate_descriptor_sets as *const c_void,
+                    b"vkFreeDescriptorSets" => free_descriptor_sets as *const c_void,
+                    _ => ptr::null(),
+                },
+                vk::Device::null(),
+            )
+        }
+    }
+
+    fn layout(raw: u64, desc_count: DescriptorCounts) -> super::super::BindGroupLayout {
+        super::super::BindGroupLayout {
+            raw: vk::DescriptorSetLayout::from_raw(raw),
+            desc_count,
+            entries: Box::new([]),
+            binding_map: Vec::new(),
+            contains_binding_arrays: false,
+        }
+    }
+
+    #[test]
+    fn a_layout_without_descriptors_never_makes_a_pool() {
+        let device = counting_device();
+        let mut allocator = DescriptorAllocator::new(0);
+        let empty = layout(1, DescriptorCounts::default());
+
+        allocator.register_layout(&empty);
+        let set = unsafe { allocator.alloc(&device, &empty) }.unwrap();
+        assert_eq!(set.raw(), vk::DescriptorSet::null());
+        unsafe { allocator.free(&device, set) };
+        allocator.unregister_layout(&device, &empty);
+
+        assert_eq!(CALLS.get(), [0; 4]);
+    }
+
+    #[test]
+    fn a_pool_is_made_for_the_first_set_of_its_layouts() {
+        let device = counting_device();
+        let mut allocator = DescriptorAllocator::new(0);
+        let uniform = DescriptorCounts {
+            uniform_buffer: 1,
+            ..Default::default()
+        };
+        let layouts = [layout(1, uniform.clone()), layout(2, uniform)];
+
+        for layout in &layouts {
+            allocator.register_layout(layout);
+        }
+        assert_eq!(CALLS.get(), [0; 4], "registering made a pool");
+
+        let sets = layouts
+            .each_ref()
+            .map(|layout| unsafe { allocator.alloc(&device, layout) });
+        assert_eq!(CALLS.get(), [1, 0, 2, 0], "both sets come from one pool");
+        for set in sets {
+            unsafe { allocator.free(&device, set.unwrap()) };
+        }
+        for layout in &layouts {
+            allocator.unregister_layout(&device, layout);
+        }
+        assert_eq!(CALLS.get(), [1, 1, 2, 2]);
+    }
 }
