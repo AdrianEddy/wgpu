@@ -1652,18 +1652,7 @@ impl crate::Device for super::Device {
             contains_binding_arrays,
         };
 
-        let result = self
-            .desc_allocator
-            .lock()
-            .register_layout(&self.shared.raw, &layout);
-        if let Err(err) = result {
-            unsafe {
-                self.shared
-                    .raw
-                    .destroy_descriptor_set_layout(layout.raw, None)
-            };
-            return Err(err);
-        }
+        self.desc_allocator.lock().register_layout(&layout);
 
         self.counters.bind_group_layouts.add(1);
 
@@ -1785,8 +1774,11 @@ impl crate::Device for super::Device {
                 .alloc(&self.shared.raw, desc.layout)?
         };
 
+        // A group without descriptors has no set to name.
         if let Some(label) = desc.label {
-            unsafe { self.shared.set_object_name(set.raw(), label) };
+            if set.raw() != vk::DescriptorSet::null() {
+                unsafe { self.shared.set_object_name(set.raw(), label) };
+            }
         }
 
         /// Helper for splitting off and initializing a given number of elements on a pre-allocated

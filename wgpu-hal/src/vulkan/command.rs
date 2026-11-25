@@ -1029,6 +1029,10 @@ impl crate::CommandEncoder for super::CommandEncoder {
         group: &super::BindGroup,
         dynamic_offsets: &[wgt::DynamicOffset],
     ) {
+        // A group without descriptors has no set (`DescriptorAllocator::alloc`).
+        if group.set.raw() == vk::DescriptorSet::null() {
+            return;
+        }
         let sets = [group.set.raw()];
         unsafe {
             self.device.raw.cmd_bind_descriptor_sets(

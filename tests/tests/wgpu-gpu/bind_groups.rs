@@ -16,6 +16,7 @@ pub fn all_tests(vec: &mut Vec<GpuTestInitializer>) {
         BIND_GROUP_STAGE_ORDER,
         BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_NONE,
         BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_EMPTY,
+        EMPTY_BIND_GROUPS_BESIDE_A_USED_ONE,
     ]);
 }
 
@@ -715,3 +716,145 @@ static BIND_GROUP_AFTER_A_GROUP_THAT_BECOMES_EMPTY: GpuTestConfiguration =
     GpuTestConfiguration::new()
         .parameters(unused_group_parameters())
         .run_async(|ctx| bind_group_after_a_group_that_becomes_unused(ctx, UnusedGroup::Empty));
+
+/// Sets an empty bind group below and above the group that the shader uses, before and after
+/// it, switching between pipelines whose layouts have the empty group at either index, and
+/// checks that every dispatch wrote through the used group. Vulkan gives an empty group no
+/// descriptor set and binds nothing for it.
+async fn empty_bind_groups_beside_a_used_one(ctx: TestingContext) {
+    let device = &ctx.device;
+
+    let empty_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("empty"),
+        entries: &[],
+    });
+    let data_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("data"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let output = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("output"),
+        size: 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let empty_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("empty"),
+        layout: &empty_layout,
+        entries: &[],
+    });
+    let data_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("data"),
+        layout: &data_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: output.as_entire_binding(),
+        }],
+    });
+
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("shader"),
+        source: wgpu::ShaderSource::Wgsl(
+            "
+            @group(0) @binding(0) var<storage, read_write> at_zero: array<u32, 4>;
+            @group(1) @binding(0) var<storage, read_write> at_one: array<u32, 4>;
+
+            @compute @workgroup_size(1)
+            fn above_first() {
+                at_one[0] = 1u;
+            }
+
+            @compute @workgroup_size(1)
+            fn below_first() {
+                at_zero[1] = 2u;
+            }
+
+            @compute @workgroup_size(1)
+            fn above_second() {
+                at_one[2] = 3u;
+            }
+
+            @compute @workgroup_size(1)
+            fn below_second() {
+                at_zero[3] = 4u;
+            }
+            "
+            .into(),
+        ),
+    });
+    let above = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("above"),
+        bind_group_layouts: &[Some(&empty_layout), Some(&data_layout)],
+        immediate_size: 0,
+    });
+    let below = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("below"),
+        bind_group_layouts: &[Some(&data_layout), Some(&empty_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = |entry_point: &str, layout: &wgpu::PipelineLayout| {
+        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(entry_point),
+            layout: Some(layout),
+            module: &module,
+            entry_point: Some(entry_point),
+            compilation_options: Default::default(),
+            cache: None,
+        })
+    };
+
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size: 16,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        // The empty group set first.
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline("above_first", &above));
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.set_bind_group(1, &data_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&pipeline("below_first", &below));
+        pass.set_bind_group(0, &data_group, &[]);
+        pass.set_bind_group(1, &empty_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    {
+        // The empty group set last.
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline("above_second", &above));
+        pass.set_bind_group(1, &data_group, &[]);
+        pass.set_bind_group(0, &empty_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+        pass.set_pipeline(&pipeline("below_second", &below));
+        pass.set_bind_group(1, &empty_group, &[]);
+        pass.set_bind_group(0, &data_group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&output, 0, &readback, 0, 16);
+    ctx.queue.submit(Some(encoder.finish()));
+
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+    device.poll(PollType::wait_indefinitely()).unwrap();
+
+    let result: [u32; 4] = *bytemuck::from_bytes(&readback.slice(..).get_mapped_range().unwrap());
+    assert_eq!(result, [1, 2, 3, 4]);
+}
+
+#[apply(gpu_test!)]
+static EMPTY_BIND_GROUPS_BESIDE_A_USED_ONE: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(unused_group_parameters())
+    .run_async(empty_bind_groups_beside_a_used_one);
