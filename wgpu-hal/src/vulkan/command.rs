@@ -38,6 +38,21 @@ impl super::Texture {
     }
 }
 
+/// Resets `pool`, then destroys `framebuffers`, which its command buffers may use.
+///
+/// The specification allows the other order, but Adreno's driver (Adreno 650, driver build
+/// 09/11/20) reads a destroyed framebuffer in `vkResetCommandPool`.
+unsafe fn reset_pool_then_destroy_framebuffers(
+    device: &ash::Device,
+    pool: vk::CommandPool,
+    framebuffers: impl Iterator<Item = vk::Framebuffer>,
+) {
+    let _ = unsafe { device.reset_command_pool(pool, vk::CommandPoolResetFlags::default()) };
+    for framebuffer in framebuffers {
+        unsafe { device.destroy_framebuffer(framebuffer, None) };
+    }
+}
+
 impl super::CommandEncoder {
     fn write_pass_end_timestamp_if_requested(&mut self) {
         if let Some((query_set, index)) = self.end_of_pass_timer_query.take() {
@@ -234,14 +249,14 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.free
             .extend(cmd_bufs.into_iter().map(|cmd_buf| cmd_buf.raw));
         self.free.append(&mut self.discarded);
-        // Delete framebuffers from the framebuffer cache
-        for (_, framebuffer) in self.framebuffers.drain() {
-            unsafe { self.device.raw.destroy_framebuffer(framebuffer, None) };
-        }
-        let _ = unsafe {
-            self.device
-                .raw
-                .reset_command_pool(self.raw, vk::CommandPoolResetFlags::default())
+        unsafe {
+            reset_pool_then_destroy_framebuffers(
+                &self.device.raw,
+                self.raw,
+                self.framebuffers
+                    .drain()
+                    .map(|(_, framebuffer)| framebuffer),
+            )
         };
     }
 
@@ -1554,6 +1569,65 @@ mod tests {
         assert_eq!(
             conv::derive_image_layout(wgt::TextureUses::COPY_DST, wgt::TextureFormat::Rgba8Unorm),
             DST_IMAGE_LAYOUT
+        );
+    }
+
+    std::thread_local! {
+        /// The pool and framebuffer calls made on this thread, in order.
+        static CALLS: core::cell::RefCell<alloc::vec::Vec<&'static str>> = const {
+            core::cell::RefCell::new(alloc::vec::Vec::new())
+        };
+    }
+
+    unsafe extern "system" fn reset_command_pool(
+        _: vk::Device,
+        _: vk::CommandPool,
+        _: vk::CommandPoolResetFlags,
+    ) -> vk::Result {
+        CALLS.with_borrow_mut(|calls| calls.push("vkResetCommandPool"));
+        vk::Result::SUCCESS
+    }
+
+    unsafe extern "system" fn destroy_framebuffer(
+        _: vk::Device,
+        _: vk::Framebuffer,
+        _: *const vk::AllocationCallbacks<'_>,
+    ) {
+        CALLS.with_borrow_mut(|calls| calls.push("vkDestroyFramebuffer"));
+    }
+
+    /// The pool is reset before the framebuffers that its command buffers used are destroyed.
+    #[test]
+    fn a_pool_is_reset_before_its_framebuffers_are_destroyed() {
+        use ash::vk::Handle as _;
+
+        // SAFETY: The functions have the signatures of the commands they are loaded for. Any
+        // other call panics.
+        let device = unsafe {
+            ash::Device::load_with(
+                |name| match name.to_bytes() {
+                    b"vkResetCommandPool" => reset_command_pool as *const core::ffi::c_void,
+                    b"vkDestroyFramebuffer" => destroy_framebuffer as *const core::ffi::c_void,
+                    _ => core::ptr::null(),
+                },
+                vk::Device::null(),
+            )
+        };
+        let framebuffers = [1, 2].map(vk::Framebuffer::from_raw);
+        unsafe {
+            reset_pool_then_destroy_framebuffers(
+                &device,
+                vk::CommandPool::from_raw(3),
+                framebuffers.into_iter(),
+            )
+        };
+        assert_eq!(
+            CALLS.take(),
+            [
+                "vkResetCommandPool",
+                "vkDestroyFramebuffer",
+                "vkDestroyFramebuffer"
+            ]
         );
     }
 }
