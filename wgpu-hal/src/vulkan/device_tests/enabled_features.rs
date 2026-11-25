@@ -187,6 +187,92 @@ fn a_device_without_the_features_wgpu_hal_would_use_takes_the_paths_without_them
     }
 }
 
+/// On each adapter, a device without timeline semaphores, whose fences are binary fence pools,
+/// polled from one thread while another submits: the value never goes back, never passes the
+/// submissions made, and reaches the last. `submit` used to put the fence in the pool before
+/// `vkQueueSubmit`, so a poll could read its status while the submission used it, which the
+/// validation layer reports as UNASSIGNED-Threading-MultipleThreads-Read; run this under the layer
+/// to see that it no longer does.
+#[test]
+fn a_fence_pool_polled_while_another_thread_submits() {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    const SUBMISSIONS: u64 = 1000;
+
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        if adapter.phd_capabilities.device_api_version < vk::API_VERSION_1_3 {
+            std::println!("skipped {:?}: not Vulkan 1.3", exposed.info.name);
+            continue;
+        }
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+        let enabled = vk::PhysicalDeviceFeatures2::default()
+            .features(downlevel_core(adapter))
+            .push_next(&mut vulkan12);
+        let (raw, extensions) = create(adapter, &instance, &enabled);
+        // SAFETY: The chain is valid.
+        let enabled_features =
+            unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            adapter.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &enabled_features,
+                wgt::Features::empty(),
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        let (device, queue) = (open.device, open.queue);
+        // SAFETY: The device's own fence.
+        let fence = unsafe { device.create_fence() }.unwrap();
+        assert!(matches!(fence, Fence::FencePool { .. }));
+
+        let submitting = AtomicU64::new(0);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                let start = std::time::Instant::now();
+                let mut seen = 0;
+                while seen < SUBMISSIONS {
+                    // SAFETY: The fence lives until the scope ends.
+                    let value = unsafe { device.get_fence_value(&fence) }.unwrap();
+                    let submitting = submitting.load(Ordering::Acquire);
+                    assert!(value >= seen, "the value went back from {seen} to {value}");
+                    assert!(value <= submitting, "saw {value} before submitting it");
+                    seen = value;
+                    assert!(
+                        start.elapsed() < Duration::from_secs(30),
+                        "stuck at {seen} of {SUBMISSIONS}"
+                    );
+                }
+            });
+            for value in 1..=SUBMISSIONS {
+                submitting.store(value, Ordering::Release);
+                // SAFETY: Empty submissions, in ascending order, on this thread only.
+                unsafe { queue.submit(&[], &[], (&fence, value)) }.unwrap();
+            }
+        });
+        std::println!("{:?}: {SUBMISSIONS} submissions polled", exposed.info.name);
+        // SAFETY: The fence's own value, which the poller saw; it lives until destroyed here.
+        unsafe {
+            assert!(device
+                .wait(&fence, SUBMISSIONS, Some(Duration::from_secs(5)))
+                .unwrap());
+            device.destroy_fence(fence);
+        }
+        drop((queue, device));
+    }
+}
+
 /// On each adapter with a headless surface, a device created without `VK_KHR_swapchain` cannot
 /// configure the surface: an error, before wgpu-hal calls a swapchain function the device lacks.
 /// Before, it loaded and called them, and panicked. With a scaling mode, the device's failure
