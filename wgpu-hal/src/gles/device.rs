@@ -1996,6 +1996,10 @@ impl crate::Device for super::Device {
         self.features
     }
 
+    fn limits(&self) -> wgt::Limits {
+        self.limits.clone()
+    }
+
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {
         self.shared.downlevel.clone()
     }

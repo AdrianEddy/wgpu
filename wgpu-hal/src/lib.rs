@@ -1348,6 +1348,10 @@ pub trait Device: WasmNotSendSync {
     /// may use a feature outside them.
     fn features(&self) -> wgt::Features;
 
+    /// The limits this device was opened with: those given to [`Adapter::open`], or to a
+    /// backend's `device_from_raw`.
+    fn limits(&self) -> wgt::Limits;
+
     /// The downlevel capabilities of this device: those of its adapter, unless the device lacks a
     /// capability that the adapter offers, as a Vulkan device created outside wgpu-hal without a
     /// feature or an extension behind a downlevel flag does

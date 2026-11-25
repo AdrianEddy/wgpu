@@ -178,6 +178,7 @@ pub trait DynDevice: DynResource {
 
     fn get_internal_counters(&self) -> wgt::HalCounters;
     fn features(&self) -> wgt::Features;
+    fn limits(&self) -> wgt::Limits;
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities;
     fn supports_present_scaling(&self) -> bool;
     fn generate_allocator_report(&self) -> Option<wgt::AllocatorReport>;
@@ -618,6 +619,10 @@ impl<D: Device + DynResource> DynDevice for D {
 
     fn features(&self) -> wgt::Features {
         D::features(self)
+    }
+
+    fn limits(&self) -> wgt::Limits {
+        D::limits(self)
     }
 
     fn downlevel_capabilities(&self) -> wgt::DownlevelCapabilities {

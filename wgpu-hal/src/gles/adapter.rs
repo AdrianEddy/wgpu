@@ -1245,7 +1245,7 @@ impl crate::Adapter for super::Adapter {
     unsafe fn open(
         &self,
         features: wgt::Features,
-        _limits: &wgt::Limits,
+        limits: &wgt::Limits,
         _memory_hints: &wgt::MemoryHints,
     ) -> Result<crate::OpenDevice<super::Api>, crate::DeviceError> {
         let gl = &self.shared.context.lock();
@@ -1287,6 +1287,7 @@ impl crate::Adapter for super::Adapter {
             device: super::Device {
                 shared: Arc::clone(&self.shared),
                 features,
+                limits: limits.clone(),
                 main_vao,
                 #[cfg(all(native, feature = "renderdoc"))]
                 render_doc: Default::default(),

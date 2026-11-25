@@ -316,6 +316,102 @@ fn a_device_from_a_hal_device_requests_only_what_it_was_opened_with() {
     assert_eq!(device.features(), opened);
 }
 
+/// A device made from a hal device may have limits beyond its adapter's, up to those the hal
+/// device was opened with, as with its features. Requesting more is an error naming the limit, and
+/// with indirect call validation `max_buffer_size` keeps its `u32` bound. Before, the limits were
+/// checked against the adapter's, so a device opened with larger ones was refused.
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn a_device_from_a_hal_device_may_have_the_limits_it_was_opened_with() {
+    use core::future::Future as _;
+    use core::pin::pin;
+    use core::task;
+    use wgpu_hal::{api::Noop, Adapter as _};
+
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::NOOP,
+        flags: wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL,
+        backend_options: wgpu::BackendOptions {
+            noop: wgpu::NoopBackendOptions {
+                limits: Some(wgpu::Limits::default()),
+                ..wgpu::NoopBackendOptions::enabled()
+            },
+            ..Default::default()
+        },
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let ctx = &mut task::Context::from_waker(task::Waker::noop());
+    let task::Poll::Ready(Ok(adapter)) =
+        pin!(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).poll(ctx)
+    else {
+        unreachable!()
+    };
+    let opened = wgpu::Limits {
+        max_buffer_size: 1 << 30,
+        max_storage_buffer_binding_size: 1 << 30,
+        ..wgpu::Limits::default()
+    };
+    let from_hal = |opened: &wgpu::Limits, required_limits: wgpu::Limits| {
+        // SAFETY: Used to open a device.
+        let hal = unsafe { adapter.as_hal::<Noop>() }.unwrap();
+        // SAFETY: No requirements on the noop backend.
+        let open = unsafe { hal.open(wgpu::Features::empty(), opened, &Default::default()) };
+        drop(hal);
+        // SAFETY: Opened from this adapter.
+        unsafe {
+            adapter.create_device_from_hal(
+                open.unwrap(),
+                &wgpu::DeviceDescriptor {
+                    required_limits,
+                    ..Default::default()
+                },
+            )
+        }
+    };
+
+    let (device, _queue) =
+        from_hal(&opened, opened.clone()).expect("the limits the hal device was opened with");
+    assert_eq!(device.limits().max_storage_buffer_binding_size, 1 << 30);
+
+    let more = wgpu::Limits {
+        max_storage_buffer_binding_size: 1 << 31,
+        ..opened.clone()
+    };
+    let error = from_hal(&opened, more).expect_err("a limit beyond the hal device's");
+    assert!(
+        error
+            .to_string()
+            .contains("max_storage_buffer_binding_size"),
+        "{error}"
+    );
+
+    let past_u32 = wgpu::Limits {
+        max_buffer_size: u64::from(u32::MAX) + 1,
+        ..opened.clone()
+    };
+    let error = from_hal(&past_u32, past_u32.clone())
+        .expect_err("a buffer size past indirect call validation's bound");
+    assert!(error.to_string().contains("max_buffer_size"), "{error}");
+
+    let task::Poll::Ready(requested) = pin!(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_limits: wgpu::Limits {
+            max_storage_buffer_binding_size: opened.max_storage_buffer_binding_size,
+            ..wgpu::Limits::default()
+        },
+        ..Default::default()
+    }))
+    .poll(ctx) else {
+        unreachable!()
+    };
+    let error = requested.expect_err("request_device is held to the adapter's limits");
+    assert!(
+        error
+            .to_string()
+            .contains("max_storage_buffer_binding_size"),
+        "{error}"
+    );
+}
+
 /// Dropping the queue waits for its submissions on their fence before it waits for the queue to
 /// become idle, as `wgpu_hal::Queue::wait_for_idle` requires: the idle wait must not wait for one
 /// of them. The noop queue records an idle wait with a submission incomplete; here the GPU stalls,

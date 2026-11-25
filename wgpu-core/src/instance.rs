@@ -1489,15 +1489,16 @@ impl Adapter {
     }
 
     /// Creates a device and its queue from `hal_device`, validating `desc` as
-    /// [`Self::request_device`] does, but against the features `hal_device` was opened with
-    /// ([`hal::Device::features`]) instead of the adapter's: a device created outside wgpu may
-    /// have features its adapter does not offer. A feature outside them is
-    /// [`RequestDeviceError::FeaturesNotOpened`]. On an error, `hal_device` is dropped.
+    /// [`Self::request_device`] does, but against the features and limits `hal_device` was opened
+    /// with ([`hal::Device::features`], [`hal::Device::limits`]) instead of the adapter's: a
+    /// device created outside wgpu may have features and limits its adapter does not offer. A
+    /// feature outside them is [`RequestDeviceError::FeaturesNotOpened`], a limit beyond them
+    /// [`RequestDeviceError::LimitsExceeded`]. With [`InstanceFlags::VALIDATION_INDIRECT_CALL`],
+    /// `max_buffer_size` is also bounded as the adapter's is. On an error, `hal_device` is dropped.
     ///
     /// # Safety
     ///
     /// - `hal_device` must be created from this adapter.
-    /// - `desc.required_limits` must be within the limits of `hal_device`.
     pub unsafe fn create_device_and_queue_from_hal(
         self: &Arc<Self>,
         hal_device: hal::DynOpenDevice,
@@ -1520,7 +1521,16 @@ impl Adapter {
                 desc.required_features - opened,
             ));
         }
-        self.validate_device_descriptor_features_checked(&mut desc)?;
+        let mut opened_limits = hal_device.device.limits();
+        if self
+            .instance
+            .flags
+            .contains(InstanceFlags::VALIDATION_INDIRECT_CALL)
+        {
+            // Indirect draw validation's offsets are `u32`, see `indirect_validation::Draw::new`.
+            opened_limits.max_buffer_size = opened_limits.max_buffer_size.min(u32::MAX as u64);
+        }
+        self.validate_device_descriptor_features_checked(&mut desc, &opened_limits)?;
         // SAFETY: As our caller guarantees; `desc` is validated.
         unsafe { self.create_device_and_queue_from_validated_hal(hal_device, &desc) }
     }
@@ -1530,7 +1540,7 @@ impl Adapter {
     /// # Safety
     ///
     /// As [`Self::create_device_and_queue_from_hal`]'s, and `desc` is validated: its features
-    /// among those `hal_device` was opened with.
+    /// and limits within those `hal_device` was opened with.
     unsafe fn create_device_and_queue_from_validated_hal(
         self: &Arc<Self>,
         hal_device: hal::DynOpenDevice,
@@ -1597,14 +1607,16 @@ impl Adapter {
             ));
         }
 
-        self.validate_device_descriptor_features_checked(desc)
+        self.validate_device_descriptor_features_checked(desc, &self.raw.capabilities.limits)
     }
 
     /// The validation of [`Self::validate_device_descriptor`] after its features were filtered
-    /// and checked: the experimental features, the limits and their normalization.
+    /// and checked: the experimental features, the limits against `allowed` and their
+    /// normalization.
     fn validate_device_descriptor_features_checked(
         &self,
         desc: &mut DeviceDescriptor,
+        allowed: &wgt::Limits,
     ) -> Result<(), RequestDeviceError> {
         // Check if experimental features are permitted to be enabled.
         if desc
@@ -1639,7 +1651,7 @@ impl Adapter {
             );
         }
 
-        if let Some(failed) = check_limits(&desc.required_limits, &caps.limits).pop() {
+        if let Some(failed) = check_limits(&desc.required_limits, allowed).pop() {
             return Err(RequestDeviceError::LimitsExceeded(failed));
         }
 
