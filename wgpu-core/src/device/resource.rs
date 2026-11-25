@@ -2161,6 +2161,16 @@ impl Device {
                     planes_usages &= format_features.allowed_usages;
                 }
 
+                // The texture's storage uses come from the multi-planar format's own
+                // features, not the planes' (`conv::map_texture_usage`), so those
+                // must allow storage too, or the texture would be made without it.
+                if !format_features
+                    .allowed_usages
+                    .contains(wgt::TextureUsages::STORAGE_BINDING)
+                {
+                    planes_usages -= wgt::TextureUsages::STORAGE_BINDING;
+                }
+
                 desc.usage - planes_usages
             }
             None => desc.usage - format_features.allowed_usages,

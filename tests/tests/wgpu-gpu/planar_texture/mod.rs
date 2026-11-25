@@ -1,7 +1,8 @@
 //! Tests for nv12 texture creation and sampling.
 
 use wgpu_test::{
-    apply, gpu_test, GpuTestConfiguration, GpuTestInitializer, TestParameters, TestingContext,
+    apply, fail, gpu_test, valid, GpuTestConfiguration, GpuTestInitializer, TestParameters,
+    TestingContext,
 };
 
 pub fn all_tests(tests: &mut Vec<GpuTestInitializer>) {
@@ -12,6 +13,8 @@ pub fn all_tests(tests: &mut Vec<GpuTestInitializer>) {
         NV12_TEXTURE_COPYING,
         P010_TEXTURE_COPYING,
         NV12_PLANE_TO_SINGLE_PLANE_COPY,
+        NV12_TEXTURE_STORAGE,
+        P010_TEXTURE_STORAGE,
     ]);
 }
 
@@ -218,6 +221,226 @@ fn test_planar_texture_rendering(
     }
 
     ctx.queue.submit([encoder.finish()]);
+}
+
+// Helper function to check that a planar texture takes `STORAGE_BINDING` only
+// where the adapter's features for its format and its planes' formats allow it,
+// and that where they do, a compute shader's stores through each plane's
+// storage view land in that plane.
+async fn test_planar_texture_storage(
+    ctx: &TestingContext,
+    format: wgpu::TextureFormat,
+    // Each plane's format and its WGSL storage format.
+    planes: [(wgpu::TextureFormat, &str); 2],
+) {
+    const WIDTH: u32 = 256;
+    const HEIGHT: u32 = 128;
+    const CHROMA_WIDTH: u32 = WIDTH / 2;
+    const CHROMA_HEIGHT: u32 = HEIGHT / 2;
+
+    let allows_storage = |format| {
+        ctx.adapter
+            .get_texture_format_features(format)
+            .allowed_usages
+            .contains(wgpu::TextureUsages::STORAGE_BINDING)
+    };
+    let desc = wgpu::TextureDescriptor {
+        label: Some("planar storage"),
+        dimension: wgpu::TextureDimension::D2,
+        size: wgpu::Extent3d {
+            width: WIDTH,
+            height: HEIGHT,
+            depth_or_array_layers: 1,
+        },
+        format,
+        usage: wgpu::TextureUsages::STORAGE_BINDING,
+        mip_level_count: 1,
+        sample_count: 1,
+        view_formats: &[],
+    };
+    if !(allows_storage(format) && planes.iter().all(|&(plane, _)| allows_storage(plane))) {
+        fail(
+            &ctx.device,
+            || ctx.device.create_texture(&desc),
+            Some(&format!(
+                "Texture usages TextureUsages(STORAGE_BINDING) are not allowed on a texture of type {format:?}"
+            )),
+        );
+        return;
+    }
+
+    let texture = valid(&ctx.device, || {
+        ctx.device.create_texture(&wgpu::TextureDescriptor {
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            ..desc
+        })
+    });
+
+    // The stores stay within each plane's own extent: the chroma plane is half
+    // the luma plane in each axis.
+    let shader = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("planar storage"),
+            source: wgpu::ShaderSource::Wgsl(
+                format!(
+                    "@group(0) @binding(0) var luma: texture_storage_2d<{luma}, write>;
+                     @group(0) @binding(1) var chroma: texture_storage_2d<{chroma}, write>;
+
+                     fn pattern(x: u32, y: u32, channel: u32) -> f32 {{
+                         return f32((x * 3u + y * 101u + channel * 37u) & 255u) / 255.0;
+                     }}
+
+                     @compute @workgroup_size(8, 8)
+                     fn main(@builtin(global_invocation_id) id: vec3<u32>) {{
+                         let x = id.x;
+                         let y = id.y;
+                         textureStore(luma, id.xy, vec4(pattern(x, y, 0u), 0.0, 0.0, 1.0));
+                         if x < {CHROMA_WIDTH}u && y < {CHROMA_HEIGHT}u {{
+                             let uv = vec4(pattern(x, y, 1u), pattern(x, y, 2u), 0.0, 1.0);
+                             textureStore(chroma, id.xy, uv);
+                         }}
+                     }}",
+                    luma = planes[0].1,
+                    chroma = planes[1].1,
+                )
+                .into(),
+            ),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("planar storage"),
+            layout: None,
+            module: &shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let views = [wgpu::TextureAspect::Plane0, wgpu::TextureAspect::Plane1]
+        .into_iter()
+        .zip(planes)
+        .map(|(aspect, (plane_format, _))| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(plane_format),
+                aspect,
+                usage: Some(wgpu::TextureUsages::STORAGE_BINDING),
+                ..Default::default()
+            })
+        })
+        .collect::<Vec<_>>();
+    let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&views[0]),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&views[1]),
+            },
+        ],
+    });
+
+    // (aspect, width, height, the shader's channels, bytes a texel). Every row
+    // is a multiple of 256 bytes.
+    let plane_layouts = [
+        (wgpu::TextureAspect::Plane0, WIDTH, HEIGHT, &[0][..]),
+        (
+            wgpu::TextureAspect::Plane1,
+            CHROMA_WIDTH,
+            CHROMA_HEIGHT,
+            &[1, 2][..],
+        ),
+    ]
+    .into_iter()
+    .zip(planes)
+    .map(|((aspect, width, height, channels), (plane_format, _))| {
+        let bytes_per_texel = plane_format.block_copy_size(None).unwrap();
+        (aspect, width, height, channels, bytes_per_texel)
+    })
+    .collect::<Vec<_>>();
+    let readbacks = plane_layouts
+        .iter()
+        .map(|&(_, width, height, _, bytes_per_texel)| {
+            ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                label: None,
+                size: u64::from(width * height * bytes_per_texel),
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.dispatch_workgroups(WIDTH / 8, HEIGHT / 8, 1);
+    }
+    for (&(aspect, width, height, _, bytes_per_texel), readback) in
+        plane_layouts.iter().zip(&readbacks)
+    {
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(width * bytes_per_texel),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    ctx.queue.submit([encoder.finish()]);
+
+    for readback in &readbacks {
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| ());
+    }
+    ctx.async_poll(wgpu::PollType::wait_indefinitely())
+        .await
+        .unwrap();
+
+    for (&(aspect, width, height, channels, bytes_per_texel), readback) in
+        plane_layouts.iter().zip(&readbacks)
+    {
+        // The shader's pattern, as each unorm channel stores it: 8 bits a channel
+        // hold it as it is, 16 bits as `p * 257` (`p / 255 * 65535`).
+        let bytes_per_channel = bytes_per_texel / channels.len() as u32;
+        let expected = (0..height)
+            .flat_map(|y| (0..width).map(move |x| (x, y)))
+            .flat_map(|(x, y)| channels.iter().map(move |&c| (x, y, c)))
+            .flat_map(|(x, y, c)| {
+                let p = (x * 3 + y * 101 + c * 37) & 255;
+                match bytes_per_channel {
+                    1 => vec![p as u8],
+                    2 => ((p * 257) as u16).to_le_bytes().to_vec(),
+                    _ => unreachable!(),
+                }
+            })
+            .collect::<Vec<u8>>();
+        let data = readback.slice(..).get_mapped_range().unwrap().to_vec();
+        assert!(
+            data == expected,
+            "{format:?} {aspect:?}: the stores did not land in the plane"
+        );
+    }
 }
 
 /// Ensures that creation and sampling of an NV12 format texture works as
@@ -652,4 +875,57 @@ static P010_TEXTURE_COPYING: GpuTestConfiguration = GpuTestConfiguration::new()
             size,
         );
         ctx.queue.submit([command_encoder.finish()]);
+    });
+
+/// Ensures that an NV12 texture takes `STORAGE_BINDING` only where the
+/// adapter's format features allow it, and that stores through its plane views
+/// land where they do.
+#[apply(gpu_test!)]
+static NV12_TEXTURE_STORAGE: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .features(
+                wgpu::Features::TEXTURE_FORMAT_NV12
+                    | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            )
+            .limits(wgpu::Limits::downlevel_defaults())
+            .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+    )
+    .run_async(|ctx| async move {
+        test_planar_texture_storage(
+            &ctx,
+            wgpu::TextureFormat::NV12,
+            [
+                (wgpu::TextureFormat::R8Unorm, "r8unorm"),
+                (wgpu::TextureFormat::Rg8Unorm, "rg8unorm"),
+            ],
+        )
+        .await;
+    });
+
+/// Ensures that a P010 texture takes `STORAGE_BINDING` only where the
+/// adapter's format features allow it, and that stores through its plane views
+/// land where they do.
+#[apply(gpu_test!)]
+static P010_TEXTURE_STORAGE: GpuTestConfiguration = GpuTestConfiguration::new()
+    .parameters(
+        TestParameters::default()
+            .features(
+                wgpu::Features::TEXTURE_FORMAT_P010
+                    | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+                    | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES,
+            )
+            .limits(wgpu::Limits::downlevel_defaults())
+            .downlevel_flags(wgpu::DownlevelFlags::COMPUTE_SHADERS),
+    )
+    .run_async(|ctx| async move {
+        test_planar_texture_storage(
+            &ctx,
+            wgpu::TextureFormat::P010,
+            [
+                (wgpu::TextureFormat::R16Unorm, "r16unorm"),
+                (wgpu::TextureFormat::Rg16Unorm, "rg16unorm"),
+            ],
+        )
+        .await;
     });

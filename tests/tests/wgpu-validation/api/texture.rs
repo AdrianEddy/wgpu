@@ -373,6 +373,44 @@ fn planar_texture_render_attachment_unsupported() {
     );
 }
 
+/// Ensures that creating a planar texture with `STORAGE_BINDING` usage fails
+/// validation.
+#[test]
+fn planar_texture_storage_unsupported() {
+    let device_desc = wgpu::DeviceDescriptor {
+        required_features: wgpu::Features::TEXTURE_FORMAT_NV12
+            | wgpu::Features::TEXTURE_FORMAT_P010
+            | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM,
+        ..Default::default()
+    };
+    let (device, _queue) = wgpu::Device::noop(&device_desc);
+
+    for format in [wgpu::TextureFormat::NV12, wgpu::TextureFormat::P010] {
+        fail(
+            &device,
+            || {
+                let _ = device.create_texture(&wgpu::TextureDescriptor {
+                    label: None,
+                    dimension: wgpu::TextureDimension::D2,
+                    size: wgpu::Extent3d {
+                        width: 256,
+                        height: 256,
+                        depth_or_array_layers: 1,
+                    },
+                    format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    view_formats: &[],
+                });
+            },
+            Some(&format!(
+                "Texture usages TextureUsages(STORAGE_BINDING) are not allowed on a texture of type {format:?}"
+            )),
+        );
+    }
+}
+
 /// Creates a texture and a buffer, and encodes a copy from the texture to the
 /// buffer.
 fn encode_copy_texture_to_buffer(
