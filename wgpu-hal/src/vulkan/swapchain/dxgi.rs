@@ -376,6 +376,23 @@ impl InteropDevice {
     }
 }
 
+/// What `device` lacks of what the swapchain's interop needs of a device: timeline semaphores, on
+/// which the shared fences are made, and `VK_KHR_external_memory_win32` and
+/// `VK_KHR_external_semaphore_win32`, through which the back buffers and the fences are imported.
+/// The instance hides an adapter that cannot give them, but a device created elsewhere may still
+/// have been created without them.
+fn missing_interop(device: &DeviceShared) -> Option<&'static str> {
+    if !device.private_caps.timeline_semaphores {
+        Some("the device was created without timeline semaphores")
+    } else if device.extension_fns.external_memory_win32.is_none() {
+        Some("the device was created without VK_KHR_external_memory_win32")
+    } else if device.extension_fns.external_semaphore_win32.is_none() {
+        Some("the device was created without VK_KHR_external_semaphore_win32")
+    } else {
+        None
+    }
+}
+
 /// Creates the D3D12 device on the DXGI adapter of `device`. When this adapter cannot present
 /// through DXGI, returns [`crate::SurfaceError::Other`], so the Vulkan device is not lost.
 fn create_interop_device(device: &DeviceShared) -> Result<InteropDevice, crate::SurfaceError> {
@@ -665,6 +682,13 @@ impl Surface for DxgiSurface {
         let background_color = config
             .background_color
             .filter(|_| scaling == DXGI_SCALING_NONE);
+
+        // What the interop needs of the device, which the instance checked only for the adapter:
+        // a device that `device_from_raw` took may have been created without it.
+        if let Some(missing) = missing_interop(&device.shared) {
+            log::error!("DXGI swapchain on Vulkan: {missing}");
+            return Err(crate::SurfaceError::Other(missing));
+        }
 
         // Accepted: the configured swapchain is released and dropped. DXGI allows only one
         // swapchain per window, so the old one must be gone before the new one is created.

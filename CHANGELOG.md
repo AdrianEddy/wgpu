@@ -523,6 +523,7 @@ See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 - Make a bind group layout's descriptor pools when its first bind group needs one, not when the layout is created, and none for a layout without bindings, whose bind groups get no descriptor set. AMD's Windows driver sometimes aborted the process in the `vkCreateDescriptorPool` that creating a device made for wgpu's empty bind group layout. By @AdrianEddy.
 - On a device without timeline semaphores, `Queue::submit` no longer holds the fence pool's lock while it submits, so `Device::get_fence_value` on another thread does not wait for the submission, and a fence whose submission failed goes back to the pool. By @AdrianEddy.
 - Reset a command encoder's pool before destroying the framebuffers its command buffers used, not after. Both orders are valid, but Adreno's driver (Adreno 650, driver build 09/11/20) reads a destroyed framebuffer in `vkResetCommandPool`, which could crash a process that reused its encoders. By @AdrianEddy.
+- On an instance whose swapchains are DXGI's, configuring a surface refuses a device created without timeline semaphores, `VK_KHR_external_memory_win32` or `VK_KHR_external_semaphore_win32` with `SurfaceError::Other`, naming what it lacks, before it releases the configured swapchain. Such a device, from `Adapter::device_from_raw`, failed after the release. By @AdrianEddy.
 
 #### Metal
 

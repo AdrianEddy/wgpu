@@ -1135,6 +1135,66 @@ mod native {
         let _ = window.request_inner_size(PhysicalSize::new(SIZE, SIZE));
     }
 
+    /// A wgpu-hal device of `adapter`, a Vulkan adapter of a Vulkan 1.2 device, created from a raw
+    /// device on queue 0 of family 0 with wgpu-hal's extensions for no feature but `left_out`, and
+    /// no feature but timeline semaphores if `timeline`.
+    #[cfg(windows)]
+    fn device_lacking(
+        adapter: &wgpu::Adapter,
+        timeline: bool,
+        left_out: Option<&core::ffi::CStr>,
+    ) -> (wgpu_hal::vulkan::Device, wgpu_hal::vulkan::Queue) {
+        use ash::vk;
+
+        // SAFETY: Used to create and open a device.
+        let hal = unsafe { adapter.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+        let mut extensions = hal.required_device_extensions(wgpu::Features::empty());
+        extensions.retain(|&name| Some(name) != left_out);
+        let priorities = [1.0];
+        let queues = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(0)
+            .queue_priorities(&priorities)];
+        let names = extensions
+            .iter()
+            .map(|name| name.as_ptr())
+            .collect::<Vec<_>>();
+        let mut timeline_semaphore =
+            vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
+        let mut info = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queues)
+            .enabled_extension_names(&names);
+        if timeline {
+            info = info.push_next(&mut timeline_semaphore);
+        }
+        // SAFETY: A valid create info, with wgpu-hal's extensions and a Vulkan 1.2 structure.
+        let raw = unsafe {
+            hal.shared_instance().raw_instance().create_device(
+                hal.raw_physical_device(),
+                &info,
+                None,
+            )
+        }
+        .expect("vkCreateDevice failed");
+        // SAFETY: The create info above.
+        let enabled_features =
+            unsafe { wgpu_hal::vulkan::PhysicalDeviceFeatures::from_device_create_info(&info) };
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            hal.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &enabled_features,
+                wgpu::Features::empty(),
+                &wgpu::Limits::downlevel_defaults(),
+                &wgpu::MemoryHints::default(),
+                wgpu_hal::vulkan::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        (open.device, open.queue)
+    }
+
     /// A device of `adapter`, a Vulkan adapter, created from a raw device on queue 0 of family 0
     /// with wgpu-hal's extensions for no feature but the swapchain maintenance ones, and the
     /// features wgpu-hal enables with them, with its errors collected as [`device`] collects
@@ -1211,7 +1271,10 @@ mod native {
     /// configure with a colour, give the swapchain their `DXGI_SCALING` and the colour (its
     /// sRGB-encoded components with `OneToOne`, DXGI's own otherwise; `GetBackgroundColor`), and
     /// present. Through wgpu-hal, on the other window's surface, `AspectRatio` is refused and the
-    /// configured swapchain kept.
+    /// configured swapchain kept; a device created without timeline semaphores,
+    /// `VK_KHR_external_memory_win32` or `VK_KHR_external_semaphore_win32` is refused, naming what
+    /// it lacks: the swapchain's interop needs them of the device, which the instance checked only
+    /// for its adapter.
     ///
     /// A composition surface (`DxgiFromVisual`) lists no mode and supports no colour: wgpu-hal
     /// refuses each explicit mode, a colour is a validation error, and `Auto` presents.
@@ -1380,6 +1443,43 @@ mod native {
                 }
                 // SAFETY: As above.
                 unsafe { hal_surface.unconfigure(&hal_device) };
+
+                for (lacking, timeline, left_out) in [
+                    ("timeline semaphores", false, None),
+                    (
+                        "VK_KHR_external_memory_win32",
+                        true,
+                        Some(ash::khr::external_memory_win32::NAME),
+                    ),
+                    (
+                        "VK_KHR_external_semaphore_win32",
+                        true,
+                        Some(ash::khr::external_semaphore_win32::NAME),
+                    ),
+                ] {
+                    let (raw_device, raw_queue) = device_lacking(&adapter, timeline, left_out);
+                    // SAFETY: As above, for this other device of the same adapter.
+                    let refused = unsafe {
+                        hal_surface
+                            .configure(&raw_device, &hal_config(wgpu::SurfaceScalingMode::Auto))
+                    };
+                    println!(
+                        "{name}: wgpu-hal configured for a device without {lacking}: {refused:?}"
+                    );
+                    if refused.is_ok() {
+                        // SAFETY: As above.
+                        unsafe { hal_surface.unconfigure(&raw_device) };
+                    }
+                    if !matches!(&refused, Err(wgpu_hal::SurfaceError::Other(reason))
+                        if reason.ends_with(lacking))
+                    {
+                        failures.push(format!(
+                            "{name}: wgpu-hal configured for a device without {lacking}: \
+                             {refused:?}"
+                        ));
+                    }
+                    drop((raw_queue, raw_device));
+                }
             }
             drop(surfaces);
             drop((device, queue));
