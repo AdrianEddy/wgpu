@@ -1561,8 +1561,13 @@ pub enum Fence {
     /// fences inside of them. This ensures there are no race conditions when
     /// resetting the fences
     ///
+    /// A wait for the value of a submission that failed, which no later
+    /// submission's value reaches, returns [`DeviceError::Lost`]: no fence will
+    /// signal it.
+    ///
     /// [fence]: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#synchronization-fences
     /// [`FenceValue`]: crate::FenceValue
+    /// [`DeviceError::Lost`]: crate::DeviceError::Lost
     FencePool(RwLock<FencePool>),
 }
 
@@ -1576,6 +1581,9 @@ pub(super) type SynchronizedFence = Arc<vk::Fence>;
 #[derive(Debug)]
 pub struct FencePool {
     last_completed: crate::FenceValue,
+    /// The highest value whose submission failed: no fence of this pool signals it, unless a
+    /// later submission's does.
+    failed_up_to: crate::FenceValue,
     /// The pending fence values have to be ascending.
     active: Vec<(crate::FenceValue, SynchronizedFence)>,
     // Don't need extra synchronisation around the fences here, if they are used they should be put into active.
@@ -1583,6 +1591,26 @@ pub struct FencePool {
 }
 
 impl crate::DynFence for Fence {}
+
+/// A submission's claim on its fence value, from the point at which surface textures may wait for
+/// it: dropped before the submission is made, as on every error path of [`Queue::submit`], it
+/// records the value as failed in a fence pool, where a wait for it then finds no fence.
+///
+/// [`Queue::submit`]: crate::Queue::submit
+struct Submission<'a> {
+    fence: &'a Fence,
+    value: crate::FenceValue,
+    made: bool,
+}
+
+impl Drop for Submission<'_> {
+    fn drop(&mut self) {
+        if let (false, Fence::FencePool(pool)) = (self.made, self.fence) {
+            let mut pool = pool.write();
+            pool.failed_up_to = pool.failed_up_to.max(self.value);
+        }
+    }
+}
 
 impl Fence {
     /// Return the highest [`FenceValue`] among the signalled fences in `active`.
@@ -1638,6 +1666,7 @@ impl Fence {
                     last_completed,
                     ref active,
                     free: _,
+                    failed_up_to: _,
                 } = *pool.read();
                 Self::check_active(device, last_completed, active)
             }
@@ -1664,6 +1693,7 @@ impl Fence {
                     ref mut last_completed,
                     ref mut active,
                     ref mut free,
+                    failed_up_to: _,
                 } = *pool.write();
 
                 let base_free = free.len();
@@ -1727,6 +1757,14 @@ impl crate::Queue for Queue {
             },
             "More than one surface texture is being used from the same swapchain. This will cause a deadlock in release."
         );
+
+        // From here, the surface textures may wait for `signal_value`: unless the submission is
+        // made, a fence pool records that its value failed.
+        let mut submission = Submission {
+            fence: signal_fence,
+            value: signal_value,
+            made: false,
+        };
 
         let locked_swapchain_semaphores = surface_textures
             .iter()
@@ -1836,6 +1874,7 @@ impl crate::Queue for Queue {
                 Err(_) => pool.free.push(fence_raw),
             }
         }
+        submission.made = result.is_ok();
         result
     }
 

@@ -272,6 +272,98 @@ fn a_fence_pool_polled_while_another_thread_submits() {
     }
 }
 
+/// On each adapter, a device without timeline semaphores, whose fences are binary fence pools, and a
+/// submission that fails (`vkQueueSubmit` made to return `VK_ERROR_OUT_OF_DEVICE_MEMORY`): its fence
+/// goes back to the pool, and a wait for its value reports the device lost, as no fence signals it.
+/// A wait for a value never submitted is still a usage error, and a later submission's value
+/// covers the failed one.
+#[test]
+fn a_wait_for_a_failed_submissions_value_reports_the_device_lost() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance_with_call_log() else {
+        return;
+    };
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        if adapter.phd_capabilities.device_api_version < vk::API_VERSION_1_3 {
+            std::println!("skipped {:?}: not Vulkan 1.3", exposed.info.name);
+            continue;
+        }
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+        let enabled = vk::PhysicalDeviceFeatures2::default()
+            .features(downlevel_core(adapter))
+            .push_next(&mut vulkan12);
+        let (raw, extensions) = create(adapter, &instance, &enabled);
+        // SAFETY: The chain is valid.
+        let enabled_features =
+            unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            adapter.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &enabled_features,
+                wgt::Features::empty(),
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        let (device, queue) = (open.device, open.queue);
+        // SAFETY: The device's own fence.
+        let fence = unsafe { device.create_fence() }.unwrap();
+        let Fence::FencePool(ref pool) = fence else {
+            panic!("a device without timeline semaphores has a fence pool");
+        };
+        let timeout = Some(Duration::from_secs(5));
+        // SAFETY: Empty submissions, in ascending order, on this thread only; each wait is for a
+        // value whose submission has returned, or for one never submitted, which panics.
+        unsafe {
+            queue.submit(&[], &[], (&fence, 1)).unwrap();
+            assert!(device.wait(&fence, 1, timeout).unwrap());
+            let fences = |pool: &super::super::FencePool| pool.free.len() + pool.active.len();
+            let before = fences(&pool.read());
+
+            call_log::fail_next_submit(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY);
+            assert_eq!(
+                queue.submit(&[], &[], (&fence, 2)),
+                Err(crate::DeviceError::OutOfMemory)
+            );
+            assert_eq!(
+                fences(&pool.read()),
+                before,
+                "the failed submission's fence was lost"
+            );
+            assert!(pool.read().active.iter().all(|&(value, _)| value != 2));
+            assert_eq!(
+                device.wait(&fence, 2, timeout),
+                Err(crate::DeviceError::Lost),
+                "{:?}",
+                exposed.info.name
+            );
+            let never =
+                std::panic::catch_unwind(AssertUnwindSafe(|| device.wait(&fence, 3, timeout)));
+            assert!(
+                never.is_err(),
+                "a wait for a value never submitted is a usage error"
+            );
+
+            queue.submit(&[], &[], (&fence, 3)).unwrap();
+            assert!(device.wait(&fence, 2, timeout).unwrap());
+            assert!(device.wait(&fence, 3, timeout).unwrap());
+            device.destroy_fence(fence);
+        }
+        std::println!(
+            "{:?}: the failed submission's value reports the device lost",
+            exposed.info.name
+        );
+        drop((queue, device));
+    }
+}
+
 /// On each adapter with a headless surface, a device created without `VK_KHR_swapchain` cannot
 /// configure the surface: an error, before wgpu-hal calls a swapchain function the device lacks.
 /// Before, it loaded and called them, and panicked. With a scaling mode, the device's failure

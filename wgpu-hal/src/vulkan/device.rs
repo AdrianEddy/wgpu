@@ -2746,6 +2746,7 @@ impl crate::Device for super::Device {
         } else {
             super::Fence::FencePool(RwLock::new(super::FencePool {
                 last_completed: 0,
+                failed_up_to: 0,
                 active: Vec::new(),
                 free: Vec::new(),
             }))
@@ -2761,6 +2762,7 @@ impl crate::Device for super::Device {
                     active,
                     free,
                     last_completed: _,
+                    failed_up_to: _,
                 } = pool.into_inner();
 
                 for (_, raw) in active {
@@ -3325,6 +3327,7 @@ impl super::DeviceShared {
                 let pool = pool.read();
                 let super::FencePool {
                     last_completed,
+                    failed_up_to,
                     ref active,
                     free: _,
                 } = *pool;
@@ -3348,6 +3351,8 @@ impl super::DeviceShared {
                                 Err(other) => Err(super::map_host_device_oom_and_lost_err(other)),
                             }
                         }
+                        // No submission signals it: the one that would have failed.
+                        None if wait_value <= failed_up_to => Err(crate::DeviceError::Lost),
                         None => {
                             crate::hal_usage_error(format!(
                                 "no signals reached value {wait_value}"

@@ -106,6 +106,15 @@ fn headless_instance_of(
 /// An instance with wgpu-hal's desired extensions and no surface, whose device functions are the
 /// driver's own. `None`, having printed why, without Vulkan.
 fn plain_instance() -> Option<super::Instance> {
+    plain_instance_loaded(false)
+}
+
+/// As [`plain_instance`], with the device functions going through [`call_log`].
+fn plain_instance_with_call_log() -> Option<super::Instance> {
+    plain_instance_loaded(true)
+}
+
+fn plain_instance_loaded(through_call_log: bool) -> Option<super::Instance> {
     // SAFETY: Loading the Vulkan library has no requirements.
     let Ok(entry) = (unsafe { ash::Entry::load() }) else {
         std::println!("skipped: no Vulkan");
@@ -131,7 +140,11 @@ fn plain_instance() -> Option<super::Instance> {
         .application_info(&app_info)
         .enabled_extension_names(&names);
     // SAFETY: A valid create info.
-    let raw = unsafe { entry.create_instance(&info, None) }.unwrap();
+    let mut raw = unsafe { entry.create_instance(&info, None) }.unwrap();
+    if through_call_log {
+        // SAFETY: Created from `entry` just now.
+        raw = unsafe { call_log::load_instance(&entry, raw.handle()) };
+    }
     // SAFETY: Created from `entry` with wgpu-hal's desired extensions; wgpu-hal destroys it.
     let instance = unsafe {
         super::Instance::from_raw(

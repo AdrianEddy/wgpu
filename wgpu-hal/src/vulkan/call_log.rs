@@ -11,6 +11,8 @@
 //! be externally synchronized (`externsync="maybe"`), and `vkSetDebugUtilsObjectNameEXT` naming a
 //! queue; `vkDeviceWaitIdle`; the fence and semaphore waits; the queue retrievals; and
 //! `vkDestroyDevice`.
+//!
+//! [`fail_next_submit`] makes the next `vkQueueSubmit` fail without submitting.
 
 use alloc::vec::Vec;
 use core::{
@@ -69,6 +71,7 @@ static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
 static REAL: Mutex<Vec<(&'static str, usize)>> = Mutex::new(Vec::new());
 static REAL_GET_DEVICE_PROC_ADDR: Mutex<Option<vk::PFN_vkGetDeviceProcAddr>> = Mutex::new(None);
 static IN_QUEUE_COMMAND: AtomicUsize = AtomicUsize::new(0);
+static FAIL_NEXT_SUBMIT: Mutex<Option<vk::Result>> = Mutex::new(None);
 static MOST_AT_ONCE: AtomicUsize = AtomicUsize::new(0);
 
 std::thread_local! {
@@ -93,6 +96,12 @@ pub fn take() -> Recorded {
         calls: mem::take(&mut *calls),
         most_queue_commands_at_once: MOST_AT_ONCE.swap(0, Ordering::SeqCst),
     }
+}
+
+/// Makes the next `vkQueueSubmit` return `result` without calling the driver, as a submission that
+/// fails does: its fence is not signalled.
+pub fn fail_next_submit(result: vk::Result) {
+    *FAIL_NEXT_SUBMIT.lock().unwrap() = Some(result);
 }
 
 /// Records a point of the test, such as the start of a call to wgpu-hal.
@@ -162,8 +171,12 @@ unsafe extern "system" fn queue_submit(
     submits: *const vk::SubmitInfo<'_>,
     fence: vk::Fence,
 ) -> vk::Result {
-    queue_command("vkQueueSubmit", queue, || unsafe {
-        real::<vk::PFN_vkQueueSubmit>("vkQueueSubmit")(queue, count, submits, fence)
+    queue_command("vkQueueSubmit", queue, || {
+        if let Some(result) = FAIL_NEXT_SUBMIT.lock().unwrap().take() {
+            return result;
+        }
+        // SAFETY: Our caller's arguments, for the real function.
+        unsafe { real::<vk::PFN_vkQueueSubmit>("vkQueueSubmit")(queue, count, submits, fence) }
     })
 }
 
