@@ -1115,6 +1115,7 @@ impl DxgiSwapchain {
 impl Swapchain for DxgiSwapchain {
     unsafe fn release_resources(&mut self, device: &crate::vulkan::Device) {
         profiling::scope!("DxgiSwapchain::release_resources");
+        debug_assert!(Arc::ptr_eq(&self.device, &device.shared));
 
         // Wait for both APIs to fully drain before releasing the shared back buffers. The interop
         // queue signals `interop_progress` after `Present` and after every sync list it runs, so
@@ -1125,7 +1126,8 @@ impl Swapchain for DxgiSwapchain {
             device.shared.raw.queue_wait_idle(device.shared.raw_queue)
         });
         // A failed submit or a device loss can leave `vulkan_progress` values that Vulkan never
-        // signals, and the interop queue waits for them. Vulkan is idle, so signal them here.
+        // signals, and the interop queue waits for them. The device's queue is idle, so signal
+        // them here.
         let vulkan_progress_value = self.vulkan_progress_counter.load(Ordering::Relaxed);
         if unsafe { self.vulkan_progress.d3d.GetCompletedValue() } < vulkan_progress_value {
             if let Err(err) = unsafe { self.vulkan_progress.d3d.Signal(vulkan_progress_value) } {
