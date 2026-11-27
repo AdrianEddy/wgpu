@@ -272,6 +272,8 @@ impl super::Adapter {
             }
         }
 
+        workarounds.no_p010_storage = desc.VendorId == auxil::db::intel::VENDOR;
+
         let driver_version_string = {
             let driver_version = driver_version.unwrap_or([0, 0, 0, 0]);
             format!(
@@ -1357,6 +1359,24 @@ impl crate::Adapter for super::Adapter {
         set_sample_count(4, Tfc::MULTISAMPLE_X4);
         set_sample_count(8, Tfc::MULTISAMPLE_X8);
         set_sample_count(16, Tfc::MULTISAMPLE_X16);
+
+        // Storage on a multi-planar texture goes through UAVs of its planes, so
+        // the plane formats have to support it as well.
+        if format.is_multi_planar_format() {
+            let storage = Tfc::STORAGE_READ_ONLY
+                | Tfc::STORAGE_WRITE_ONLY
+                | Tfc::STORAGE_READ_WRITE
+                | Tfc::STORAGE_ATOMIC;
+            let plane_caps = |aspect| unsafe {
+                self.texture_format_capabilities(format.aspect_specific_format(aspect).unwrap())
+            };
+            let planes =
+                plane_caps(wgt::TextureAspect::Plane0) & plane_caps(wgt::TextureAspect::Plane1);
+            caps &= !storage | planes;
+            if format == wgt::TextureFormat::P010 && self.private_caps.workarounds.no_p010_storage {
+                caps -= storage;
+            }
+        }
 
         caps
     }
