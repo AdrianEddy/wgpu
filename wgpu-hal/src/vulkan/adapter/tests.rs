@@ -1587,8 +1587,6 @@ const EVERY_EXTENSION: &[&CStr] = &[
     khr::shader_float_controls::NAME,
     khr::bind_memory2::NAME,
     khr::get_memory_requirements2::NAME,
-    ext::sampler_filter_minmax::NAME,
-    khr::sampler_mirror_clamp_to_edge::NAME,
     khr::incremental_present::NAME,
     khr::external_memory_win32::NAME,
     khr::external_semaphore_win32::NAME,
@@ -2363,7 +2361,6 @@ const VK_XML_DEPENDS: &[(&str, &str)] = &[
     ("VK_EXT_memory_budget", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
     ("VK_EXT_mesh_shader", "VK_KHR_spirv_1_4,VK_VERSION_1_2"),
     ("VK_EXT_robustness2", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
-    ("VK_EXT_sampler_filter_minmax", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
     ("VK_EXT_shader_atomic_float", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
     ("VK_EXT_shader_image_atomic_int64", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
     ("VK_EXT_subgroup_size_control", "VK_VERSION_1_1"),
@@ -2396,7 +2393,6 @@ const VK_XML_DEPENDS: &[(&str, &str)] = &[
     ("VK_KHR_ray_query", "(VK_KHR_spirv_1_4,VK_VERSION_1_2)+VK_KHR_acceleration_structure"),
     ("VK_KHR_ray_tracing_pipeline", "(VK_KHR_spirv_1_4,VK_VERSION_1_2)+VK_KHR_acceleration_structure"),
     ("VK_KHR_ray_tracing_position_fetch", "VK_KHR_acceleration_structure"),
-    ("VK_KHR_sampler_mirror_clamp_to_edge", ""),
     ("VK_KHR_sampler_ycbcr_conversion", "(VK_KHR_maintenance1+VK_KHR_bind_memory2+VK_KHR_get_memory_requirements2+VK_KHR_get_physical_device_properties2),VK_VERSION_1_1"),
     ("VK_KHR_shader_atomic_int64", "VK_KHR_get_physical_device_properties2,VK_VERSION_1_1"),
     ("VK_KHR_shader_draw_parameters", ""),
@@ -2522,7 +2518,9 @@ fn vk_xml_expressions_are_read_left_to_right() {
 /// `VK_KHR_portability_subset`), as `inspect` leaves it, and every request: none, each offered
 /// feature, all of them; and a physical device that lists all of them but one, unless wgpu-hal
 /// would hide it, with no feature requested and with all, so that a dependency on an extension that
-/// the device does not list cannot hold. Every extension enabled is one the device lists.
+/// the device does not list cannot hold. Every extension enabled is one the device lists, and every
+/// extension of the table is enabled for one of these devices and requests: an entry for an
+/// extension that wgpu-hal never enables is dead.
 #[test]
 fn every_enabled_extension_has_its_dependencies() {
     use super::super::dependencies::DEVICE_EXTENSION_DEPENDENCIES;
@@ -2532,6 +2530,7 @@ fn every_enabled_extension_has_its_dependencies() {
         .filter(|&name| name != khr::portability_subset::NAME)
         .collect::<alloc::vec::Vec<_>>();
     let mut wrong = alloc::vec::Vec::new();
+    let mut ever_enabled = alloc::collections::BTreeSet::new();
     let mut checked = 0;
     let mut left_out_checked = 0;
     for left_out in core::iter::once(None).chain(every.iter().copied().map(Some)) {
@@ -2614,6 +2613,7 @@ fn every_enabled_extension_has_its_dependencies() {
                         .collect::<alloc::vec::Vec<_>>();
                     for extension in &enabled {
                         let name = extension.to_str().unwrap();
+                        ever_enabled.insert(name);
                         checked += 1;
                         if !listing.contains(extension) {
                             wrong.push(alloc::format!("{name}: enabled, not listed"));
@@ -2641,6 +2641,12 @@ fn every_enabled_extension_has_its_dependencies() {
     wrong.sort();
     wrong.dedup();
     assert!(wrong.is_empty(), "{wrong:#?}");
+    let never_enabled = every
+        .iter()
+        .map(|name| name.to_str().unwrap())
+        .filter(|name| !ever_enabled.contains(name))
+        .collect::<alloc::vec::Vec<_>>();
+    assert!(never_enabled.is_empty(), "never enabled: {never_enabled:?}");
 }
 
 /// The table of dependencies covers the oracle's names, and the oracle the table's.

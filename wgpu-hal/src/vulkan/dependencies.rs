@@ -107,8 +107,11 @@ pub(super) const DEVICE_EXTENSION_DEPENDENCIES: &[(&CStr, Depends)] = &[
         ext::mesh_shader::NAME,
         Any(&[Device(khr::spirv_1_4::NAME), V1_2]),
     ),
+    (
+        ray_tracing_invocation_reorder::NAME,
+        Device(khr::ray_tracing_pipeline::NAME),
+    ),
     (ext::robustness2::NAME, PROPERTIES2),
-    (ext::sampler_filter_minmax::NAME, PROPERTIES2),
     (ext::shader_atomic_float::NAME, PROPERTIES2),
     (ext::shader_image_atomic_int64::NAME, PROPERTIES2),
     (ext::subgroup_size_control::NAME, V1_1),
@@ -221,7 +224,6 @@ pub(super) const DEVICE_EXTENSION_DEPENDENCIES: &[(&CStr, Depends)] = &[
     ),
     // (VK_KHR_maintenance1+VK_KHR_bind_memory2+VK_KHR_get_memory_requirements2
     // +VK_KHR_get_physical_device_properties2),VK_VERSION_1_1
-    (khr::sampler_mirror_clamp_to_edge::NAME, NONE),
     (
         khr::sampler_ycbcr_conversion::NAME,
         Any(&[
@@ -270,10 +272,6 @@ pub(super) const DEVICE_EXTENSION_DEPENDENCIES: &[(&CStr, Depends)] = &[
     (khr::timeline_semaphore::NAME, PROPERTIES2),
     (khr::vulkan_memory_model::NAME, PROPERTIES2),
     (khr::zero_initialize_workgroup_memory::NAME, PROPERTIES2),
-    (
-        ray_tracing_invocation_reorder::NAME,
-        Device(khr::ray_tracing_pipeline::NAME),
-    ),
 ];
 
 /// What a physical device's extensions' dependencies are judged against.
