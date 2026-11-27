@@ -6,10 +6,10 @@ use std::{thread, time::Instant};
 use crate::{Device as _, Queue as _, Surface as _};
 
 /// How long a call that must stay blocked is given to finish anyway.
-const BLOCKED_FOR: Duration = Duration::from_millis(300);
+pub(super) const BLOCKED_FOR: Duration = Duration::from_millis(300);
 
 /// How long a call that must not wait for the lock is given to finish.
-const GOES_THROUGH_WITHIN: Duration = Duration::from_secs(10);
+pub(super) const GOES_THROUGH_WITHIN: Duration = Duration::from_secs(10);
 
 /// Runs `call` on another thread while this one holds `queue`'s lock: `call` must not finish
 /// until the lock is released, then must.

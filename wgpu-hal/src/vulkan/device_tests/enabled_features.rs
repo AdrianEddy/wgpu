@@ -272,6 +272,96 @@ fn a_fence_pool_polled_while_another_thread_submits() {
     }
 }
 
+/// On each adapter, a device without timeline semaphores, whose fences are binary fence pools: while
+/// a submission waits for the queue lock that this thread holds, a poll of its fence returns. The
+/// fence pool's lock is not held across the submission, so a poll waits neither for the driver
+/// call nor for whatever the submission waits on before it.
+#[test]
+fn a_fence_pool_is_polled_while_a_submission_waits_for_the_queue_lock() {
+    use super::queue_lock::{BLOCKED_FOR, GOES_THROUGH_WITHIN};
+    use std::{thread, time::Instant};
+
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    // SAFETY: No requirements.
+    for exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        let adapter = &exposed.adapter;
+        if adapter.phd_capabilities.device_api_version < vk::API_VERSION_1_3 {
+            std::println!("skipped {:?}: not Vulkan 1.3", exposed.info.name);
+            continue;
+        }
+        let mut vulkan12 = vk::PhysicalDeviceVulkan12Features::default();
+        let enabled = vk::PhysicalDeviceFeatures2::default()
+            .features(downlevel_core(adapter))
+            .push_next(&mut vulkan12);
+        let (raw, extensions) = create(adapter, &instance, &enabled);
+        // SAFETY: The chain is valid.
+        let enabled_features =
+            unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
+        // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+        let open = unsafe {
+            adapter.device_from_raw(
+                raw,
+                None,
+                &extensions,
+                &enabled_features,
+                wgt::Features::empty(),
+                &wgt::Limits::downlevel_defaults(),
+                &wgt::MemoryHints::default(),
+                super::super::DeviceQueue::new(0, 0),
+            )
+        }
+        .unwrap();
+        let (device, queue) = (open.device, open.queue);
+        // SAFETY: The device's own fence.
+        let fence = unsafe { device.create_fence() }.unwrap();
+        assert!(matches!(fence, Fence::FencePool { .. }));
+
+        let guard = queue
+            .lock_queue()
+            .expect("a queue created without flags takes a lock");
+        let polled_in_time = thread::scope(|scope| {
+            // SAFETY: One empty submission, the only one, on this thread's scope.
+            let submitting = scope.spawn(|| unsafe { queue.submit(&[], &[], (&fence, 1)) });
+            thread::sleep(BLOCKED_FOR);
+            assert!(
+                !submitting.is_finished(),
+                "the submission went through with the queue lock held"
+            );
+            // SAFETY: The fence lives until the scope ends.
+            let polling = scope.spawn(|| unsafe { device.get_fence_value(&fence) });
+            let started = Instant::now();
+            while !polling.is_finished() && started.elapsed() < GOES_THROUGH_WITHIN {
+                thread::sleep(Duration::from_millis(10));
+            }
+            let polled_in_time = polling.is_finished();
+            drop(guard);
+            submitting.join().unwrap().unwrap();
+            assert_eq!(polling.join().unwrap().unwrap(), 0);
+            polled_in_time
+        });
+        assert!(
+            polled_in_time,
+            "{:?}: the poll waited for the submission",
+            exposed.info.name
+        );
+        std::println!(
+            "{:?}: polled while the submission waited",
+            exposed.info.name
+        );
+        // SAFETY: The fence's own value, submitted above; it lives until destroyed here.
+        unsafe {
+            assert!(device
+                .wait(&fence, 1, Some(Duration::from_secs(5)))
+                .unwrap());
+            device.destroy_fence(fence);
+        }
+        drop((queue, device));
+    }
+}
+
 /// On each adapter, a device without timeline semaphores, whose fences are binary fence pools, and a
 /// submission that fails (`vkQueueSubmit` made to return `VK_ERROR_OUT_OF_DEVICE_MEMORY`): its fence
 /// goes back to the pool, and a wait for its value reports the device lost, as no fence signals it.
