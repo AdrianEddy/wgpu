@@ -395,6 +395,9 @@ struct Workarounds {
     // On WARP 1.0.13+, debug information in shaders in certain situations causes the device
     // to hang. https://github.com/gfx-rs/wgpu/issues/8368
     avoid_shader_debug_info: bool,
+    // Intel's driver gives a UAV of a P010 texture's chroma plane the luma plane's extent, so
+    // stores within it land past the plane. Seen on an Arc B570 with driver 32.0.101.9175.
+    no_p010_storage: bool,
 }
 
 pub struct Adapter {
