@@ -285,6 +285,23 @@ impl Surface {
         )
     }
 
+    /// Get the DXGI swapchain associated with this surface, on an instance whose swapchains are
+    /// DXGI's ([`wgt::VulkanSwapchainKind`]).
+    ///
+    /// Returns [`None`] if the surface is not configured or if the swapchain
+    /// is a Vulkan swapchain.
+    #[cfg(windows)]
+    pub fn raw_dxgi_swapchain(&self) -> Option<windows::Win32::Graphics::Dxgi::IDXGISwapChain3> {
+        let read = self.swapchain.read();
+        Some(
+            read.as_ref()?
+                .as_any()
+                .downcast_ref::<swapchain::DxgiSwapchain>()?
+                .raw()
+                .clone(),
+        )
+    }
+
     /// Set the present timing information which will be used for the next [presentation](crate::Queue::present()) of this surface,
     /// using [VK_GOOGLE_display_timing].
     ///

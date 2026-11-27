@@ -259,6 +259,7 @@ See [#10196](https://github.com/gfx-rs/wgpu/issues/10196). By @AdrianEddy.
 - Give `wgpu_hal::vulkan::Adapter::device_from_raw` a queue lock of the application's (`DeviceQueue::lock`), which wgpu-hal always takes. Its `QueueLockScope` lets one lock serve every queue of a device, and debug builds catch a holder that calls into wgpu. By @AdrianEddy.
 - Vulkan presents signal fences where the device supports `VK_KHR_swapchain_maintenance1` or `VK_EXT_swapchain_maintenance1`, and a swapchain's teardown waits on them, without the queue lock, instead of for the queue to become idle. `Instance::desired_extensions` now includes the surface maintenance extensions they depend on. By @AdrianEddy.
 - Add `wgpu_hal::Instance::request_adapter` (default `None`), with which a backend can select its adapter for a power preference and `force_fallback_adapter` instead of exposing all of them. wgpu-core's `request_adapter` checks the selection as it checks an enumerated adapter, and enumerates the backend when there is none or it does not suit. DX12 implements it. By @AdrianEddy in [#10011](https://github.com/gfx-rs/wgpu/pull/10011).
+- Add `wgpu_hal::vulkan::Surface::raw_dxgi_swapchain`, which returns the `IDXGISwapChain3` of a surface whose swapchain is DXGI's (`VulkanSwapchainKind`), as `raw_native_swapchain` returns a Vulkan swapchain. By @AdrianEddy.
 
 #### DX12
 

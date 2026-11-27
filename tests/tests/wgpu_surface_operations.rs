@@ -737,21 +737,18 @@ mod native {
     /// surface (`ResizeBuffers` keeps a swapchain's scaling), while wgpu-hal refuses the unlisted
     /// `AspectRatio` with `SurfaceError::UnsupportedScalingMode`, keeping the swapchain; a
     /// composition swapchain lists none, and wgpu-hal refuses each. On OpenGL, which lists none,
-    /// wgpu-hal refuses each. With the DXGI swapchain of the Vulkan backend, a window's surface
-    /// lists `Stretch` and `OneToOne`, the same for a device created without
-    /// `swapchainMaintenance1`, and `Auto` and each listed mode configure and present on it.
+    /// wgpu-hal refuses each. The DXGI swapchain of the Vulkan backend lists the same as DX12's, a
+    /// window's also for a device created without `swapchainMaintenance1`
+    /// ([`vulkan_dxgi_scaling`]).
     ///
     /// The background colour: a window's DX12 swapchain supports it, and is given the
     /// sRGB-encoded components of the colour configured (`GetBackgroundColor`) with each scaling
-    /// mode it
-    /// lists; through wgpu-hal, a swapchain kept for a new configuration takes its new colour,
-    /// and one that had a colour is replaced for none, which has DXGI's own colour (that of a new
-    /// swapchain). With the DXGI swapchain of the Vulkan backend, a window's surface supports it,
-    /// and each mode it lists configures and presents with a colour on a device created without
-    /// `swapchainMaintenance1` (its colour is not read back). Every other surface does not
-    /// support it: a colour is a validation error, and on a composition swapchain wgpu-hal
-    /// refuses it. A frame presents (through `Present1`) with
-    /// each present mode the surface lists, on a window's swapchain and on a composition one.
+    /// mode it lists; through wgpu-hal, a swapchain kept for a new configuration takes its new
+    /// colour, and one that had a colour is replaced for none, which has DXGI's own colour (that
+    /// of a new swapchain). A window's DXGI swapchain of the Vulkan backend is given the same.
+    /// Every other surface does not support it: a colour is a validation error, and on a
+    /// composition swapchain wgpu-hal refuses it. A frame presents (through `Present1`) with each
+    /// present mode the surface lists, on a window's swapchain and on a composition one.
     /// On Vulkan, a caller's present scaling in the swapchain's creation chain is the only one
     /// (a second would break the chain's unique structure types), and for each scaling, and for
     /// the platform's own placement, it prints what a frame presented to a window that changed
@@ -1206,19 +1203,57 @@ mod native {
         (device, queue, errors)
     }
 
-    /// The half of [`scaling_modes`] for the DXGI swapchain of the Vulkan backend, on a window's
-    /// surface and a device created without `swapchainMaintenance1`, which only a Vulkan
-    /// swapchain needs for its scaling. Each configuration sets a background colour, which the
-    /// surface supports.
+    /// The half of [`scaling_modes`] for the DXGI swapchain of the Vulkan backend.
+    ///
+    /// A window's surface (`DxgiFromHwnd`) lists `Stretch` and `OneToOne` and supports a background
+    /// colour. On a device created without `swapchainMaintenance1`, which only a Vulkan swapchain
+    /// needs for its scaling, the device's list is the same, and `Auto` and each listed mode
+    /// configure with a colour, give the swapchain their `DXGI_SCALING` and the colour (its
+    /// sRGB-encoded components with `OneToOne`, DXGI's own otherwise; `GetBackgroundColor`), and
+    /// present. Through wgpu-hal, on the other window's surface, `AspectRatio` is refused and the
+    /// configured swapchain kept.
+    ///
+    /// A composition surface (`DxgiFromVisual`) lists no mode and supports no colour: wgpu-hal
+    /// refuses each explicit mode, a colour is a validation error, and `Auto` presents.
     #[cfg(windows)]
     fn vulkan_dxgi_scaling(event_loop: &ActiveEventLoop, failures: &mut Failures) {
-        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
-            event_loop.owned_display_handle(),
-        ));
-        desc.backends = wgpu::Backends::VULKAN;
-        desc.backend_options.vulkan.swapchain_kind = wgpu::VulkanSwapchainKind::DxgiFromHwnd;
-        let instance = wgpu::Instance::new(desc);
-        let dxgi_adapters = match adapters(event_loop, &instance, 1) {
+        use wgpu_hal::Surface as _;
+        use windows::Win32::Graphics::Dxgi::{
+            IDXGISwapChain3, DXGI_SCALING, DXGI_SCALING_NONE, DXGI_SCALING_STRETCH,
+        };
+
+        /// The name of a mark on a swapchain (its private data), which tells a swapchain kept by a
+        /// configuration from one it created.
+        const MARK: windows::core::GUID =
+            windows::core::GUID::from_u128(0x3c7d_91e4_5a2b_4f08_8e61_d2c4_0b9a_7f35);
+
+        /// The DXGI swapchain of `surface`, a wgpu surface of a DXGI-swapchain Vulkan instance.
+        fn swap_chain(surface: &wgpu::Surface<'_>) -> Option<IDXGISwapChain3> {
+            // SAFETY: Only inspected.
+            unsafe { surface.as_hal::<wgpu_hal::api::Vulkan>() }?.raw_dxgi_swapchain()
+        }
+
+        /// The scaling and the background colour of a swapchain.
+        fn scaling_and_background(swap_chain: &IDXGISwapChain3) -> (DXGI_SCALING, [f32; 4]) {
+            // SAFETY: A live swapchain.
+            let desc = unsafe { swap_chain.GetDesc1() }.unwrap();
+            // SAFETY: As above.
+            let color = unsafe { swap_chain.GetBackgroundColor() }.unwrap();
+            (desc.Scaling, [color.r, color.g, color.b, color.a])
+        }
+
+        let instance = |kind| {
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(
+                event_loop.owned_display_handle(),
+            ));
+            desc.backends = wgpu::Backends::VULKAN;
+            desc.backend_options.vulkan.swapchain_kind = kind;
+            wgpu::Instance::new(desc)
+        };
+
+        // A window's swapchain.
+        let windows_instance = instance(wgpu::VulkanSwapchainKind::DxgiFromHwnd);
+        let dxgi_adapters = match adapters(event_loop, &windows_instance, 2) {
             Ok(adapters) => adapters,
             Err(error) => return failures.push(format!("Vulkan, DXGI swapchains: {error}")),
         };
@@ -1248,9 +1283,23 @@ mod native {
                 ));
             }
             let base = config(surface, &adapter);
-            for scaling_mode in
-                core::iter::once(wgpu::SurfaceScalingMode::Auto).chain(caps.scaling_modes.clone())
-            {
+            for (scaling_mode, scaling, color) in [
+                (
+                    wgpu::SurfaceScalingMode::Auto,
+                    DXGI_SCALING_STRETCH,
+                    DXGI_DEFAULT,
+                ),
+                (
+                    wgpu::SurfaceScalingMode::Stretch,
+                    DXGI_SCALING_STRETCH,
+                    DXGI_DEFAULT,
+                ),
+                (
+                    wgpu::SurfaceScalingMode::OneToOne,
+                    DXGI_SCALING_NONE,
+                    encoded(GUTTER),
+                ),
+            ] {
                 let config = wgpu::SurfaceConfiguration {
                     scaling_mode,
                     background_color: Some(GUTTER),
@@ -1260,12 +1309,138 @@ mod native {
                     failures.push(format!("{name}: {scaling_mode:?}: {error}"));
                     continue;
                 }
+                let got = swap_chain(surface).as_ref().map(scaling_and_background);
+                println!("{name}: {scaling_mode:?}: the swapchain's scaling and colour {got:?}");
+                if got != Some((scaling, color)) {
+                    failures.push(format!(
+                        "{name}: {scaling_mode:?}: the swapchain's scaling and colour {got:?}, \
+                         not {:?}",
+                        (scaling, color)
+                    ));
+                }
                 for _ in 0..FRAMES {
                     let got = acquire_and_present(surface, &device, &queue);
                     if !matches!(got.as_str(), "Success" | "Suboptimal") {
                         failures.push(format!("{name}: {scaling_mode:?}: acquired {got}"));
                         break;
                     }
+                }
+            }
+
+            // Through wgpu-hal, on the other window's surface, which wgpu-core did not configure.
+            let (_, other) = &surfaces[1];
+            {
+                // SAFETY: Only wgpu-hal configures the surface, with no GPU work using it, and the
+                // device is idle; the surface is unconfigured before its device is dropped.
+                let hal_surface = unsafe { other.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+                let hal_device = unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+                // SAFETY: As above.
+                let configured = unsafe {
+                    hal_surface
+                        .configure(&hal_device, &hal_config(wgpu::SurfaceScalingMode::Stretch))
+                };
+                let configured_swap_chain = hal_surface.raw_dxgi_swapchain();
+                match (&configured, &configured_swap_chain) {
+                    (Ok(()), Some(swap_chain)) => {
+                        let mark = 1u32;
+                        // SAFETY: A live swapchain; DXGI copies the 4 bytes.
+                        unsafe { swap_chain.SetPrivateData(&MARK, 4, (&raw const mark).cast()) }
+                            .unwrap();
+                    }
+                    _ => failures.push(format!(
+                        "{name}: wgpu-hal configured with Stretch: {configured:?}, swapchain \
+                         {configured_swap_chain:?}"
+                    )),
+                }
+                drop(configured_swap_chain);
+                // SAFETY: As above.
+                let refused = unsafe {
+                    hal_surface.configure(
+                        &hal_device,
+                        &hal_config(wgpu::SurfaceScalingMode::AspectRatio),
+                    )
+                };
+                let kept = hal_surface.raw_dxgi_swapchain().is_some_and(|swap_chain| {
+                    let (mut mark, mut size) = (0u32, 4u32);
+                    // SAFETY: A live swapchain, and room for the 4 bytes.
+                    unsafe { swap_chain.GetPrivateData(&MARK, &mut size, (&raw mut mark).cast()) }
+                        .is_ok()
+                        && mark == 1
+                });
+                println!(
+                    "{name}: wgpu-hal configured with AspectRatio: {refused:?}, the configured \
+                     swapchain kept {kept}"
+                );
+                if !matches!(refused, Err(wgpu_hal::SurfaceError::UnsupportedScalingMode)) || !kept
+                {
+                    failures.push(format!(
+                        "{name}: wgpu-hal configured with AspectRatio: {refused:?}, the configured \
+                         swapchain kept {kept}"
+                    ));
+                }
+                // SAFETY: As above.
+                unsafe { hal_surface.unconfigure(&hal_device) };
+            }
+            drop(surfaces);
+            drop((device, queue));
+            if let Err(failure) = check(&name, &[errors]) {
+                failures.push(failure);
+            }
+        }
+
+        // A composition swapchain.
+        let visual_instance = instance(wgpu::VulkanSwapchainKind::DxgiFromVisual);
+        let visual_adapters = match adapters(event_loop, &visual_instance, 1) {
+            Ok(adapters) => adapters,
+            Err(error) => {
+                return failures.push(format!("Vulkan, DXGI composition swapchains: {error}"))
+            }
+        };
+        for (adapter, surfaces) in visual_adapters {
+            let name = format!("{}, a DXGI composition swapchain", adapter_name(&adapter));
+            let surface = &surfaces[0].1;
+            let caps = surface.get_capabilities(&adapter);
+            println!(
+                "{name}: scaling modes {:?}, background color {}",
+                caps.scaling_modes, caps.supports_background_color
+            );
+            if !caps.scaling_modes.is_empty() || caps.supports_background_color {
+                failures.push(format!(
+                    "{name}: scaling modes {:?}, background color {}",
+                    caps.scaling_modes, caps.supports_background_color
+                ));
+            }
+            let (device, queue, errors) = device(&adapter);
+            {
+                // SAFETY: Only wgpu-hal uses the surface, which wgpu-core did not configure yet.
+                let hal_surface = unsafe { surface.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+                // SAFETY: As above.
+                let hal_device = unsafe { device.as_hal::<wgpu_hal::api::Vulkan>() }.unwrap();
+                // SAFETY: As above.
+                unsafe {
+                    hal_refuses_each_mode::<wgpu_hal::api::Vulkan>(
+                        &name,
+                        &hal_surface,
+                        &hal_device,
+                        failures,
+                    )
+                };
+            }
+            let base = config(surface, &adapter);
+            let colored = wgpu::SurfaceConfiguration {
+                background_color: Some(GUTTER),
+                ..base.clone()
+            };
+            if try_configure(surface, &device, &colored).is_none() {
+                failures.push(format!("{name}: a colour configured"));
+            }
+            if let Some(error) = try_configure(surface, &device, &base) {
+                failures.push(format!("{name}: Auto: {error}"));
+            } else {
+                let got = acquire_and_present(surface, &device, &queue);
+                println!("{name}: Auto presented: {got}");
+                if !matches!(got.as_str(), "Success" | "Suboptimal") {
+                    failures.push(format!("{name}: Auto: acquired {got}"));
                 }
             }
             drop(surfaces);

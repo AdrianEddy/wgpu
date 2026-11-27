@@ -1054,6 +1054,11 @@ impl Drop for DxgiSwapchain {
 const INTEROP_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 impl DxgiSwapchain {
+    /// The DXGI swapchain.
+    pub(crate) fn raw(&self) -> &IDXGISwapChain3 {
+        &self.swapchain
+    }
+
     /// Blocks until the interop queue has reached `value` on `interop_progress`. Returns
     /// [`crate::DeviceError::Lost`] after [`INTEROP_WAIT_TIMEOUT`].
     fn wait_for_value(&self, value: u64) -> Result<(), crate::DeviceError> {
