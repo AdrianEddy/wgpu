@@ -1909,9 +1909,10 @@ pub(super) struct FormatSupport {
     /// The physical device offers `textureCompressionASTC_LDR`, and every ASTC LDR format has 3D
     /// images.
     astc_3d: bool,
-    /// `G8_B8R8_2PLANE_420_UNORM` samples and is copied.
+    /// `G8_B8R8_2PLANE_420_UNORM` samples and is copied ([`Self::query`] asks only a physical
+    /// device that has the two-plane formats).
     nv12: bool,
-    /// `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` samples and is copied.
+    /// `G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16` samples and is copied (the same).
     p010: bool,
 }
 
@@ -1935,16 +1936,23 @@ impl FormatSupport {
                 depth_stencil_required_flags(),
             )
         };
+        // The two-plane formats are Vulkan 1.1's and `VK_KHR_sampler_ycbcr_conversion`'s. A command
+        // on a physical device may name an enumerant only of a core version or a device extension
+        // that the physical device supports ("Valid Usage for Enumerated Types"), so a physical
+        // device with neither is not asked about them: it has no two-plane format.
+        let two_plane_formats = caps.device_api_version >= vk::API_VERSION_1_1
+            || caps.supports_extension(khr::sampler_ycbcr_conversion::NAME);
         let planar_format = |format| {
-            supports_format(
-                instance,
-                phd,
-                format,
-                vk::ImageTiling::OPTIMAL,
-                vk::FormatFeatureFlags::SAMPLED_IMAGE
-                    | vk::FormatFeatureFlags::TRANSFER_SRC
-                    | vk::FormatFeatureFlags::TRANSFER_DST,
-            )
+            two_plane_formats
+                && supports_format(
+                    instance,
+                    phd,
+                    format,
+                    vk::ImageTiling::OPTIMAL,
+                    vk::FormatFeatureFlags::SAMPLED_IMAGE
+                        | vk::FormatFeatureFlags::TRANSFER_SRC
+                        | vk::FormatFeatureFlags::TRANSFER_DST,
+                )
         };
         Self {
             s8: depth_format(vk::Format::S8_UINT),

@@ -1042,6 +1042,82 @@ fn a_promoted_feature_needs_its_extension_before_its_promotion() {
     assert_eq!(two_plane(&vulkan_1_1, &[]), both);
 }
 
+std::thread_local! {
+    /// The formats that [`record_format_query`] was asked about on this thread.
+    static FORMATS_ASKED: core::cell::RefCell<alloc::vec::Vec<vk::Format>> =
+        const { core::cell::RefCell::new(alloc::vec::Vec::new()) };
+}
+
+/// A `vkGetPhysicalDeviceFormatProperties` that records the format it is asked about and reports
+/// no support for it.
+unsafe extern "system" fn record_format_query(
+    _physical_device: vk::PhysicalDevice,
+    format: vk::Format,
+    properties: *mut vk::FormatProperties,
+) {
+    FORMATS_ASKED.with_borrow_mut(|asked| asked.push(format));
+    // SAFETY: The caller passes a pointer to a `VkFormatProperties` to write.
+    unsafe { properties.write(vk::FormatProperties::default()) };
+}
+
+/// The formats that [`FormatSupport::query`] asks about a physical device that `caps` describes
+/// and that offers no feature, through an instance whose one command is [`record_format_query`].
+fn formats_asked(caps: &PhysicalDeviceProperties) -> alloc::vec::Vec<vk::Format> {
+    let query: vk::PFN_vkGetPhysicalDeviceFormatProperties = record_format_query;
+    // SAFETY: The loader gives `record_format_query` for the command of its type and no other
+    // command, for which ash's table holds a function that panics; the query calls only that one,
+    // as it passes no `properties2` and the device offers no texture compression.
+    let instance = unsafe {
+        ash::Instance::load_with(
+            |name| {
+                if name == c"vkGetPhysicalDeviceFormatProperties" {
+                    query as *const core::ffi::c_void
+                } else {
+                    core::ptr::null()
+                }
+            },
+            vk::Instance::null(),
+        )
+    };
+    FORMATS_ASKED.with_borrow_mut(alloc::vec::Vec::clear);
+    FormatSupport::query(
+        &instance,
+        None,
+        vk::PhysicalDevice::null(),
+        caps,
+        &PhysicalDeviceFeatures::default(),
+    );
+    FORMATS_ASKED.take()
+}
+
+/// A physical device is asked about the two-plane formats only if it supports Vulkan 1.1 or
+/// `VK_KHR_sampler_ycbcr_conversion`, which add them: a command on a physical device may name an
+/// enumerant only of a core version or a device extension that the physical device supports
+/// ("Valid Usage for Enumerated Types").
+#[test]
+fn a_physical_device_is_asked_only_about_the_formats_it_has() {
+    let two_plane = [
+        vk::Format::G8_B8R8_2PLANE_420_UNORM,
+        vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16,
+    ];
+    let asked = formats_asked(&device_of_version(vk::API_VERSION_1_0, &[]));
+    assert!(asked.contains(&vk::Format::D32_SFLOAT), "{asked:?}");
+    assert!(
+        !asked.iter().any(|format| two_plane.contains(format)),
+        "{asked:?}"
+    );
+    for caps in [
+        device_of_version(vk::API_VERSION_1_1, &[]),
+        device_of_version(vk::API_VERSION_1_0, &[khr::sampler_ycbcr_conversion::NAME]),
+    ] {
+        let asked = formats_asked(&caps);
+        assert!(
+            two_plane.iter().all(|format| asked.contains(format)),
+            "{asked:?}"
+        );
+    }
+}
+
 /// On a device with `VK_KHR_portability_subset`, the features that the subset leaves out need the
 /// subset's members; a device without the extension has them. Before, a device with the extension
 /// but without the subset's structure had them.
