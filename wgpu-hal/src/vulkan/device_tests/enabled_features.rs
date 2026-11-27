@@ -272,6 +272,64 @@ fn a_fence_pool_polled_while_another_thread_submits() {
     }
 }
 
+/// On each adapter, a device created with timeline semaphores takes its adapter's workaround that
+/// disables them, as for Arm's Mali drivers whose timeline semaphores leak: set on the adapter, the
+/// device has no timeline semaphores and uses fence pools; unset, it has them.
+#[test]
+fn a_raw_device_takes_its_adapters_timeline_semaphore_workaround() {
+    let _one = super::ONE_AT_A_TIME.lock().unwrap();
+    let Some(instance) = super::plain_instance() else {
+        return;
+    };
+    // SAFETY: No requirements.
+    for mut exposed in unsafe { crate::Instance::enumerate_adapters(&instance, None) } {
+        if exposed.adapter.phd_capabilities.device_api_version < vk::API_VERSION_1_3 {
+            std::println!("skipped {:?}: not Vulkan 1.3", exposed.info.name);
+            continue;
+        }
+        for disabled in [false, true] {
+            exposed.adapter.workarounds.set(
+                super::super::Workarounds::DISABLE_TIMELINE_SEMAPHORES,
+                disabled,
+            );
+            let adapter = &exposed.adapter;
+            let mut vulkan12 =
+                vk::PhysicalDeviceVulkan12Features::default().timeline_semaphore(true);
+            let enabled = vk::PhysicalDeviceFeatures2::default()
+                .features(downlevel_core(adapter))
+                .push_next(&mut vulkan12);
+            let (raw, extensions) = create(adapter, &instance, &enabled);
+            // SAFETY: The chain is valid.
+            let enabled_features =
+                unsafe { super::super::PhysicalDeviceFeatures::from_enabled(&enabled) };
+            // SAFETY: Created above with these extensions and features; wgpu-hal destroys it.
+            let open = unsafe {
+                adapter.device_from_raw(
+                    raw,
+                    None,
+                    &extensions,
+                    &enabled_features,
+                    wgt::Features::empty(),
+                    &wgt::Limits::downlevel_defaults(),
+                    &wgt::MemoryHints::default(),
+                    super::super::DeviceQueue::new(0, 0),
+                )
+            }
+            .unwrap();
+            assert_eq!(
+                open.device.shared.private_caps.timeline_semaphores, !disabled,
+                "{:?}: the workaround set {disabled}",
+                exposed.info.name
+            );
+            drop(open);
+        }
+        std::println!(
+            "{:?}: the device follows the adapter's workaround",
+            exposed.info.name
+        );
+    }
+}
+
 /// On each adapter, a device without timeline semaphores, whose fences are binary fence pools: while
 /// a submission waits for the queue lock that this thread holds, a poll of its fence returns. The
 /// fence pool's lock is not held across the submission, so a poll waits neither for the driver

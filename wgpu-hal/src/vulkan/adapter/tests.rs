@@ -268,6 +268,10 @@ fn enabled_features_are_read_from_the_vulkan_1_x_and_extension_structures() {
         vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(true);
     let mut swapchain =
         vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default().swapchain_maintenance1(true);
+    let mut reorder = super::ray_tracing_invocation_reorder::FeaturesEXT {
+        ray_tracing_invocation_reorder: vk::TRUE,
+        ..Default::default()
+    };
     let core = vk::PhysicalDeviceFeatures::default()
         .image_cube_array(true)
         .multi_draw_indirect(true);
@@ -282,10 +286,24 @@ fn enabled_features_are_read_from_the_vulkan_1_x_and_extension_structures() {
                 base(&mut vulkan13),
                 base(&mut robustness2),
                 base(&mut swapchain),
+                base(&mut reorder),
             ],
         )
     };
 
+    assert_eq!(
+        <super::ray_tracing_invocation_reorder::FeaturesEXT as vk::TaggedStructure>::STRUCTURE_TYPE
+            .as_raw(),
+        1_000_581_000,
+        "VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_INVOCATION_REORDER_FEATURES_EXT"
+    );
+    assert_eq!(
+        features
+            .ray_tracing_invocation_reorder
+            .unwrap()
+            .ray_tracing_invocation_reorder,
+        vk::TRUE
+    );
     assert_eq!(features.core.image_cube_array, vk::TRUE);
     assert_eq!(features.core.multi_draw_indirect, vk::TRUE);
     assert_eq!(features.core.robust_buffer_access, vk::FALSE);
@@ -1646,6 +1664,7 @@ fn offers_everything(
         shader_draw_parameters: Some(Default::default()),
         swapchain_maintenance1: None,
         shader_subgroup_extended_types: Some(Default::default()),
+        ray_tracing_invocation_reorder: Some(Default::default()),
         ..PhysicalDeviceFeatures::default()
     };
     for (_, members) in members(&mut offered) {
